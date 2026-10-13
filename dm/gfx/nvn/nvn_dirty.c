@@ -12,7 +12,12 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __ANDROID__
+#include "../../android/nvn_platform_clock.h"
+#include <errno.h>
+#else
 #include <mach/mach_time.h>
+#endif
 #include <sched.h>
 
 // 页状态与 mprotect 的次序（改保护的一方先把状态改成 BUSY，mprotect 落地后才改成终态；别的线程见 BUSY 就等）：
@@ -46,9 +51,28 @@ void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_liv
 static _Atomic int g_overflow_logged;
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // 建池 / 销池（客体线程，可能并发）互斥选槽；缺页处理路径不碰它 | Pool creation / destruction (guest threads, possibly concurrent) pick slots under a mutex; the page-fault handling path does not touch it
 static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // 本模块的 mprotect：调用次数、覆盖页数、耗时（mach 时基，缺页路径里也安全） | This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
+static uintptr_t address_of(const void *p) {
+#ifdef __ANDROID__
+    /* Bionic heap pointers may carry a top-byte tag. Linux signal si_addr and
+     * page-protection bookkeeping describe the untagged virtual address. */
+    return (uintptr_t)p & UINT64_C(0x00ffffffffffffff);
+#else
+    return (uintptr_t)p;
+#endif
+}
 static void mp(uintptr_t a, size_t len, int prot) {
+#ifdef __ANDROID__
+    uint64_t t=dm_android_nvn_clock_ns();
+    if(mprotect((void *)a,len,prot)) {
+        /* This path can run in a signal handler: no stdio/allocator/locks. */
+        static const char failure[]="[nvn-android] fatal dirty-page mprotect failure\n";
+        (void)write(STDERR_FILENO,failure,sizeof(failure)-1);_Exit(139);
+    }
+    atomic_fetch_add(&g_mp_ticks,dm_android_nvn_clock_ns()-t);atomic_fetch_add(&g_mp_calls,1);atomic_fetch_add(&g_mp_pages,len>>g_shift);
+#else
     uint64_t t = mach_absolute_time(); mprotect((void *)a, len, prot);
     atomic_fetch_add(&g_mp_ticks, mach_absolute_time() - t); atomic_fetch_add(&g_mp_calls, 1); atomic_fetch_add(&g_mp_pages, len >> g_shift);
+#endif
 }
 
 static mach_timebase_info_data_t g_tb;   // 首次登记池时取好（缺页路径里只做乘除） | Obtained when a pool is first registered (the fault path only multiplies and divides)
@@ -79,16 +103,17 @@ static void unprotect_page(range_t *r, uintptr_t p) {   // 调用方已把状态
 }
 static int on_fault(void *addr, int is_write, void *uc) {
     (void)uc;
-    range_t *r = is_write ? find((uintptr_t)addr) : NULL;
+    uintptr_t address=address_of(addr);
+    range_t *r = is_write ? find(address) : NULL;
     if (!r) return 0;
-    uintptr_t p = ((uintptr_t)addr - r->base) >> g_shift;
+    uintptr_t p = (address - r->base) >> g_shift;
     uint8_t st = PG_PROT;
     if (atomic_compare_exchange_strong(&r->state[p], &st, PG_BUSY)) { unprotect_page(r, p); atomic_fetch_add(&g_faults, 1); return 1; }
     if (st == PG_BUSY) return busy_wait(r, p);   // 别的线程正在改这页的保护：等它改完重执行（改成了只读就再缺页一次、走上面那一支） | Another thread is changing this page's protection: wait for it to finish and re-execute (if it became read-only, it faults once more and takes the branch above)
     return atomic_load(&r->gen[p]) != 0;   // 刚被别的线程解掉（本次缺页发生在解之前）：重执行；从未保护过的页不是我们的 | Just unprotected by another thread (this fault happened before the unprotect): re-execute; pages that were never protected are not ours
 }
 static void prep_write(void *addr, size_t len) {
-    uintptr_t a = (uintptr_t)addr, e = a + len;
+    uintptr_t a = address_of(addr), e = a + len;
     while (len && a < e) {
         range_t *r = find(a);
         if (!r) { a = (a + g_pg) & ~(g_pg - 1); continue; }
@@ -102,9 +127,16 @@ static void prep_write(void *addr, size_t len) {
     }
 }
 
+static void dirty_initialize(void) {
+    g_pg=(uintptr_t)getpagesize();g_shift=__builtin_ctzl(g_pg);dm_fault_hook_register(on_fault);dm_guest_write_prep_register(prep_write);
+}
 void nvn_dirty_add_range(const void *mem, size_t size) {
-    static int inited;
-    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
+    static pthread_once_t once=PTHREAD_ONCE_INIT;
+    if (pthread_once(&once, dirty_initialize)) die("dirty tracker initialization failed");
+#ifndef __ANDROID__
+    static int timebase_inited;
+    if (!timebase_inited) { timebase_inited = 1; mach_timebase_info(&g_tb); }
+#endif
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);
@@ -120,7 +152,9 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     }
     { int lv = atomic_fetch_add(&g_live, 1) + 1, pk = atomic_load(&g_live_peak); while (lv > pk && !atomic_compare_exchange_weak(&g_live_peak, &pk, lv)) {} }
     range_t *r = &g_r[slot];
-    uintptr_t base = (uintptr_t)mem & ~(g_pg - 1), end = ((uintptr_t)mem + size + g_pg - 1) & ~(g_pg - 1);
+    uintptr_t address=address_of(mem);
+    if(!mem || !size || size>UINTPTR_MAX-address-(g_pg-1))die("dirty tracker range overflow");
+    uintptr_t base = address & ~(g_pg - 1), end = (address + size + g_pg - 1) & ~(g_pg - 1);
     size_t np = (end - base) >> g_shift;
     _Atomic uint8_t *state = r->state;
     _Atomic uint64_t *gen = r->gen;
@@ -142,19 +176,19 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
 // Pool destruction: first restore still-protected pages to writable (the pool memory may be reused for something else once returned to the game), then mark invalid
 void nvn_dirty_remove_range(const void *mem) {
     pthread_mutex_lock(&g_slot_mu);
-    range_t *r = find((uintptr_t)mem);
+    range_t *r = find(address_of(mem));
     if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }
     pthread_mutex_unlock(&g_slot_mu);
 }
 int nvn_dirty_tracked(const void *addr, size_t len) {
-    range_t *r = find((uintptr_t)addr); return r && (uintptr_t)addr + len <= r->end;
+    uintptr_t a=address_of(addr);range_t *r = find(a); return r && len<=r->end-a;
 }
 // 设只读：先把页标成 BUSY，mprotect 落地后才标 PROT（次序与不变式见文件头的状态说明）
 // Set read-only: mark the page BUSY first, and mark it PROT only after mprotect has landed (for the order and the invariant see the state notes at the top of the file)
 void nvn_dirty_protect(const void *addr, size_t len) {
     if (!len || !nvn_dirty_tracked(addr, len)) return;
-    range_t *r = find((uintptr_t)addr);
-    uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
+    range_t *r = find(address_of(addr));
+    uintptr_t a = address_of(addr), p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
     // 连续置成 PROT 的页合成一次 mprotect（逐页调用在首传大贴图时一帧上千次；选角页启动帧 5：4888 次）。
     // 已是 PROT / BUSY 的页断开连续段：不重复保护，也不碰别的线程正在改的页
     // Consecutive pages set to PROT are merged into one mprotect (per-page calls ran to over a thousand per frame when large textures were first uploaded; character select, startup frame 5: 4888 calls).
@@ -171,8 +205,8 @@ uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) {
     if (!len) return 0;
     if (!nvn_dirty_tracked(addr, len)) return 1;   // 未跟踪时保守视为脏，宁可多传也不显示旧内容 | When untracked, conservatively treat as dirty: better to upload more than to show stale content
-    range_t *r = find((uintptr_t)addr);
-    uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
+    range_t *r = find(address_of(addr));
+    uintptr_t a = address_of(addr), p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // 上传前最后一次写的代号 ≤ 戳；之后的写必 > 戳 | The generation of the last write before upload is <= the stamp; any later write must be > the stamp
     return 0;
 }
@@ -183,6 +217,10 @@ void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
 }
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps) { *faults = atomic_load(&g_faults); *preps = atomic_load(&g_preps); }
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {
+#ifdef __ANDROID__
+    *calls=atomic_load(&g_mp_calls);*pages=atomic_load(&g_mp_pages);*ns=atomic_load(&g_mp_ticks);
+#else
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     *calls = atomic_load(&g_mp_calls); *pages = atomic_load(&g_mp_pages); *ns = atomic_load(&g_mp_ticks) * tb.numer / tb.denom;
+#endif
 }
