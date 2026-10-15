@@ -1,12 +1,35 @@
 # D2R Mobile
 
-**An open-source iOS / macOS compatibility layer for Diablo II: Resurrected with the Reign of the Warlock expansion.** It brings the Nintendo Switch release you bought, expansion included, to iPhone, iPad and Mac in full: the original game code runs natively, every control is rebuilt for touch, the frame rate holds at 60 fps, and you are in a game one second after the main menu. There is now a native macOS version as well (first version): on an Apple silicon Mac it starts on double-click and works with keyboard, mouse and gamepad. Apple TV 4K (3rd generation, A15) has a community port (developer preview) that has reached the character-selection screen only on its author's device; see the device table below.
+**An open-source compatibility layer for Diablo II: Resurrected with the Reign of the Warlock expansion, with iOS support and an experimental Android port.** On iPhone and iPad, it brings the Nintendo Switch release you bought, expansion included, to mobile in full: the original game code runs natively, every control is rebuilt for touch, the frame rate holds at 60 fps, and you are in a game one second after the main menu. Android progress and its separate validation limits are described below.
 
-This is not a tech demo that "sort of runs". It is a mobile version polished for daily play, from your first character all the way through the endgame.
+The iOS version is polished for daily play, from your first character all the way through the endgame. Android is still under development.
 
-Platforms: iPhone / iPad (iOS 26 and later; iOS 18 – 25 with the older-API build) · Mac (Apple silicon, macOS 26 or later; macOS 15 – 25 with the older-API build) · Apple TV 4K (3rd generation, A15; community port, developer preview) · Game version: Switch release with Reign of the Warlock, 1.0.34.0 (corresponds to PC version 3.3.94012) · English / 中文 · License: MIT · **Bring your own game files**
+Platforms: iPhone / iPad (iOS 26 and later); Android (experimental, arm64-v8a, API 29+ with Vulkan) · Game version: Switch release with Reign of the Warlock, 3.3.94012 · English / 中文 · License: MIT · **Bring your own game files**
 
 中文: [README.zh-CN.md](README.zh-CN.md)
+
+## Android support — experimental
+
+As of **2026-10-15**, this fork runs the original game on a physical Android device through a native ARM64 host and a Vulkan implementation of the game's NVN graphics interface. It reaches character selection and town, with touch controls, inventory and options, basic melee combat, an Act I camp-to-wilderness round trip, and save/exit followed by a cold restart verified on device.
+
+| Tested configuration | Observed performance |
+|---|---|
+| ROD-W09, Mali-G610 MC6, render scale 1.0, one saved Paladin at character selection | **24.08 FPS** over 1,200 frames |
+| Same device and scale, standing in town after loading | **28.56 FPS** over 900 frames |
+
+These are scene-specific observations, not a sustained or cross-device guarantee. The **30 FPS character-selection target is still unmet**. Later low-battery samples drifted down to 21–22 FPS and are not used to claim a code regression or improvement. Long thermal runs and power consumption remain unverified.
+
+Work implemented in this fork:
+
+- [Android host and app](dm/android/): native game loading, platform services, file/save access, AAudio integration, touch input and an Android activity. The native build targets Android API 29+ / arm64-v8a; this does not establish compatibility with every device meeting that minimum.
+- [Vulkan renderer](dm/gfx/nvn/nvn_vk.c): precise resource synchronization, early chunk submissions, asynchronous completion, cached writeback staging, per-mip image layouts for disjoint sampling, shader-control caching, and optional detailed profiling.
+- Validation of the committed optimization baseline includes **16 GPU fixtures** and the gameplay smoke checks above. Dynamic-uniform descriptors were tested and reverted because their FPS benefit did not reproduce. The latest profiling changes build successfully; combined pass timing and chunk submission still require device regression.
+
+**Remaining work:** broader GPU/device coverage, dungeon/act/waypoint transitions, larger fights and skill effects, controlled 30-minute thermal testing, and further performance optimization. iOS feature parity has not been established.
+
+**Build status:** Android source and its [CMake entry point](dm/android/CMakeLists.txt) are checked in. The current APK packaging, game-data preparation and device-regression scripts live in a separate development workspace and are not included here, so a fresh clone is **not yet a complete Android APK build/install workflow**. The iOS setup and IPA instructions below do not build an Android APK. You must supply your own game files; no game assets, shaders or saves are provided by this repository.
+
+The screenshots, 60 FPS claims, feature descriptions and installation instructions below describe the **iOS version**, unless explicitly labeled otherwise.
 
 <p align="center">
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/hero_en.jpg" width="100%" alt="The game filling the whole edge-to-edge screen of an iPhone: Harrogath on Hell, with the red portal to the Greater Rift">
@@ -73,7 +96,7 @@ Measured on a real device (iPhone 17 Pro Max):
 
 The install package is only a little over 100 MB. The game resources (about 5.6 GB) are placed on the phone separately, and updating the app touches neither your saves nor the resources.
 
-Why it is this fast: the program executes natively, and not a single instruction goes through emulation; graphics go straight to Metal; every shader is translated offline and compiled ahead of time, so nothing is compiled when you enter a new scene. Older chips (A16 and earlier, such as the iPhone 14 family and iPhone 15) do not support the game's original compressed texture format; they need an extra texture pack made from your own game files, and then run at full frame rate too — see [docs/LEGACY_DEVICES.md](docs/LEGACY_DEVICES.md).
+Why it is this fast: the program executes natively, and not a single instruction goes through emulation; graphics go straight to Metal; every shader is translated offline and compiled ahead of time, so nothing is compiled when you enter a new scene. Older chips such as the A16 do not support the game's original compressed texture format, so we built a supplementary texture pack for them, and they run at full frame rate too.
 
 ## Redesigned for fingers
 
@@ -167,7 +190,7 @@ The whole game switches between English and Chinese under Options → Custom; af
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/rift_panel_zh.jpg" width="40%" alt="The same Greater Rift panel in Chinese">
 </p>
 
-## How it works
+## How the iOS version works
 
 ```mermaid
 flowchart LR
@@ -189,7 +212,7 @@ flowchart LR
 
 **Why you can trust it:** the stability is not luck. The test and verification tooling is part of the project — unit tests for the host and graphics layers, an equivalence check for every rewritten instruction, scripted walkthrough regression for the touch interface, and on-device smoke tests. Start with `make -C dm/host/tests run`, `make -C dm/gfx/tests run` and `dm/verify/regress.sh` (run them inside the Python environment prepared in step 2 below; `regress.sh` also needs `brew install llvm`). How to contribute is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Which devices are supported
+## Getting started on iOS
 
 Minimum: **an A14 / M1 chip or later** — the graphics layer needs Metal 3, which Apple supports from A14 / M1 on (see Apple's [Metal support on Apple devices](https://support.apple.com/102894) and [Metal Feature Set Tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf)).
 
@@ -250,39 +273,25 @@ The Apple account used for signing: a paid developer account gives you everythin
 
    ```
    cp dm/ios/local.env.example dm/ios/local.env     # set DM_TEAM_ID and DM_BUNDLE_ID; with a free Apple ID also set DM_FREE_ACCOUNT=1 and DM_IOS_UDID, and keep the phone connected while building
-   cd dm/ios && ./run.sh build    # targets both iPhone and iPad by default; for iPhone only: DM_DEVICE_FAMILY=1 ./run.sh build
+   cd dm/ios && DM_DEVICE_FAMILY=1,2 ./run.sh build    # 1,2 = build for both iPhone and iPad; leave it out for iPhone only
    ```
 
 The first time you open the app on your phone, it asks for the "game resource folder" — the 18 resource archives from your game files. Where to put them is in the section "The "game resource folder" that goes on the phone" of [docs/GAME_FILES.md](docs/GAME_FILES.md).
 
 `./setup.sh check` is a health check: it reports the state of this computer, the tools, the game files and the signing configuration item by item, and for everything missing it says where to get it and which command to run next; it changes nothing. If what you have is a whole game package (`.xci` / `.nsp`), `./setup.sh <game package> <prod.keys>` first extracts the game files into place and then carries on (install hactool first). Run `./setup.sh` again after every update to a new commit: it rebuilds the patched binaries and the shader library for the current sources (steps that are already up to date are skipped). It also rewrites three files in the repository that change with your local tool fingerprints (`dm/gfx/tools/dmsh_chain.lock`, `dm/gfx/nvn/dmsh_chain.h`, `dm/gfx/nvn/c1_full.tsv`); that is expected, do not commit them.
 
-### Playing directly on a Mac
-
-After the same `./setup.sh`, one more command builds a native macOS App that starts on double-click and works with keyboard, mouse and gamepad, with no developer account:
-
-```bash
-source ~/dm-work/build/cache/dm/venv/bin/activate
-dm/tools/mac_app.sh                  # macOS 26 or later: produces ~/dm-work/out/macapp/D2R Mobile.app
-DM_MAC_M3=1 dm/tools/mac_app.sh      # macOS 15 – 25: produces D2R Mobile M3.app
-```
-
-The interface is the original's gamepad interface. Keyboard: Space confirms, Esc goes back, Return, the `=` key opens the menu / a new character, W A S D moves, and every other gamepad button has a key. Mouse: clicking a monster, NPC or object walks over and interacts, and the skill slots, potion cells and key hints at the bottom, buttons and tabs in panels, the class figures when creating a character and the minimap can all be clicked; clicking empty ground walks there and holding keeps walking, clicking a monster attacks it, and items take double clicks and drags. With a keyboard, the prompts on screen show keyboard keys. Saves stay on this Mac (an App you build yourself has no iCloud sync) and can be imported by hand from an iPhone / iPad. The key table, how to create a character, what the mouse can do, the import steps and the known shortcomings are in [docs/MAC.md](docs/MAC.md). Keyboard and a physical gamepad have not been operated by a person yet — if you try it, please tell us how it went.
-
 ### Without a Mac: the shell plus the packaging tool
 
-Download our prebuilt "shell" package (`D2RMobile-shell-build-input.zip`; `D2RMobile-shell-ios18-build-input.zip` for iOS 18 – 25), which contains no game content, from this repository's [Releases page](https://github.com/jhaizhou-ops/d2r-mobile/releases), add your own game files, make the install package on Windows or Linux, then sign and install it with a sideloading tool. The shell is build input, not an app to install (installed as is, it only shows a dialog and does not start the game); when you move to a new release, make the install package again with the new shell. On this route only, because the computer making the package has no Apple shader compiler, the **first launch** on the phone spends about 7 minutes compiling shaders (once, with a progress bar); a package built with Xcode has no such step. The steps, and how far each one has been verified, are in [docs/NO_XCODE.md](docs/NO_XCODE.md).
+Download our prebuilt "shell" package (`D2RMobile-shell.ipa`), which contains no game content, from this repository's [Releases page](https://github.com/jhaizhou-ops/d2r-mobile/releases), add your own game files, make the install package on Windows or Linux, then sign and install it with a sideloading tool. On this route only, because the computer making the package has no Apple shader compiler, the **first launch** on the phone spends about 7 minutes compiling shaders (once, with a progress bar); a package built with Xcode has no such step. The steps, and how far each one has been verified, are in [docs/NO_XCODE.md](docs/NO_XCODE.md).
 
 ## Known limitations
 
 | Item | Status |
 |---|---|
 | Online play | Out of scope; fully offline |
-| `.nsp` / `.xci` game packages | The tools only check the version of the main program and do not distinguish package formats; we ran the whole path with an `.xci` ourselves, and users have reported that `.nsp` packages work perfectly as well |
+| Game packages in `.nsp` format | Not verified (only `.xci` was tested) |
 | Signing and installing with a sideloading tool (Sideloadly, AltStore and the like) | Not verified; open an issue and tell us how it went |
 | Making the package on Linux | Not verified (verified on Windows and Mac) |
-| Devices that have not moved to iOS 26 / macOS 26 | Playable with the older-API build (minimum iOS 18.0 / macOS 15.0): [docs/OLDER_SYSTEMS.md](docs/OLDER_SYSTEMS.md); the full device table is under "Which devices are supported" above |
-| A16 and earlier devices (iPhone 14 family, iPhone 15 / 15 Plus and so on) | Playable; they need a Legacy Device Pack and an App built with it: [docs/LEGACY_DEVICES.md](docs/LEGACY_DEVICES.md). "One More Step for This Device" (older versions say "Device Not Supported") in the App means this step is missing |
 | The "one-line verdict" and "legacy Chinese name" entries in item notes | These two content tables are not shipped with the repository; you can supply your own, see `dm/ios/tools/annot/README.md` |
 
 ## Contributing and feedback
@@ -291,19 +300,7 @@ Download our prebuilt "shell" package (`D2RMobile-shell-build-input.zip`; `D2RMo
 - For the items marked not verified, tell us whether they worked or not. Either answer is valuable.
 - To change the code: get the test entry points above passing first. Every change has to pass the regression gates.
 
-**Taking it to other platforms:** this approach is not limited to iPhone and iPad. Apple silicon Macs already have a native version (see "Playing directly on a Mac" above), built from the same game program and the same host; Apple TV also has a community port (developer preview, see the device table). Android phones use the same class of processor, so the game program executes natively there as well, and the route is fully open: the only parts to replace are the sides of the host and the graphics layer that face the platform. The author has no Android phone at hand, and would love to see someone bring it to Android.
-
-**Taking it to other games:** someone has already tried other Switch games on the same host. The host has some behaviour that is on by default on iOS and was written for this one game; another game runs into these first, so turn them off or move them out before you start:
-
-- `dm/host/hle_oe.c`: the 3D render scale defaults to 0.75 on iOS, and `scale3d_tick` rewrites it at offsets inside this game's renderer — with another game that is a wild pointer.
-- `dm/host/hle_fs.c`: seeding the shared stash on first launch (`DM_STASH_SEED`) and the touch-layout default settings (`DM_TOUCH_DEFAULTS`) are on by default on iOS.
-- `dm/host/main.c`: the save-flush throttle patches a constant at a fixed address in the game program; `argv[0]` is hard-coded to `"D2R"`.
-- `dm/host/hle_time.c`: the fixed-time test switch recognises a fixed address in the game program.
-- `front_game_res` in `dm/host/front_mac.m`: the docked / handheld resolutions are hard-coded to 1600×900 / 1280×720.
-- `dm/host/dm_cloudsync.c`: character directories are recognised by `.d2s`.
-- `dm/host/dm_cursor.c` and `dm/host/dm_world.c`: the whole files are specific to this game.
-
-The cleaner arrangement is to move these defaults into per-game configuration and keep the host free of game-specific defaults; pull requests in that direction are welcome.
+**Taking it to other platforms:** the upstream project also runs its regression package on Apple silicon Macs. This fork implements the Android host and Vulkan backend described in [Android support](#android-support--experimental). Android device reports should include the device/GPU, render scale, tested scene, build revision and power/thermal conditions.
 
 ## Documentation by part
 
@@ -316,29 +313,11 @@ The cleaner arrangement is to move these defaults into per-game configuration an
 | [docs/GAME_FILES.md](docs/GAME_FILES.md) | Game files: which ones you need, how to get them from your own console, where to put them |
 | [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) | Dependencies and third-party licenses |
 | [docs/NO_XCODE.md](docs/NO_XCODE.md) | Building without Xcode and without a Mac |
-| [docs/MAC.md](docs/MAC.md) | Playing on a Mac: building the macOS App, key mapping, known gaps |
-| [docs/LEGACY_DEVICES.md](docs/LEGACY_DEVICES.md) | Older devices (A16 and earlier): making the texture pack and putting it on the phone |
-| [docs/OLDER_SYSTEMS.md](docs/OLDER_SYSTEMS.md) | Older systems (iOS 18 – 25, macOS 15 – 25): building the older-API version and combining it with the Legacy Device Pack |
-| [docs/qa-rift-pet-life.md](docs/qa-rift-pet-life.md) | Regression checklist for minion life in Greater Rifts (what has been run and what has not; additions welcome) |
 | [docs/DERIVED.md](docs/DERIVED.md) | Game-related material in this repository: what is here, what is not, and why |
 
 ## Legal
 
 **You must own the game, including the Reign of the Warlock expansion.** This is an independent, non-commercial project. It is not affiliated with, endorsed by, or sponsored by Blizzard Entertainment or Nintendo. Diablo and Blizzard Entertainment are trademarks of Blizzard Entertainment, Inc.; Nintendo Switch is a trademark of Nintendo. Use it only with a copy of the game that you own.
-
-## Acknowledgements
-
-This project stands on the open-source work below. Thank you to its authors and maintainers.
-
-- **Ryujinx** (Ryubing 1.3.2, MIT): `dm/third_party/ryujinx` bundles its shader translator unchanged (the Ryujinx.Graphics.Shader, Spv.Generator and Ryujinx.Common projects), which translates the Switch game's shaders to SPIR-V. During development we also ran the original game in a patched Ryujinx as the reference for comparing pictures and game state (see [dm/verify/README.md](dm/verify/README.md); the scripts that build and drive it are not in this repository).
-- **deko3d** (devkitPro, zlib): the texture layout size algorithm in `dm/gfx/nvn/nvn_tex.c` is ported from it.
-- **nvn.h** (h1k421, MIT): the graphics API declarations in `dm/gfx/nvn/include/nvn.h`.
-- **libdeflate** (Eric Biggers, MIT): decompressing game data.
-- **bcdec** (iOrange, MIT or Unlicense): decoding BC textures on devices that do not support the BC formats.
-- **FLIP** (NVIDIA, BSD 3-Clause): the image difference metric used in image-quality checks.
-- **Offline fix patch** (LFS Mod Offline Fix): the 7 rewrites in `dm/tools/patch_nso.py` that let the game run offline come from this community patch. We have no reliable record of where it was first published or who wrote it; if you know, please open an Issue.
-- Tools used to build and verify: SPIRV-Cross (SPIR-V to Metal Shading Language), XcodeGen, .NET, Capstone and Unicorn (disassembly and equivalence checks of the rewrites), Pillow, numpy, lz4, astcenc (the Legacy Device Pack), hactool (extracting files from a game package), libimobiledevice and LLVM. Versions and links are in [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md).
-- Community contributions: Joe Hu reported and diagnosed several Greater Rift issues and proposed a verification matrix; seedds found and diagnosed the render-target view format issue on another port (#36). Both are credited as co-authors on the corresponding commits.
 
 ## License
 
