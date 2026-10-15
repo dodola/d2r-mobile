@@ -21,6 +21,7 @@ typedef struct {
     VkCommandBuffer command_primary,chunk_cb[48];
     uint32_t chunk_alloc,chunk_index;
     uint64_t chunk_mark;
+    unsigned profile_segment; /* Captured at submit, before asynchronous completion. */
     VkDescriptorPool descriptors;
     VkFence gpu_fence;
     VkQueryPool occlusion,timestamps,pass_ts,chunk_ts;

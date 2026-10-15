@@ -656,11 +656,16 @@ static void query_reserve(VkQueryPool pool,uint32_t *reset_count,uint32_t first,
 static void pass_timing_collect(VkSubmission *sub) {
     if(!sub->pass_ts)return;
     if(sub->npt){uint64_t ticks[1024];CHECK(vkGetQueryPoolResults(G.device,sub->pass_ts,0,sub->npt*2,sizeof(ticks[0])*sub->npt*2,ticks,8,VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT));
-        for(uint32_t i=0;i<sub->npt;i++){uint64_t a=ticks[sub->pt[i].q0],b=ticks[sub->pt[i].q1];if(G.timestamp_bits<64){a&=(1ULL<<G.timestamp_bits)-1;b&=(1ULL<<G.timestamp_bits)-1;}
-            double ms=(double)(b-a)*G.properties.limits.timestampPeriod/1e6;uint32_t k=0;
+        uint64_t mask=G.timestamp_bits>=64?UINT64_MAX:((1ULL<<G.timestamp_bits)-1);
+        double total_ms=0,max_ms=0;
+        for(uint32_t i=0;i<sub->npt;i++){uint64_t a=ticks[sub->pt[i].q0],b=ticks[sub->pt[i].q1];
+            double ms=(double)((b-a)&mask)*G.properties.limits.timestampPeriod/1e6;uint32_t k=0;
+            total_ms+=ms;if(ms>max_ms)max_ms=ms;
             while(k<G.npacc&&!(G.pacc[k].key==sub->pt[i].key&&G.pacc[k].w==sub->pt[i].w&&G.pacc[k].h==sub->pt[i].h&&G.pacc[k].n==sub->pt[i].n))k++;
             if(k==G.npacc){if(k==128)continue;G.pacc[k]=(PassAcc){.key=sub->pt[i].key,.w=sub->pt[i].w,.h=sub->pt[i].h,.n=sub->pt[i].n};G.npacc++;}
-            G.pacc[k].ms+=ms;G.pacc[k].passes++;G.pacc[k].draws+=sub->pt[i].draws;}}
+            G.pacc[k].ms+=ms;G.pacc[k].passes++;G.pacc[k].draws+=sub->pt[i].draws;}
+        if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] PASS_QUERY_STATS passes=%u chunks=%u total_ms=%.6f max_ms=%.6f\n",sub->npt,sub->chunk_index+1,total_ms,max_ms);
+    }
     sub->npt=0;sub->pt_open=0; /* Query storage belongs to the completed context; keep it for reuse. */
 }
 enum { HZ_GV,HZ_GF,HZ_T,HZ_CS };
@@ -983,6 +988,12 @@ static CommitInfo commit_submit(void) {
     CHECK(vkQueueSubmit(G.queue,1,&si,fence));S.ticket=++G.fence;S.phase=SUBMISSION_INFLIGHT;
     uint64_t wait_cpu=dm_android_nvn_thread_cpu_ns();G.profile_commit_prepare_cpu_ns+=wait_cpu-prepare_cpu;G.profile_commit_calls++;
     CommitInfo ci={reports,candidate,traced,wait_cpu,dm_android_nvn_clock_ns()};
+    /* Snapshot recorder-owned counters before another context begins or present
+     * resets the frame's segment index. Async completion must not read them. */
+    S.profile_segment=G.seg_index<3?G.seg_index:3;
+    G.seg_record_ns[S.profile_segment]+=ci.wait_start-G.seg_begin_ns;
+    G.seg_draws[S.profile_segment]+=G.draws-S.chunk_mark;
+    G.seg_chunks[S.profile_segment]+=S.chunk_index+1;G.seg_index++;
     return ci;
 }
 uint64_t mtl_sub_commit(void) {
@@ -992,14 +1003,14 @@ uint64_t mtl_sub_commit(void) {
     pthread_mutex_unlock(&G.lock);return ticket;
 }
 static uint64_t commit_after_gpu(CommitInfo ci,uint64_t waited) {
-    uint64_t wait_start=ci.wait_start,wait_cpu=ci.wait_cpu;unsigned reports=ci.reports;int candidate=ci.candidate,traced=ci.traced;
-    if(S.chunk_ts&&S.nchunk_ts>=2){unsigned si=G.seg_index<3?G.seg_index:3;uint64_t ts[128];
+    uint64_t wait_cpu=ci.wait_cpu;unsigned reports=ci.reports;int candidate=ci.candidate,traced=ci.traced;
+    if(S.chunk_ts&&S.nchunk_ts>=2){unsigned si=S.profile_segment;uint64_t ts[128];
         if(vkGetQueryPoolResults(G.device,S.chunk_ts,0,S.nchunk_ts&~1u,sizeof ts,ts,8,VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT)==VK_SUCCESS){
             uint64_t mask=G.timestamp_bits>=64?~0ULL:((1ULL<<G.timestamp_bits)-1);double period=G.properties.limits.timestampPeriod;uint64_t busy=0,gap=0;
             if(G.profile_frames==30&&si==0)for(uint32_t i=0;i+1<(S.nchunk_ts&~1u);i+=2)fprintf(stderr,"[nvn-vulkan] CHUNK_TIME i=%u dur_us=%.0f gap_us=%.0f passes=%llu draws=%llu\n",i/2,(double)(((ts[i+1]-ts[i])&mask)*period/1000.0),i?(double)(((ts[i]-ts[i-1])&mask)*period/1000.0):0.0,(unsigned long long)(S.chunk_pass0[i+1]-S.chunk_pass0[i]),(unsigned long long)(S.chunk_draw0[i+1]-S.chunk_draw0[i]));
             for(uint32_t i=0;i+1<(S.nchunk_ts&~1u);i+=2){busy+=(ts[i+1]-ts[i])&mask;if(i>=2){uint64_t g=(ts[i]-ts[i-1])&mask;if(g<(1ULL<<40))gap+=g;}}
             G.gts_busy[si]+=(uint64_t)(busy*period);G.gts_gap[si]+=(uint64_t)(gap*period);G.gts_span[si]+=(uint64_t)(((ts[(S.nchunk_ts&~1u)-1]-ts[0])&mask)*period);G.gts_chunks[si]+=S.nchunk_ts/2;}}
-    {unsigned si=G.seg_index<3?G.seg_index:3;G.seg_record_ns[si]+=wait_start-G.seg_begin_ns;G.seg_wait_ns[si]+=waited;G.seg_draws[si]+=G.draws-S.chunk_mark;G.seg_chunks[si]+=S.chunk_index+1;G.seg_index++;}
+    G.seg_wait_ns[S.profile_segment]+=waited;
     submission_gpu_done(&S);
     uint64_t retire_cpu=dm_android_nvn_thread_cpu_ns();G.profile_commit_wait_cpu_ns+=retire_cpu-wait_cpu;
     G.profile_wait_ns+=waited;G.profile_submits++;
@@ -2161,7 +2172,10 @@ static void chunk_ts_write(int end) {
     vkCmdWriteTimestamp(S.command,end?VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,S.chunk_ts,S.nchunk_ts++);
 }
 static void sub_chunk_flush(void) {
-    if(G.pass_timing||S.in_pass||S.active_occlusion!=UINT32_MAX||G.draws-S.chunk_mark<(uint64_t)G.chunk_draws||S.chunk_index+1>=48)return;
+    /* Pass queries belong to the submission, not a command buffer. Fresh query
+     * prefixes are reset before first use and all chunks retire at the final
+     * fence; profiling therefore need not disable normal early submission. */
+    if(S.in_pass||S.active_occlusion!=UINT32_MAX||G.draws-S.chunk_mark<(uint64_t)G.chunk_draws||S.chunk_index+1>=48)return;
     chunk_ts_write(1);CHECK(vkEndCommandBuffer(S.command));
     VkSubmitInfo si={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&S.command};
     CHECK(vkQueueSubmit(G.queue,1,&si,VK_NULL_HANDLE));
