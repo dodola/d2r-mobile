@@ -7,6 +7,7 @@
 // (measured: the game writes streamed assets into texture storage that is still being sampled, without re-registering).
 // Signal handler constraint: the page-fault path uses only atomic operations and mprotect, no allocation, no locks.
 #include "nvn_dirty.h"
+#include "nvn_dirty_summary.h"
 #include "../../host/dm.h"
 #include <stdatomic.h>
 #include <pthread.h>
@@ -39,13 +40,15 @@ enum { BUSY_WAIT_MS = 2000 };
 // 跟踪区间 = 各内存池（MemoryPoolInitialize 登记）。池销毁后复用 live=0 的槽，信号处理里无锁扫描。
 // Tracked ranges = the memory pools (registered by MemoryPoolInitialize). After a pool is destroyed its live=0 slot is reused; the signal handler scans without locks.
 #define MAX_RANGE 4096   // 原为 256：内存池多于它时超出的池不跟踪，里面的贴图每次取用都当成脏的重传（暗黑实测峰值见内存读数行的「内存池」；塞尔达约 300 个，踩过）。扫描只到已用的槽数，容量大不增加开销 | was 256: with more memory pools than that the excess pools are untracked and their textures are treated as dirty and re-uploaded on every use (for Diablo's measured peak see "memory pools" in the memory readout line; Zelda has about 300 and hit this). The scan only covers slots in use, so a larger capacity costs nothing
-typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; } range_t;
+typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; NvnDirtySummary summary; } range_t;
 static range_t g_r[MAX_RANGE];
 static _Atomic int g_nr;
 static uintptr_t g_pg, g_shift;
 static _Atomic uint64_t g_now = 1;
 static _Atomic uint64_t g_faults, g_preps;
 static _Atomic uint64_t g_adds_total;
+static _Atomic int g_summary_enabled,g_query_recording;
+static _Atomic uint64_t g_query_calls,g_query_pages,g_query_blocks,g_query_skipped,g_query_fast;
 static _Atomic int g_live, g_live_peak;   // 在册的池数与峰值（内存读数行用） | number of registered pools and peak (for the memory readout line)
 void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_live); *peak = atomic_load(&g_live_peak); *cap = MAX_RANGE; }
 static _Atomic int g_overflow_logged;
@@ -66,7 +69,7 @@ static void mp(uintptr_t a, size_t len, int prot) {
     if(mprotect((void *)a,len,prot)) {
         /* This path can run in a signal handler: no stdio/allocator/locks. */
         static const char failure[]="[nvn-android] fatal dirty-page mprotect failure\n";
-        (void)write(STDERR_FILENO,failure,sizeof(failure)-1);_Exit(139);
+        ssize_t written=write(STDERR_FILENO,failure,sizeof(failure)-1);(void)written;_Exit(139);
     }
     atomic_fetch_add(&g_mp_ticks,dm_android_nvn_clock_ns()-t);atomic_fetch_add(&g_mp_calls,1);atomic_fetch_add(&g_mp_pages,len>>g_shift);
 #else
@@ -96,9 +99,14 @@ static range_t *find(uintptr_t a) {
     for (int i = 0; i < n; i++) if (atomic_load_explicit(&g_r[i].live, memory_order_acquire) && a >= g_r[i].base && a < g_r[i].end) return &g_r[i];
     return NULL;
 }
+static void store_generation(range_t *r,uintptr_t page) {
+    uint64_t generation=atomic_fetch_add(&g_now,1)+1;
+    if(g_summary_enabled)nvn_dirty_summary_store(&r->summary,r->gen,page,generation);
+    else atomic_store(&r->gen[page],generation);
+}
 static void unprotect_page(range_t *r, uintptr_t p) {   // 调用方已把状态从 PROT 改成 BUSY | The caller has already changed the state from PROT to BUSY
     mp(r->base + (p << g_shift), g_pg, PROT_READ | PROT_WRITE);
-    atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
+    store_generation(r,p);
     atomic_store(&r->state[p], PG_NONE);
 }
 static int on_fault(void *addr, int is_write, void *uc) {
@@ -118,16 +126,37 @@ static void prep_write(void *addr, size_t len) {
         range_t *r = find(a);
         if (!r) { a = (a + g_pg) & ~(g_pg - 1); continue; }
         uintptr_t stop = e < r->end ? e : r->end;
-        for (uintptr_t p = (a - r->base) >> g_shift, q = (stop - 1 - r->base) >> g_shift; p <= q; p++) {
-            for (;;) { uint8_t st = PG_PROT;   // 见 BUSY 等完要重看：对方可能是在设只读，等完这页是 PROT，照样得解 | After waiting out BUSY, look again: the other side may have been setting read-only, in which case the page is PROT after the wait and still has to be unprotected
-                if (atomic_compare_exchange_strong(&r->state[p], &st, PG_BUSY)) { unprotect_page(r, p); atomic_fetch_add(&g_preps, 1); break; }
-                if (st != PG_BUSY || !busy_wait(r, p)) break; }
+        uintptr_t p = (a - r->base) >> g_shift, q = (stop - 1 - r->base) >> g_shift;
+        while (p <= q) {
+            uint8_t st = PG_PROT;
+            if (atomic_compare_exchange_strong(&r->state[p], &st, PG_BUSY)) {
+                uintptr_t first = p, after = p + 1;
+                while (after <= q) {
+                    st = PG_PROT;
+                    if (!atomic_compare_exchange_strong(&r->state[after], &st, PG_BUSY)) break;
+                    after++;
+                }
+                size_t count = after - first;
+                mp(r->base + (first << g_shift), count << g_shift, PROT_READ | PROT_WRITE);
+                for (uintptr_t page = first; page < after; page++) {
+                    store_generation(r, page);
+                    atomic_store(&r->state[page], PG_NONE);
+                }
+                atomic_fetch_add(&g_preps, count);
+                p = after;
+            } else {
+                if (st == PG_BUSY) busy_wait(r, p);
+                p++;
+            }
+        }
         }
         a = stop;
     }
 }
 
 static void dirty_initialize(void) {
+    const char *summary=getenv("DM_DIRTY_SUMMARY"),*stats=getenv("DM_DIRTY_QUERY_STATS");
+    g_summary_enabled=summary&&atoi(summary)!=0;g_query_recording=stats&&atoi(stats)!=0;
     g_pg=(uintptr_t)getpagesize();g_shift=__builtin_ctzl(g_pg);dm_fault_hook_register(on_fault);dm_guest_write_prep_register(prep_write);
 }
 void nvn_dirty_add_range(const void *mem, size_t size) {
@@ -168,6 +197,15 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
         memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen);
     }
     r->base = base; r->end = end; r->state = state; r->gen = gen;
+    if(g_summary_enabled){
+        size_t blocks=(np+NVN_DIRTY_BLOCK_PAGES-1)>>NVN_DIRTY_BLOCK_SHIFT;
+        if(r->summary.capacity<blocks){
+            _Atomic uint64_t *next=calloc(blocks,sizeof(*next));if(!next)die("dirty summary allocation");
+            /* Like gen/state, old storage remains available to stale signal readers. */
+            r->summary.blocks=next;r->summary.capacity=blocks;
+        }else for(size_t block=0;block<blocks;block++)atomic_store(&r->summary.blocks[block],0);
+        atomic_store(&r->summary.newest,0);
+    }
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
     pthread_mutex_unlock(&g_slot_mu);
@@ -204,11 +242,45 @@ void nvn_dirty_protect(const void *addr, size_t len) {
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) {
     if (!len) return 0;
-    if (!nvn_dirty_tracked(addr, len)) return 1;   // 未跟踪时保守视为脏，宁可多传也不显示旧内容 | When untracked, conservatively treat as dirty: better to upload more than to show stale content
+    int recording=atomic_load(&g_query_recording);
+    if(recording)atomic_fetch_add(&g_query_calls,1);
     range_t *r = find(address_of(addr));
+    if(!r || len>r->end-address_of(addr))return 1; /* Untracked/partly tracked stays conservatively dirty. */
     uintptr_t a = address_of(addr), p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
-    for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // 上传前最后一次写的代号 ≤ 戳；之后的写必 > 戳 | The generation of the last write before upload is <= the stamp; any later write must be > the stamp
-    return 0;
+    NvnDirtyQueryStats stats={0};int dirty=0;
+    if(q-p>=4&&atomic_load(&g_summary_enabled))dirty=nvn_dirty_summary_since(&r->summary,r->gen,p,q,stamp,recording?&stats:NULL);
+    else for(uintptr_t i=p;i<=q;i++){
+        if(recording)stats.page_reads++;
+        if(atomic_load(&r->gen[i])>stamp){dirty=1;break;}
+    }
+    if(recording){
+        atomic_fetch_add(&g_query_pages,stats.page_reads);atomic_fetch_add(&g_query_blocks,stats.block_reads);
+        atomic_fetch_add(&g_query_skipped,stats.skipped_pages);atomic_fetch_add(&g_query_fast,stats.range_fast_paths);
+    }
+    return dirty;
+}
+int nvn_dirty_next_range(const void *addr,size_t len,uint64_t stamp,size_t *cursor,size_t *offset,size_t *range_len) {
+    if(!len || !cursor || !offset || !range_len || *cursor>=len)return 0;
+    size_t from=*cursor;
+    if(!nvn_dirty_tracked(addr,len)) {
+        *offset=from;*range_len=len-from;*cursor=len;return 1;
+    }
+    uintptr_t a=address_of(addr),request=a+from,end=a+len;
+    range_t *r=find(a);
+    if(!r)return 0;
+    uintptr_t first=(request-r->base)>>g_shift,last=(end-1-r->base)>>g_shift;
+    uintptr_t dirty_first=0,dirty_after=0;int active=0;
+    for(uintptr_t p=first;p<=last;p++) {
+        if(atomic_load(&r->gen[p])>stamp) {
+            if(!active){dirty_first=p;active=1;}
+            dirty_after=p+1;
+        } else if(active) break;
+    }
+    if(!active){*cursor=len;return 0;}
+    uintptr_t begin=r->base+(dirty_first<<g_shift),finish=r->base+(dirty_after<<g_shift);
+    if(begin<request)begin=request;
+    if(finish>end)finish=end;
+    *offset=begin-a;*range_len=finish-begin;*cursor=*offset+*range_len;return 1;
 }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;
@@ -216,6 +288,10 @@ void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     *live = active; *used_slots = n; *adds_total = atomic_load(&g_adds_total);
 }
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps) { *faults = atomic_load(&g_faults); *preps = atomic_load(&g_preps); }
+void nvn_dirty_query_stats(NvnDirtyQueryStats *stats,int *summary_enabled,int *recording) {
+    *stats=(NvnDirtyQueryStats){atomic_load(&g_query_calls),atomic_load(&g_query_pages),atomic_load(&g_query_blocks),atomic_load(&g_query_skipped),atomic_load(&g_query_fast)};
+    *summary_enabled=g_summary_enabled;*recording=g_query_recording;
+}
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {
 #ifdef __ANDROID__
     *calls=atomic_load(&g_mp_calls);*pages=atomic_load(&g_mp_pages);*ns=atomic_load(&g_mp_ticks);

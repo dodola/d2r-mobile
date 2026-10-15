@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+#include <ctype.h>
+#include <math.h>
 
 struct dm_flags g_flag;
 uint64_t g_t0_ns;
@@ -39,6 +41,31 @@ static pthread_mutex_t report_lock = PTHREAD_MUTEX_INITIALIZER;
 static char report_file[PATH_MAX], report_temp[PATH_MAX];
 static void path(char *out, size_t cap, const char *base, const char *leaf) {
     if (snprintf(out, cap, "%s/%s", base, leaf) >= (int)cap) die("Android private path too long");
+}
+/* A fixed scale is an explicit diagnostic experiment. An absent marker keeps
+ * the original 1.0 scale; reject truncated values, NaN/Inf, and extra tokens. */
+static int configure_render_scale(void) {
+    char marker[PATH_MAX], text[64], value[32];
+    path(marker,sizeof marker,port_root,"diagnostics/render-scale.txt");
+    unsetenv("DM_3D_SCALE");
+    FILE *f=fopen(marker,"r");
+    if (!f) return errno==ENOENT?0:errno;
+    size_t n=fread(text,1,sizeof text-1,f);
+    int error=ferror(f)?EIO:0;
+    int trailing=fgetc(f);
+    if (ferror(f)) error=EIO;
+    if (fclose(f) && !error) error=errno?errno:EIO;
+    if (error) return error;
+    if (trailing!=EOF || memchr(text,'\0',n)) return EINVAL;
+    text[n]='\0';
+    char *start=text, *end;
+    while (isspace((unsigned char)*start)) start++;
+    errno=0; float scale=strtof(start,&end);
+    if (end==start || errno==ERANGE || !isfinite(scale) || scale<0.70f || scale>1.0f) return EINVAL;
+    while (isspace((unsigned char)*end)) end++;
+    if (*end) return EINVAL;
+    snprintf(value,sizeof value,"%.9g",(double)scale);
+    return setenv("DM_3D_SCALE",value,1)?errno:0;
 }
 static void status_text(char *text,size_t capacity) {
     snprintf(text,capacity,"{\"phase\":\"%s\",\"sdk_ready\":%s,\"nnMain_entered\":%s,\"presented_frames\":%llu,\"returned\":%s}",phase,
@@ -139,12 +166,141 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if (!touch_route) return ENODEV;
     atomic_store(&input_route_ready,1);
     path(port_root,sizeof port_root,app_files,"d2r-mobile");
+    if ((rc=configure_render_scale())) { LOG("ANDROID_3D_SCALE_CONFIG_FAILED errno=%d expected finite 0.70..1.0",rc); return rc; }
     char driver_option[PATH_MAX];path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan");
     if(access(driver_option,F_OK)==0)setenv("DM_PRIVATE_VULKAN","turnip",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan-sysmem");
     if(access(driver_option,F_OK)==0){setenv("DM_PRIVATE_VULKAN","turnip",1);setenv("TU_DEBUG","sysmem",1);}
     path(driver_option,sizeof driver_option,port_root,"diagnostics/vulkan-validation");
     if(access(driver_option,F_OK)==0)setenv("DM_VULKAN_VALIDATION","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-pass-reuse");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_PASS_REUSE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-cpu-uniform-snapshot");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-pso-reuse");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_PSO_REUSE","1",1);
+    unsetenv("DM_PSO_LAST_CACHE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-pso-last-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_PSO_LAST_CACHE","1",1);
+    setenv("DM_WRITEBACK_PREPARE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-writeback-prepare");
+    if(access(driver_option,F_OK)==0)setenv("DM_WRITEBACK_PREPARE","0",1);
+    unsetenv("DM_WRITEBACK_COALESCE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/writeback-coalesce");
+    if(access(driver_option,F_OK)==0)setenv("DM_WRITEBACK_COALESCE","1",1);
+    unsetenv("DM_COMMAND_STATE_CACHE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/command-state-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_COMMAND_STATE_CACHE","1",1);
+    setenv("DM_DIRTY_SUMMARY","1",1);unsetenv("DM_DIRTY_QUERY_STATS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-dirty-summary");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIRTY_SUMMARY","0",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/dirty-query-stats");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIRTY_QUERY_STATS","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-driver-table-reuse");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_DRIVER_TABLE_REUSE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-temp-pool");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_TEMP_POOL","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-storage-bias");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_STORAGE_BIAS","1",1);
+    unsetenv("DM_DIAG_IMG_USAGE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-img-usage-1");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_IMG_USAGE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-img-usage-2");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_IMG_USAGE","2",1);
+    unsetenv("DM_BARRIER_PASS_ELIDE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/barrier-pass-elide");
+    if(access(driver_option,F_OK)==0)setenv("DM_BARRIER_PASS_ELIDE","1",1);
+    unsetenv("DM_DIAG_NO_PASS_DEPS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-no-pass-deps");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_NO_PASS_DEPS","1",1);
+    unsetenv("DM_DISABLE_PRECISE_SYNC");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-precise-sync");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_PRECISE_SYNC","1",1);
+    unsetenv("DM_HZ_DIAG");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/hz-diag.txt");
+    {FILE *hf=fopen(driver_option,"r");if(hf){char hv[8]={0};size_t hn=fread(hv,1,7,hf);fclose(hf);if(hn)setenv("DM_HZ_DIAG",hv,1);}}
+    unsetenv("DM_CHUNK_DRAWS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/chunk-draws.txt");
+    {FILE *cf=fopen(driver_option,"r");if(cf){char cv[12]={0};size_t cn=fread(cv,1,11,cf);fclose(cf);if(cn)setenv("DM_CHUNK_DRAWS",cv,1);}}
+    unsetenv("DM_PROFILE_DETAIL");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/profile-detail");
+    if(access(driver_option,F_OK)==0)setenv("DM_PROFILE_DETAIL","1",1);
+    unsetenv("DM_DIAG_SKIP_DRAWS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-skip-draws");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_SKIP_DRAWS","1",1);
+    unsetenv("DM_DIAG_SKIP_XFER");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/skip-xfer.txt");
+    {FILE *xf=fopen(driver_option,"r");if(xf){char xv[8]={0};size_t xn=fread(xv,1,7,xf);fclose(xf);if(xn)setenv("DM_DIAG_SKIP_XFER",xv,1);}}
+    unsetenv("DM_DISABLE_SETRT_SKIP");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-setrt-skip");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SETRT_SKIP","1",1);
+    unsetenv("DM_DISABLE_WB_STAGE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-wb-stage");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_WB_STAGE","1",1);
+    unsetenv("DM_DIAG_SKIP_CLASS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/skip-class.txt");
+    {FILE *kf=fopen(driver_option,"r");if(kf){char kv[8]={0};size_t kn=fread(kv,1,7,kf);fclose(kf);if(kn)setenv("DM_DIAG_SKIP_CLASS",kv,1);}}
+    unsetenv("DM_DIAG_SHAPE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-shape.txt");
+    {FILE *hf2=fopen(driver_option,"r");if(hf2){char hv2[8]={0};size_t hn2=fread(hv2,1,7,hf2);fclose(hf2);if(hn2)setenv("DM_DIAG_SHAPE",hv2,1);}}
+    unsetenv("DM_NARROW_ACCESS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/narrow-access");
+    if(access(driver_option,F_OK)==0)setenv("DM_NARROW_ACCESS","1",1);
+    unsetenv("DM_DISABLE_WAIT_ELISION");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-wait-elision");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_WAIT_ELISION","1",1);
+    unsetenv("DM_DISABLE_ASYNC_COMMIT");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-async-commit");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_ASYNC_COMMIT","1",1);
+    unsetenv("DM_CONFLICT_WAIT_ALL");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/conflict-wait-all");
+    if(access(driver_option,F_OK)==0)setenv("DM_CONFLICT_WAIT_ALL","1",1);
+    unsetenv("DM_DIAG_FIXED_DESC");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-fixed-desc");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_FIXED_DESC","1",1);
+    unsetenv("DM_DIAG_NO_OCCLUSION");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-no-occlusion");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_NO_OCCLUSION","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-query-batch");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_QUERY_BATCH","1",1);
+    setenv("DM_QUERY_RESET_RANGE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-query-reset-range");
+    if(access(driver_option,F_OK)==0)setenv("DM_QUERY_RESET_RANGE","0",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-desc-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_DESC_CACHE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-resource-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_RESOURCE_CACHE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-dirty-uploads");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_DIRTY_UPLOADS","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-control-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_CONTROL_CACHE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-loadstore-store");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_LOADSTORE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-loadstore-both");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_LOADSTORE","2",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-barrier-elision");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_BARRIER_ELISION","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-sample-copy-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SAMPLE_COPY_CACHE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/skip-ps.txt");
+    {FILE *sf=fopen(driver_option,"r");if(sf){char sk[17]={0};size_t n=fread(sk,1,16,sf);fclose(sf);if(n==16)setenv("DM_SKIP_PS",sk,1);}}
+    unsetenv("DM_EVENT_TRACE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/event-trace");
+    if(access(driver_option,F_OK)==0)setenv("DM_EVENT_TRACE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-timing");
+    if(access(driver_option,F_OK)==0)setenv("DM_PASS_TIMING","1",1);
+    /* Hint sessions are an explicit A/B experiment, off when the marker is absent. */
+    unsetenv("DM_PERFORMANCE_HINTS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/performance-hints");
+    if(access(driver_option,F_OK)==0)setenv("DM_PERFORMANCE_HINTS","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/capture-frames");
+    if(access(driver_option,F_OK)==0)setenv("DM_CAPTURE_FRAMES","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-barrier-cmd");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_BARRIER","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-barrier-soft");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_BARRIER","2",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/barrier-stats");
+    if(access(driver_option,F_OK)==0)setenv("DM_BARRIER_STATS","1",1);
     char logs[PATH_MAX], log[PATH_MAX], shaders[PATH_MAX];
     path(logs,sizeof logs,port_root,"diagnostics");
     setenv("DM_FRAME_DIR",logs,1);

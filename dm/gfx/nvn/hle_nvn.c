@@ -481,9 +481,10 @@ NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
     *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off)}; return 1;
 }
 NVN(nvnEventFinalize, void, NVNevent *e) { ((ev_t *)e)->magic = 0; }
-NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { return *((const ev_t *)e)->val; }
+static volatile unsigned g_cpu_event_gets,g_cpu_event_signals;
+NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { unsigned n=__sync_add_and_fetch(&g_cpu_event_gets,1);if(n<=20||n%2000==0)fprintf(stderr,"[nvn-event] CPU_GET addr=%p count=%u\n",(const void *)((const ev_t *)e)->val,n);return *((const ev_t *)e)->val; }
 static void ev_signal(const ev_t *e, int mode, uint32_t v) { if (mode == NVN_EVENT_SIGNAL_MODE_ADD) *e->val += v; else *e->val = v; }
-NVN(nvnEventSignal, void, NVNevent *e, NVNeventSignalMode m, uint32_t v) { ev_signal((const ev_t *)e, m, v); }
+NVN(nvnEventSignal, void, NVNevent *e, NVNeventSignalMode m, uint32_t v) { unsigned n=__sync_add_and_fetch(&g_cpu_event_signals,1);if(n<=20||n%2000==0)fprintf(stderr,"[nvn-event] CPU_SIGNAL addr=%p mode=%d value=%u count=%u\n",(const void *)((const ev_t *)e)->val,(int)m,v,n);ev_signal((const ev_t *)e, m, v); }
 
 // ---------- 队列 ----------
 // ---------- Queue ----------
@@ -614,11 +615,12 @@ NVN(nvnCommandBufferIsRecording, NVNboolean, const NVNcommandBuffer *c) { return
 NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
     for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
 }
+static int nvn_event_trace_enabled(void) { return getenv("DM_EVENT_TRACE") != NULL; }
 NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *c, const NVNevent *e, NVNeventSignalMode m, NVNeventSignalLocation loc, int flags, uint32_t v) {
-    (void)loc; (void)flags;
     uint8_t *p = cmd_alloc(CB(c), 24); put_hdr(p, OP_SIGNAL_EVENT, 24);
     const ev_t *ev = (const ev_t *)e; volatile uint32_t *val = ev->val; uint32_t mm = m;
     memcpy(p + 8, &val, 8); memcpy(p + 16, &mm, 4); memcpy(p + 20, &v, 4);
+    if (nvn_event_trace_enabled()) fprintf(stderr, "[nvn-event] SIGNAL_RECORD record=%p address=%p mode=%u location=%u flags=%#x value=%u\n", (void *)p, (void *)val, (unsigned)mm, (unsigned)loc, (unsigned)flags, v);
 }
 NVN(nvnCommandBufferResetCounter, void, NVNcommandBuffer *c, NVNcounterType t) {
     uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_RESET_COUNTER, 16); uint64_t tt = t; memcpy(p + 8, &tt, 8);
@@ -795,6 +797,7 @@ NVN(nvnCommandBufferWaitEvent, void, NVNcommandBuffer *c, const NVNevent *e, NVN
     if(!v || v->magic!=MAGIC('E','V','N','T') || !v->val || mode<0 || mode>1)die("CommandBufferWaitEvent invalid event/mode");
     uint64_t *r=rec(c,OP_WAIT_EVENT,16);r[0]=(uint64_t)(uintptr_t)v->val;
     ((uint32_t *)(r+1))[0]=mode;((uint32_t *)(r+1))[1]=value;
+    if(nvn_event_trace_enabled())fprintf(stderr,"[nvn-event] WAIT_RECORD record=%p address=%p mode=%u value=%u\n",(void *)((uint8_t *)r-sizeof(op_hdr)),(void *)v->val,(unsigned)mode,value);
 }
 #endif
 NVN(nvnCommandBufferSetBlendColor, void, NVNcommandBuffer *c, const float *v) { memcpy(REC(c, OP_BLEND_COLOR, p_blend_color)->rgba, v, 16); }

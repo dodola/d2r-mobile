@@ -5,6 +5,7 @@
 #include "nvn_platform_backend.h"
 static pthread_mutex_t android_suspend_mu=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t android_suspend_cv=PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t android_lifecycle_mu=PTHREAD_MUTEX_INITIALIZER;
 static int android_suspended,android_inflight;
 static _Atomic uint64_t android_nvn_frame;
 static void android_gfx_enter(void) {
@@ -17,18 +18,23 @@ static void android_gfx_leave(void) {
     pthread_cond_broadcast(&android_suspend_cv);pthread_mutex_unlock(&android_suspend_mu);
 }
 void dm_gfx_suspend(int on) {
+    pthread_mutex_lock(&android_lifecycle_mu);
+    /* Publish the new workload epoch before waking a resumed acquire caller.
+     * Hint service calls never hold android_suspend_mu. */
+    if(!on)dm_android_nvn_work_reset(1);
     pthread_mutex_lock(&android_suspend_mu);android_suspended=on!=0;
     if(on)while(android_inflight)pthread_cond_wait(&android_suspend_cv,&android_suspend_mu);
     else pthread_cond_broadcast(&android_suspend_cv);
-    pthread_mutex_unlock(&android_suspend_mu);if(on)mtl_drain();
+    pthread_mutex_unlock(&android_suspend_mu);if(on){dm_android_nvn_work_reset(0);mtl_drain();}
+    pthread_mutex_unlock(&android_lifecycle_mu);
 }
 uint64_t dm_nvn_frame_count(void) {return atomic_load(&android_nvn_frame);}
 NVN(nvnQueueSubmitCommands,void,NVNqueue *q,int n,const NVNcommandHandle *handles) {
     if(!q || n<0 || (n&&!handles))die("Android NVN submit parameters n=%d",n);
-    android_gfx_enter();dm_android_nvn_schedule_thread("submit");
+    android_gfx_enter();dm_android_nvn_schedule_thread("submit");dm_android_nvn_work_check_thread();
     ((queue_t *)q)->submits++;mtl_sub_begin();
     for(int i=0;i<n;i++)mtl_exec((const uint8_t *)(uintptr_t)handles[i]);
-    mtl_sub_commit();android_gfx_leave();
+    mtl_sub_commit_async();android_gfx_leave();
 }
 __attribute__((constructor)) static void android_nvn_register(void) {
     nvn_init_slots();
@@ -76,17 +82,18 @@ static uint64_t android_present_period(const win_t *w) {
 }
 NVN(nvnWindowAcquireTexture,NVNwindowAcquireTextureResult,NVNwindow *window,NVNsync *sync,int *index) {
     win_t *w=(void *)window;if(!index || w->ntex<1 || w->ntex>4)die("NVN acquire window",0);
-    android_gfx_enter();dm_android_nvn_schedule_thread("acquire");*index=w->next++%w->ntex;
+    android_gfx_enter();dm_android_nvn_schedule_thread("acquire");dm_android_nvn_work_check_thread();*index=w->next++%w->ntex;
     uint64_t now=now_ns(),period=android_present_period(w);nvn_pacer p={w->pace};uint64_t wait=nvn_pace(&p,now,period);w->pace=p.target;
     if(wait)dm_android_nvn_sleep_until(now+wait);
     if(w->ticket[*index])mtl_present_wait(w->ticket[*index]);
     if(sync){sync_t *s=(void *)sync;s->fenced=1;s->fence=mtl_last_fence();}
-    android_gfx_leave();return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
+    dm_android_nvn_work_begin();android_gfx_leave();return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 int (*g_nvn_loadscreen_up)(void);
 NVN(nvnQueuePresentTexture,void,NVNqueue *q,NVNwindow *window,int index) {
     (void)q;win_t *w=(void *)window;if(index<0 || index>=w->ntex || index>=4 || !w->tex[index])die("NVN present index %d",index);
-    android_gfx_enter();dm_android_nvn_schedule_thread("present");
+    android_gfx_enter();dm_android_nvn_schedule_thread("present");dm_android_nvn_work_check_thread();
     w->ticket[index]=mtl_present((const tex_t *)w->tex[index],android_present_period(w)/1e9,w->crop);w->presents++;
-    uint64_t frame=atomic_fetch_add(&android_nvn_frame,1)+1;mtl_set_frame(frame);dm_android_nvn_presented(frame);android_gfx_leave();
+    uint64_t frame=atomic_fetch_add(&android_nvn_frame,1)+1;mtl_set_frame(frame);dm_android_nvn_presented(frame);
+    dm_android_nvn_work_end(frame);android_gfx_leave();
 }

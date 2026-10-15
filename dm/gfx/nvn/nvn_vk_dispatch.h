@@ -40,6 +40,8 @@ static PFN_vkCmdCopyBufferToImage dm_vkCmdCopyBufferToImage;
 #define vkCmdCopyBufferToImage dm_vkCmdCopyBufferToImage
 static PFN_vkCmdCopyImageToBuffer dm_vkCmdCopyImageToBuffer;
 #define vkCmdCopyImageToBuffer dm_vkCmdCopyImageToBuffer
+static PFN_vkCmdCopyImage dm_vkCmdCopyImage;
+#define vkCmdCopyImage dm_vkCmdCopyImage
 static PFN_vkCmdDispatch dm_vkCmdDispatch;
 #define vkCmdDispatch dm_vkCmdDispatch
 static PFN_vkCmdDraw dm_vkCmdDraw;
@@ -186,6 +188,14 @@ static PFN_vkUpdateDescriptorSets dm_vkUpdateDescriptorSets;
 #define vkUpdateDescriptorSets dm_vkUpdateDescriptorSets
 static PFN_vkWaitForFences dm_vkWaitForFences;
 #define vkWaitForFences dm_vkWaitForFences
+static PFN_vkResetCommandPool dm_vkResetCommandPool;
+#define vkResetCommandPool dm_vkResetCommandPool
+static PFN_vkResetDescriptorPool dm_vkResetDescriptorPool;
+#define vkResetDescriptorPool dm_vkResetDescriptorPool
+static PFN_vkResetFences dm_vkResetFences;
+#define vkResetFences dm_vkResetFences
+static PFN_vkGetFenceStatus dm_vkGetFenceStatus;
+#define vkGetFenceStatus dm_vkGetFenceStatus
 static PFN_vkCreateBufferView dm_vkCreateBufferView;
 #define vkCreateBufferView dm_vkCreateBufferView
 static PFN_vkDestroyBufferView dm_vkDestroyBufferView;
@@ -193,6 +203,10 @@ static PFN_vkDestroyBufferView dm_vkDestroyBufferView;
 static PFN_vkCmdCopyImage dm_vkCmdCopyImage;
 #define vkCmdCopyImage dm_vkCmdCopyImage
 static void dm_vk_resolve(VkInstance instance) {
+    dm_vkResetCommandPool=(PFN_vkResetCommandPool)dm_vk_get(instance,"vkResetCommandPool");if(!dm_vkResetCommandPool)die("Vulkan dispatch vkResetCommandPool",0);
+    dm_vkResetDescriptorPool=(PFN_vkResetDescriptorPool)dm_vk_get(instance,"vkResetDescriptorPool");if(!dm_vkResetDescriptorPool)die("Vulkan dispatch vkResetDescriptorPool",0);
+    dm_vkResetFences=(PFN_vkResetFences)dm_vk_get(instance,"vkResetFences");if(!dm_vkResetFences)die("Vulkan dispatch vkResetFences",0);
+    dm_vkGetFenceStatus=(PFN_vkGetFenceStatus)dm_vk_get(instance,"vkGetFenceStatus");if(!dm_vkGetFenceStatus)die("Vulkan dispatch vkGetFenceStatus",0);
     dm_vkCmdCopyImage=(PFN_vkCmdCopyImage)dm_vk_get(instance,"vkCmdCopyImage");if(!dm_vkCmdCopyImage)die("Vulkan dispatch vkCmdCopyImage",0);
     dm_vkDestroyBufferView=(PFN_vkDestroyBufferView)dm_vk_get(instance,"vkDestroyBufferView");if(!dm_vkDestroyBufferView)die("Vulkan dispatch vkDestroyBufferView",0);
     dm_vkCreateBufferView=(PFN_vkCreateBufferView)dm_vk_get(instance,"vkCreateBufferView");if(!dm_vkCreateBufferView)die("Vulkan dispatch vkCreateBufferView",0);
@@ -216,6 +230,7 @@ static void dm_vk_resolve(VkInstance instance) {
     dm_vkCmdCopyBuffer=(PFN_vkCmdCopyBuffer)dm_vk_get(instance,"vkCmdCopyBuffer");if(!dm_vkCmdCopyBuffer)die("Vulkan dispatch vkCmdCopyBuffer",0);
     dm_vkCmdCopyBufferToImage=(PFN_vkCmdCopyBufferToImage)dm_vk_get(instance,"vkCmdCopyBufferToImage");if(!dm_vkCmdCopyBufferToImage)die("Vulkan dispatch vkCmdCopyBufferToImage",0);
     dm_vkCmdCopyImageToBuffer=(PFN_vkCmdCopyImageToBuffer)dm_vk_get(instance,"vkCmdCopyImageToBuffer");if(!dm_vkCmdCopyImageToBuffer)die("Vulkan dispatch vkCmdCopyImageToBuffer",0);
+    dm_vkCmdCopyImage=(PFN_vkCmdCopyImage)dm_vk_get(instance,"vkCmdCopyImage");if(!dm_vkCmdCopyImage)die("Vulkan dispatch vkCmdCopyImage",0);
     dm_vkCmdDispatch=(PFN_vkCmdDispatch)dm_vk_get(instance,"vkCmdDispatch");if(!dm_vkCmdDispatch)die("Vulkan dispatch vkCmdDispatch",0);
     dm_vkCmdDraw=(PFN_vkCmdDraw)dm_vk_get(instance,"vkCmdDraw");if(!dm_vkCmdDraw)die("Vulkan dispatch vkCmdDraw",0);
     dm_vkCmdDrawIndexed=(PFN_vkCmdDrawIndexed)dm_vk_get(instance,"vkCmdDrawIndexed");if(!dm_vkCmdDrawIndexed)die("Vulkan dispatch vkCmdDrawIndexed",0);
