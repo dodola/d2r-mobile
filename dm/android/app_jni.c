@@ -231,6 +231,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_DIAG_SKIP_XFER");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/skip-xfer.txt");
     {FILE *xf=fopen(driver_option,"r");if(xf){char xv[8]={0};size_t xn=fread(xv,1,7,xf);fclose(xf);if(xn)setenv("DM_DIAG_SKIP_XFER",xv,1);}}
+    unsetenv("DM_DISABLE_SUBRES");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-subres");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SUBRES","1",1);
     unsetenv("DM_DISABLE_SETRT_SKIP");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-setrt-skip");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SETRT_SKIP","1",1);

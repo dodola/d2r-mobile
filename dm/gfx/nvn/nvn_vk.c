@@ -110,7 +110,8 @@ typedef struct { uint64_t serial,incarnation; tex_t source; VkImage image; VkDev
     VkImageView view; VkFormat format; VkImageLayout layout; uint32_t width,height,depth,bpp; int cpu_owned; uint64_t upload_stamp,version;
     uint8_t *cpu_snapshot;
     VkImage sample_copy;VkDeviceMemory sample_memory;VkImageView sample_view;VkImageLayout sample_layout;
-    VkImage shadow;VkDeviceMemory shadow_memory;VkImageView shadow_view;VkFormat shadow_format;VkImageLayout shadow_layout;uint64_t shadow_version;uint64_t other_version,sample_other;uint32_t dirty_levels,sc_valid,sc_level,sc_levels,sc_layer,sc_layers; } VTexture;
+    VkImage shadow;VkDeviceMemory shadow_memory;VkImageView shadow_view;VkFormat shadow_format;VkImageLayout shadow_layout;uint64_t shadow_version;uint64_t other_version,sample_other;uint32_t dirty_levels,sc_valid,sc_level,sc_levels,sc_layer,sc_layers;
+    VkImageLayout lvl[16];int mixed; /* per-mip layouts, valid only while mixed (then layout is stale) */ } VTexture;
 static void tex_dirty(VTexture *t){t->version++;t->other_version++;}
 static void tex_attach_dirty(VTexture *t,unsigned level){t->version++;t->dirty_levels|=1u<<(level&31);}
 typedef struct { int live; tex_t texture; view_t view; uint8_t has_view; uint64_t revision;TextureRef resident; } TSlot;
@@ -222,9 +223,9 @@ static struct {
     int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing;
     uint32_t npacc;
 
-    PassAcc pacc[128];char skip_ps[17];struct{char key[17];uint32_t draws;}hot[64];uint32_t nhot;int disable_desc_cache,disable_control_cache,diag_no_occlusion,diag_img_usage,barrier_pass_elide,pass_side_effects,diag_no_pass_deps,precise_sync,draw_store,xition_vertex;uint64_t profile_wait_elided,profile_hz_barriers,hz_count[8];int hz_diag,chunk_draws,chunk_log,profile_detail,seg_index,diag_skip_draws,diag_skip_xfer,diag_skip_class,diag_shape,enable_narrow_access,diag_fixed_desc,disable_wait_elision,want_cached,wb_stage_enabled,wb_stage_type,disable_setrt_skip,disable_pass_reuse,disable_cpu_uniform_snapshot;uint64_t setrt_total,setrt_same;char pass_desc[96],last_ps[20],last_uses[100];int last_count,last_barrier_bits;uint64_t pass_draws0;uint64_t gts_busy[4],gts_span[4],gts_gap[4],gts_chunks[4],pres_acq_ns,pres_fence_ns,pres_idle_ns,pres_submit_ns,seg_begin_ns,seg_record_ns[4],seg_wait_ns[4],seg_tail_ns[4],seg_draws[4],seg_chunks[4];uint64_t profile_chunks;uint32_t barrier_bits[256],barrier_kept[256],barrier_nopass,barrier_sidefx;uint32_t barrier_sites[4096],pass_end_sites[4096];
+    PassAcc pacc[128];char skip_ps[17];struct{char key[17];uint32_t draws;}hot[64];uint32_t nhot;int disable_desc_cache,disable_control_cache,diag_no_occlusion,diag_img_usage,barrier_pass_elide,pass_side_effects,diag_no_pass_deps,precise_sync,draw_store,xition_vertex;uint64_t profile_wait_elided,profile_hz_barriers,hz_count[8];int hz_diag,chunk_draws,chunk_log,profile_detail,seg_index,diag_skip_draws,diag_skip_xfer,diag_skip_class,diag_shape,enable_narrow_access,diag_fixed_desc,disable_wait_elision,want_cached,wb_stage_enabled,wb_stage_type,disable_setrt_skip,disable_subres,disable_pass_reuse,disable_cpu_uniform_snapshot;uint64_t setrt_total,setrt_same;char pass_desc[96],last_ps[20],last_uses[100];int last_count,last_barrier_bits;uint64_t pass_draws0;uint64_t gts_busy[4],gts_span[4],gts_gap[4],gts_chunks[4],pres_acq_ns,pres_fence_ns,pres_idle_ns,pres_submit_ns,seg_begin_ns,seg_record_ns[4],seg_wait_ns[4],seg_tail_ns[4],seg_draws[4],seg_chunks[4];uint64_t profile_chunks;uint32_t barrier_bits[256],barrier_kept[256],barrier_nopass,barrier_sidefx;uint32_t barrier_sites[4096],pass_end_sites[4096];
     ControlCache *control_cache;
-    uint64_t profile_desc_hits,profile_desc_misses,profile_control_hits,profile_control_misses,profile_barriers_skipped,profile_sample_copy_hits,profile_sample_copy_misses;
+    uint64_t profile_desc_hits,profile_desc_misses,profile_control_hits,profile_control_misses,profile_control_evict,profile_control_changed,profile_barriers_skipped,profile_sample_copy_hits,profile_sample_copy_misses;
     uint64_t profile_passes,profile_barriers,profile_uniform_updates,profile_cpu_snapshots,profile_gpu_copies,profile_snapshot_reuses;char trace_shader[17];
     uint64_t profile_pso_hits,profile_pso_misses;
     uint64_t profile_pso_lookups,profile_pso_hash_calls,profile_pso_hash_ns,profile_pso_lookup_ns;
@@ -294,7 +295,7 @@ static uint32_t memory_type(uint32_t mask,VkMemoryPropertyFlags properties) {
     die("memory type",properties);
 }
 static VBuffer buffer_create(uint64_t size,VkBufferUsageFlags usage,int zero) {
-    uint64_t started=dm_android_nvn_clock_ns();VBuffer b={.size=size,.usage=usage}; if(!size || size>SIZE_MAX) die("buffer size",size);
+    uint64_t started=prof_now();VBuffer b={.size=size,.usage=usage}; if(!size || size>SIZE_MAX) die("buffer size",size);
     VkBufferCreateInfo info={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=size,.usage=usage,
         .sharingMode=VK_SHARING_MODE_EXCLUSIVE}; CHECK(vkCreateBuffer(G.device,&info,NULL,&b.b));
     VkMemoryRequirements r; vkGetBufferMemoryRequirements(G.device,b.b,&r);
@@ -304,7 +305,7 @@ static VBuffer buffer_create(uint64_t size,VkBufferUsageFlags usage,int zero) {
     b.cached=G.want_cached&&!(G.memory.memoryTypes[a.memoryTypeIndex].propertyFlags&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     CHECK(vkAllocateMemory(G.device,&a,NULL,&b.m)); CHECK(vkBindBufferMemory(G.device,b.b,b.m,0));
     void *mapped=NULL; CHECK(vkMapMemory(G.device,b.m,0,size,0,&mapped)); b.map=mapped;if(zero)memset(b.map,0,size);
-    G.profile_buffer_allocs++;G.profile_buffer_bytes+=size;G.profile_buffer_allocate_ns+=dm_android_nvn_clock_ns()-started;return b;
+    G.profile_buffer_allocs++;G.profile_buffer_bytes+=size;G.profile_buffer_allocate_ns+=prof_now()-started;return b;
 }
 static VBuffer buffer_make(uint64_t size,VkBufferUsageFlags usage) { return buffer_create(size,usage,1); }
 static void buffer_free(VBuffer *b) {
@@ -336,11 +337,11 @@ static VBuffer *temporary_named(uint64_t size,VkBufferUsageFlags usage,unsigned 
         VBuffer **entries=realloc(S.temporaries,count*sizeof(*entries));if(!entries)die("temporary buffer registry allocation",count);S.temporaries=entries;S.temporary_capacity=count;}
     VBuffer *b=NULL;
     if(!G.disable_temp_pool)for(unsigned i=0;i<G.nretired;i++)if(G.retired_buffers[i]->size==size&&G.retired_buffers[i]->usage==usage){
-        b=retired_take(i);G.profile_temp_reuses++;uint64_t started=dm_android_nvn_clock_ns();
+        b=retired_take(i);G.profile_temp_reuses++;uint64_t started=prof_now();
         /* Preserve the original zero-initialized semantics, including bytes
          * outside a partial upload and the tails of driver constant banks. */
         /* Bytes at or beyond b->dirty are still zero from the previous use. */
-        memset(b->map,0,b->dirty<size?b->dirty:size);G.profile_temp_clear_ns+=dm_android_nvn_clock_ns()-started;break;
+        memset(b->map,0,b->dirty<size?b->dirty:size);G.profile_temp_clear_ns+=prof_now()-started;break;
     }
     if(!b){b=malloc(sizeof(*b));if(!b)die("temporary buffer allocation",size);*b=buffer_make(size,usage);}
     b->dirty=role==TEMP_DRIVER?DRIVER_TABLE_BYTES:size;
@@ -465,7 +466,7 @@ static void backend_init(void) {
     {const char *last=getenv("DM_PSO_LAST_CACHE");G.enable_pso_last=last&&atoi(last)!=0;G.last_pso_slot=UINT32_MAX;}
     G.disable_driver_table_reuse=getenv("DM_DISABLE_DRIVER_TABLE_REUSE")!=NULL;
     G.disable_temp_pool=getenv("DM_DISABLE_TEMP_POOL")!=NULL;
-    G.disable_query_batch=getenv("DM_DISABLE_QUERY_BATCH")!=NULL;G.diag_no_occlusion=getenv("DM_DIAG_NO_OCCLUSION")!=NULL;G.barrier_pass_elide=getenv("DM_BARRIER_PASS_ELIDE")!=NULL;G.diag_no_pass_deps=getenv("DM_DIAG_NO_PASS_DEPS")!=NULL;G.precise_sync=getenv("DM_DISABLE_PRECISE_SYNC")==NULL;{const char *hd=getenv("DM_HZ_DIAG");G.hz_diag=hd?atoi(hd):0;}{const char *cd=getenv("DM_CHUNK_DRAWS");G.chunk_draws=cd?atoi(cd):48;G.chunk_log=getenv("DM_RESOURCE_STATS")!=NULL;G.profile_detail=getenv("DM_PROFILE_DETAIL")!=NULL;G.diag_skip_draws=getenv("DM_DIAG_SKIP_DRAWS")!=NULL;{const char *sh=getenv("DM_DIAG_SHAPE");G.diag_shape=sh?atoi(sh):0;}G.disable_setrt_skip=getenv("DM_DISABLE_SETRT_SKIP")!=NULL;G.enable_narrow_access=getenv("DM_NARROW_ACCESS")!=NULL;G.diag_fixed_desc=getenv("DM_DIAG_FIXED_DESC")!=NULL;G.disable_wait_elision=getenv("DM_DISABLE_WAIT_ELISION")!=NULL;G.async_enabled=getenv("DM_DISABLE_ASYNC_COMMIT")==NULL;G.async_drain_after_submit=getenv("DM_ASYNC_DRAIN")!=NULL;{const char *sc=getenv("DM_DIAG_SKIP_CLASS");G.diag_skip_class=sc?atoi(sc):0;}G.wb_stage_enabled=getenv("DM_DISABLE_WB_STAGE")==NULL;G.disable_pass_reuse=getenv("DM_DISABLE_PASS_REUSE")!=NULL;G.disable_cpu_uniform_snapshot=getenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT")!=NULL;{const char *sx=getenv("DM_DIAG_SKIP_XFER");G.diag_skip_xfer=sx?atoi(sx):0;}}fprintf(stderr,"[nvn-vulkan] PRECISE_SYNC=%d hz_diag=%d\n",G.precise_sync,G.hz_diag);{const char *iu=getenv("DM_DIAG_IMG_USAGE");G.diag_img_usage=iu?atoi(iu):0;}
+    G.disable_query_batch=getenv("DM_DISABLE_QUERY_BATCH")!=NULL;G.diag_no_occlusion=getenv("DM_DIAG_NO_OCCLUSION")!=NULL;G.barrier_pass_elide=getenv("DM_BARRIER_PASS_ELIDE")!=NULL;G.diag_no_pass_deps=getenv("DM_DIAG_NO_PASS_DEPS")!=NULL;G.precise_sync=getenv("DM_DISABLE_PRECISE_SYNC")==NULL;{const char *hd=getenv("DM_HZ_DIAG");G.hz_diag=hd?atoi(hd):0;}{const char *cd=getenv("DM_CHUNK_DRAWS");G.chunk_draws=cd?atoi(cd):48;G.chunk_log=getenv("DM_RESOURCE_STATS")!=NULL;G.profile_detail=getenv("DM_PROFILE_DETAIL")!=NULL;G.diag_skip_draws=getenv("DM_DIAG_SKIP_DRAWS")!=NULL;{const char *sh=getenv("DM_DIAG_SHAPE");G.diag_shape=sh?atoi(sh):0;}G.disable_setrt_skip=getenv("DM_DISABLE_SETRT_SKIP")!=NULL;G.disable_subres=getenv("DM_DISABLE_SUBRES")!=NULL;G.enable_narrow_access=getenv("DM_NARROW_ACCESS")!=NULL;G.diag_fixed_desc=getenv("DM_DIAG_FIXED_DESC")!=NULL;G.disable_wait_elision=getenv("DM_DISABLE_WAIT_ELISION")!=NULL;G.async_enabled=getenv("DM_DISABLE_ASYNC_COMMIT")==NULL;G.async_drain_after_submit=getenv("DM_ASYNC_DRAIN")!=NULL;{const char *sc=getenv("DM_DIAG_SKIP_CLASS");G.diag_skip_class=sc?atoi(sc):0;}G.wb_stage_enabled=getenv("DM_DISABLE_WB_STAGE")==NULL;G.disable_pass_reuse=getenv("DM_DISABLE_PASS_REUSE")!=NULL;G.disable_cpu_uniform_snapshot=getenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT")!=NULL;{const char *sx=getenv("DM_DIAG_SKIP_XFER");G.diag_skip_xfer=sx?atoi(sx):0;}}fprintf(stderr,"[nvn-vulkan] PRECISE_SYNC=%d hz_diag=%d\n",G.precise_sync,G.hz_diag);{const char *iu=getenv("DM_DIAG_IMG_USAGE");G.diag_img_usage=iu?atoi(iu):0;}
     {const char *range=getenv("DM_QUERY_RESET_RANGE");G.enable_query_reset_range=range&&atoi(range)!=0;}
     G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
     G.disable_resource_cache=getenv("DM_DISABLE_RESOURCE_CACHE")!=NULL;
@@ -1125,15 +1126,15 @@ static VkAccessFlags layout_access(VkImageLayout layout,int as_source) {
     default:return VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
     }
 }
-static void texture_transition(VTexture *t,VkImageLayout layout) {
-    if(t->layout==layout) return; pass_end();
+static void texture_barrier_levels(VTexture *t,VkImageLayout old,VkImageLayout layout,uint32_t base,uint32_t count) {
+    pass_end();
     VkImageMemoryBarrier b={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-       .srcAccessMask=t->layout==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT,
-       .dstAccessMask=VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT,.oldLayout=t->layout,.newLayout=layout,
+       .srcAccessMask=old==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT,
+       .dstAccessMask=VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT,.oldLayout=old,.newLayout=layout,
        .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.image=t->image,
-       .subresourceRange={aspect(t->format),0,t->source.d.levels,0,t->source.L.layers}};
+       .subresourceRange={aspect(t->format),base,count,0,t->source.L.layers}};
     if(G.precise_sync){
-        VkPipelineStageFlags src=t->layout==VK_IMAGE_LAYOUT_UNDEFINED?VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT:
+        VkPipelineStageFlags src=old==VK_IMAGE_LAYOUT_UNDEFINED?VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT:
             (HZ_ATT_STAGES|HZ_SHADER_STAGES|VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         VkPipelineStageFlags dst=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         switch(layout) {
@@ -1144,13 +1145,33 @@ static void texture_transition(VTexture *t,VkImageLayout layout) {
         case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:dst=VK_PIPELINE_STAGE_TRANSFER_BIT;break;
         default:break;
         }
-        if(G.enable_narrow_access){b.srcAccessMask=layout_access(t->layout,1);b.dstAccessMask=layout_access(layout,0);}
+        if(G.enable_narrow_access){b.srcAccessMask=layout_access(old,1);b.dstAccessMask=layout_access(layout,0);}
         if(G.hz_diag&1){src=VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;dst=VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;}
         vkCmdPipelineBarrier(S.command,src,dst,0,0,NULL,0,NULL,1,&b);
         G.profile_hz_barriers++;G.hz_count[4+(layout==VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL?0:(dst==HZ_ATT_STAGES?1:(dst==VK_PIPELINE_STAGE_TRANSFER_BIT?2:3)))]++;
     }else
     vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,NULL,0,NULL,1,&b);
-    t->layout=layout;
+}
+/* Whole-image transitions unify any per-mip layouts first; per-mip transitions let a mip chain be sampled and rendered
+ * in place without the sampling copy that devices lacking feedback layouts would otherwise need. */
+static void texture_transition(VTexture *t,VkImageLayout layout) {
+    if(!t->mixed){if(t->layout==layout)return;texture_barrier_levels(t,t->layout,layout,0,t->source.d.levels);t->layout=layout;return;}
+    uint32_t n=t->source.d.levels;
+    for(uint32_t i=0;i<n;){if(t->lvl[i]==layout){i++;continue;}uint32_t j=i+1;while(j<n&&t->lvl[j]==t->lvl[i])j++;texture_barrier_levels(t,t->lvl[i],layout,i,j-i);i=j;}
+    t->mixed=0;t->layout=layout;
+}
+static int texture_range_ok(const VTexture *t) {
+    return !G.disable_subres&&!G.feedback_layout&&t->source.d.levels>1&&t->source.d.levels<=16&&t->source.L.layers==1&&
+        t->source.d.target==NVN_TEXTURE_TARGET_2D&&aspect(t->format)==VK_IMAGE_ASPECT_COLOR_BIT;
+}
+static void texture_transition_levels(VTexture *t,uint32_t base,uint32_t count,VkImageLayout layout) {
+    uint32_t n=t->source.d.levels;
+    if(base==0&&count>=n){texture_transition(t,layout);return;}
+    if(!t->mixed){if(t->layout==layout)return;for(uint32_t i=0;i<n;i++)t->lvl[i]=t->layout;t->mixed=1;}
+    for(uint32_t i=base;i<base+count;){if(t->lvl[i]==layout){i++;continue;}VkImageLayout old=t->lvl[i];uint32_t j=i+1;while(j<base+count&&t->lvl[j]==old)j++;
+        texture_barrier_levels(t,old,layout,i,j-i);for(uint32_t k=i;k<j;k++)t->lvl[k]=layout;i=j;}
+    uint32_t k=1;while(k<n&&t->lvl[k]==t->lvl[0])k++;
+    if(k==n){t->mixed=0;t->layout=t->lvl[0];}
 }
 /* GPU transfers and CPU streaming can update different compression blocks of
  * one NVN allocation. Compare actual block bytes to the last CPU snapshot so
@@ -1613,7 +1634,7 @@ static void prepare_sampling_copies(VShader *s) {
     if(!s || G.feedback_layout || s->h.stage==5)return;
     for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==4 && !(s->dref_bindings&(1ull<<i))){
         unsigned tid=G.state.tex[s->h.stage][s->b[i].slot]&0xfffff;TSlot *slot=&G.tslot[tid];
-        VTexture *t=slot_texture(slot,1);if(!disjoint_sampling(t,slot,s->h.stage))continue;
+        VTexture *t=slot_texture(slot,1);if(!disjoint_sampling(t,slot,s->h.stage)||texture_range_ok(t))continue;
         view_t *sv=&slot->view;unsigned slevel=slot->has_view&&sv->set_levels?sv->base_level:0,slevels=slot->has_view&&sv->set_levels?sv->nlevels:t->source.d.levels;
         unsigned slayer=slot->has_view&&sv->set_layers?sv->min_layer:0,slayers=slot->has_view&&sv->set_layers?sv->nlayers:t->source.L.layers;
         uint32_t smask=(slevels>=32?~0u:((1u<<slevels)-1u))<<slevel;
@@ -1980,18 +2001,21 @@ static VkDescriptorSet bind_shader(VShader *s) {
            VTexture *t=slot_texture(slot,1);
            trace_texture(t,s,b);
            int alias=b->kind==4&&(s->dref_bindings&(1ull<<i))&&aspect(t->format)==VK_IMAGE_ASPECT_COLOR_BIT;
-           int sampled_copy=b->kind==4&&!alias&&disjoint_sampling(t,slot,s->h.stage);
-           if(!G.feedback_layout && !sampled_copy && b->kind==4 && s->h.stage!=5){
+           int sampled_copy=b->kind==4&&!alias&&disjoint_sampling(t,slot,s->h.stage),ranged=0;
+           if(sampled_copy&&texture_range_ok(t))sampled_copy=0,ranged=1;
+           if(!G.feedback_layout && !sampled_copy && !ranged && b->kind==4 && s->h.stage!=5){
                for(int rt=0;rt<G.state.rt.n;rt++)if(G.state.rt.color[rt]&&G.state.rt.color[rt]->serial==t->serial){
                    view_t *v=&slot->view,*a=&G.state.rt.cview[rt];
                    fprintf(stderr,"[nvn-vulkan] COLOR_FEEDBACK_VIEW shader=%s binding=%u serial=%llu sampled_levels=%d,%d flags=%u sampled_layers=%d,%d flags=%u attachment_level=%d flags=%u attachment_layer=%d flags=%u\n",s->key,b->binding,(unsigned long long)t->serial,v->base_level,v->nlevels,slot->has_view&&v->set_levels,v->min_layer,v->nlayers,slot->has_view&&v->set_layers,a->base_level,G.state.rt.has_cview[rt]&&a->set_levels,a->min_layer,G.state.rt.has_cview[rt]&&a->set_layers);
                }
            }
-           if(!alias&&!sampled_copy)texture_transition(t,storage_image_use(t->serial)?VK_IMAGE_LAYOUT_GENERAL:sampled_layout(t,s->h.stage));
+           if(ranged){view_t *rv=&slot->view;unsigned rl=slot->has_view&&rv->set_levels?rv->base_level:0,rn=slot->has_view&&rv->set_levels?rv->nlevels:t->source.d.levels;
+               texture_transition_levels(t,rl,rn,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);}
+           else if(!alias&&!sampled_copy)texture_transition(t,storage_image_use(t->serial)?VK_IMAGE_LAYOUT_GENERAL:sampled_layout(t,s->h.stage));
            if(alias&&!t->shadow_view){fprintf(stderr,"[nvn-vulkan] missing comparison view shader=%s binding=%u slot=%d serial=%llu stage=%u\n",s->key,b->binding,b->slot,(unsigned long long)t->serial,s->h.stage);die("comparison image preparation",t->serial);}
            if(sampled_copy&&!t->sample_view)die("disjoint sample copy preparation",t->serial);
            VkImage selected_image=alias?t->shadow:sampled_copy?t->sample_copy:t->image;VkFormat selected_format=alias?t->shadow_format:t->format;
-           ii[i].imageView=alias?t->shadow_view:sampled_copy?t->sample_view:t->view;ii[i].imageLayout=alias?t->shadow_layout:sampled_copy?t->sample_layout:t->layout;
+           ii[i].imageView=alias?t->shadow_view:sampled_copy?t->sample_view:t->view;ii[i].imageLayout=alias?t->shadow_layout:sampled_copy?t->sample_layout:ranged?VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:t->layout;
            if(slot->has_view) {
                view_t *v=&slot->view;
                uint32_t level=v->set_levels?v->base_level:0,levels=v->set_levels?v->nlevels:t->source.d.levels;
@@ -2029,10 +2053,11 @@ static VkDescriptorSet bind_shader(VShader *s) {
                        fprintf(stderr,"[nvn-vulkan] TEXTURE_SAMPLER draw=%llu binding=%u slot=%d serial=%llu sampler=%u minf=%u magf=%u lod=%g,%g bias=%g compare=%u,%u view_levels=%d,%d set_levels=%u\n",(unsigned long long)G.draws,b->binding,b->slot,(unsigned long long)t->serial,sid,p->minf,p->magf,p->lod_min,p->lod_max,p->lod_bias,p->cmp_mode,p->cmp_func,slot->view.base_level,slot->view.nlevels,slot->has_view&&slot->view.set_levels);
                    }
                } }
+           if(ranged&&ii[i].imageView==t->view)die("ranged sampling without a subresource view",t->serial);
            if(b->kind==6){t->cpu_owned=0;tex_dirty(t);}
            if(plan_safe){
                int custom_view=slot->has_view&&(slot->view.set_levels||slot->view.set_layers||slot->view.set_format||slot->view.set_target);
-               if(b->kind!=4||alias||sampled_copy||custom_view||t->source.d.target!=NVN_TEXTURE_TARGET_2D||ii[i].imageView!=t->view)
+               if(b->kind!=4||alias||sampled_copy||ranged||custom_view||t->source.d.target!=NVN_TEXTURE_TARGET_2D||ii[i].imageView!=t->view)
                    plan_safe=0;
                else plan_resources[i].image=(BindingImage){.texture=texture_reference(t),.descriptor_id=tid,.layout=ii[i].imageLayout};
            }
@@ -2054,9 +2079,9 @@ static VkDescriptorSet bind_shader(VShader *s) {
         G.profile_desc_misses++;
     }
     VkDescriptorSetAllocateInfo a={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,.descriptorPool=S.descriptors,
-      .descriptorSetCount=1,.pSetLayouts=&s->layout};uint64_t alloc_started=dm_android_nvn_clock_ns();CHECK(vkAllocateDescriptorSets(G.device,&a,&set));G.profile_desc_alloc_ns+=dm_android_nvn_clock_ns()-alloc_started;
+      .descriptorSetCount=1,.pSetLayouts=&s->layout};uint64_t alloc_started=prof_now();CHECK(vkAllocateDescriptorSets(G.device,&a,&set));G.profile_desc_alloc_ns+=prof_now()-alloc_started;
     for(uint32_t i=0;i<nb;i++)w[i].dstSet=set;
-    uint64_t update_started=dm_android_nvn_clock_ns();vkUpdateDescriptorSets(G.device,s->h.nb,w,0,NULL);G.profile_desc_update_ns+=dm_android_nvn_clock_ns()-update_started;
+    uint64_t update_started=prof_now();vkUpdateDescriptorSets(G.device,s->h.nb,w,0,NULL);G.profile_desc_update_ns+=prof_now()-update_started;
     if(cacheable&&S.ndesc<DESC_ENTRIES&&S.desc_arena_used+2*half<=DESC_ARENA&&S.ndesc*2<DESC_TABLE){
         DescEntry *e=&S.desc_entries[S.ndesc];*e=(DescEntry){hash,s,set,nb,(uint32_t)S.desc_arena_used};
         memcpy(S.desc_arena+S.desc_arena_used,bi,half);memcpy(S.desc_arena+S.desc_arena_used+half,ii,half);S.desc_arena_used+=2*half;
@@ -2074,9 +2099,16 @@ static VkDescriptorSet bind_shader(VShader *s) {
 static VShader *program_stage_optional_impl(int stage) {
     const prog_t *p=G.state.program;if(!p)die("draw/dispatch without program",stage);
     for(uint32_t i=0;i<p->nstage;i++) { const void *control=p->sd[i].control;if(!control)die("shader data control",i);
-       ControlCache *c=&G.control_cache[(((uintptr_t)control>>4)^((uintptr_t)stage*31u))&(CONTROL_CACHE-1)];
-       if(!G.disable_control_cache&&c->valid&&c->control==control&&c->stage==(uint32_t)stage&&!memcmp(c->bytes,control,0x880)){
-           G.profile_control_hits++;if(c->shader)return c->shader;continue;}
+       uint64_t mix=((uint64_t)(uintptr_t)control>>4^(uint64_t)stage*0x9e3779b97f4a7c15ULL)*0xbf58476d1ce4e5b9ULL;
+       ControlCache *c=&G.control_cache[(mix>>40)&(CONTROL_CACHE-2)];
+       if(!(c->valid&&c->control==control&&c->stage==(uint32_t)stage)){
+           if(c[1].valid&&c[1].control==control&&c[1].stage==(uint32_t)stage)c++;
+           else if(c->valid&&(!c[1].valid||(mix&1)))c++;
+       }
+       if(!G.disable_control_cache&&c->valid&&c->control==control&&c->stage==(uint32_t)stage){
+           if(!memcmp(c->bytes,control,0x880)){G.profile_control_hits++;if(c->shader)return c->shader;continue;}
+           G.profile_control_changed++;
+       }else if(c->valid)G.profile_control_evict++;
        G.profile_control_misses++;
        VShader *found=shader_entry(control,stage)?shader_get(control,stage):NULL;
        c->control=control;c->stage=stage;c->valid=1;c->shader=found;memcpy(c->bytes,control,0x880);
@@ -2177,8 +2209,9 @@ static VkRenderPass render_begin(void) {
         VkImageLayout attachment_layout=is_depth?VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         if(is_depth&&S.depth_sampled&&depth_read_only())attachment_layout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         else if(S.feedback_flags&(is_depth?VK_PIPELINE_CREATE_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT:VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT))attachment_layout=VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;
-        texture_transition(t,attachment_layout);
-        VkImageLayout layout=t->layout;
+        VkImageLayout layout;
+        if(!is_depth&&texture_range_ok(t)&&range.levelCount<t->source.d.levels){texture_transition_levels(t,range.baseMipLevel,range.levelCount,attachment_layout);layout=attachment_layout;}
+        else{texture_transition(t,attachment_layout);layout=t->layout;}
         attachments[n]=(VkAttachmentDescription){.format=t->format,.samples=VK_SAMPLE_COUNT_1_BIT,
            .loadOp=G.diag_loadstore>=2?VK_ATTACHMENT_LOAD_OP_DONT_CARE:VK_ATTACHMENT_LOAD_OP_LOAD,
            .storeOp=G.diag_loadstore>=1?VK_ATTACHMENT_STORE_OP_DONT_CARE:VK_ATTACHMENT_STORE_OP_STORE,
@@ -2927,6 +2960,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         G.profile_replay_cpu_ns=G.profile_begin_cpu_ns=G.profile_commit_prepare_cpu_ns=G.profile_commit_wait_cpu_ns=G.profile_retire_cpu_ns=G.profile_writeback_cpu_ns=G.profile_present_cpu_ns=0;
         G.profile_replay_calls=G.profile_begin_calls=G.profile_commit_calls=G.profile_writeback_calls=G.profile_present_calls=0;
         G.profile_writeback_global_faults=G.profile_writeback_global_preps=G.profile_writeback_global_mp_calls=G.profile_writeback_global_mp_pages=0;
+        fprintf(stderr,"[nvn-vulkan] CONTROL_CACHE_REASON evict=%llu changed=%llu""\n",(unsigned long long)G.profile_control_evict,(unsigned long long)G.profile_control_changed);G.profile_control_evict=G.profile_control_changed=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_CACHE_PROFILE frame=%llu desc_hits=%llu desc_misses=%llu control_hits=%llu control_misses=%llu barriers_skipped=%llu sample_copy_hits=%llu sample_copy_misses=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_desc_hits,(unsigned long long)G.profile_desc_misses,(unsigned long long)G.profile_control_hits,(unsigned long long)G.profile_control_misses,(unsigned long long)G.profile_barriers_skipped,(unsigned long long)G.profile_sample_copy_hits,(unsigned long long)G.profile_sample_copy_misses);
         G.profile_desc_hits=G.profile_desc_misses=G.profile_control_hits=G.profile_control_misses=G.profile_barriers_skipped=G.profile_sample_copy_hits=G.profile_sample_copy_misses=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_BINDING_PLAN_PROFILE frame=%llu hits=%llu misses=%llu fallbacks=%llu prepared_buffers=%llu prepared_images=%llu enabled=%u\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_plan_hits,(unsigned long long)G.profile_plan_misses,(unsigned long long)G.profile_plan_fallbacks,(unsigned long long)G.profile_plan_buffers,(unsigned long long)G.profile_plan_images,!G.disable_binding_plans);
