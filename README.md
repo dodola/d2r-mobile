@@ -16,14 +16,22 @@ As of **2026-10-15**, this fork runs the original game on a physical Android dev
 |---|---|
 | ROD-W09, Mali-G610 MC6, render scale 1.0, one saved Paladin at character selection | **24.08 FPS** over 1,200 frames |
 | Same device and scale, standing in town after loading | **28.56 FPS** over 900 frames |
+| PPG-AN00, Adreno 830, pinned Turnip sysmem driver, scale 1.0, saved Barbarian at character selection | **30.004 FPS** median across 28 steady windows |
+| Same Adreno device and configuration, standing in town | **30.0085 FPS** median across 28 steady windows |
+| PPG-AN00, same driver and scale, fixed-60 experiment, 90 seconds of operator-controlled play | **52.832 FPS** median across 77 windows; highest window **59.874 FPS** |
+| ROD-W09, system Mali driver, scale 1.0, fixed-60 experiment, 30-second operator-controlled sample | **31.281 FPS** median across 15 windows |
 
-These are scene-specific observations, not a sustained or cross-device guarantee. The **30 FPS character-selection target is still unmet**. Later low-battery samples drifted down to 21–22 FPS and are not used to claim a code regression or improvement. Long thermal runs and power consumption remain unverified.
+The first four rows are fixed-scene observations; the experimental samples include changing scenes and are not a same-scene A/B comparison. Each profile window averages 60 frames. The Adreno device can reach approximately 60 FPS in some windows, but **sustained 60 FPS across gameplay is not yet verified**. Different hardware, cadence and power conditions prevent attributing these differences solely to code. Long thermal runs and power consumption remain unverified.
+
+The Adreno results exclude an accidentally injected system validation layer, whose removal corrected the test configuration rather than speeding up renderer code. Earlier low-battery Mali samples drifted down to 21–22 FPS and are not used to claim a code regression or improvement.
 
 Work implemented in this fork:
 
 - [Android host and app](dm/android/): native game loading, platform services, file/save access, AAudio integration, touch input and an Android activity. The native build targets Android API 29+ / arm64-v8a; this does not establish compatibility with every device meeting that minimum.
+- A live FPS readout and automatic 16:9 aspect-fit presentation keep the original image proportional on wide phones and tablets. The game and touch controls share the same centered viewport; unused space forms borders. Both the display and touch positions were confirmed on the Adreno device.
+- An **opt-in fixed-60 FPS experiment** bypasses the game's requested presentation interval while retaining a 60 FPS cap. Create `files/d2r-mobile/diagnostics/present-60fps` in the app's private storage, save and restart the game to enable it; remove the marker and restart to restore the original cadence. It is disabled by default. Frame cadence is logged explicitly; game-timing and long-session validation remain open.
 - [Vulkan renderer](dm/gfx/nvn/nvn_vk.c): precise resource synchronization, early chunk submissions, asynchronous completion, cached writeback staging, per-mip image layouts for disjoint sampling, shader-control caching, and optional detailed profiling.
-- Validation of the committed optimization baseline includes **16 GPU fixtures** and the gameplay smoke checks above. Dynamic-uniform descriptors were tested and reverted because their FPS benefit did not reproduce. The latest profiling changes build successfully; combined pass timing and chunk submission still require device regression.
+- Validation includes **16 GPU fixtures on both the Qualcomm system and pinned Turnip drivers (32 checks)**, plus six pass/chunk timing configurations and the gameplay smoke checks above. This does not establish full-game compatibility with both drivers. Dynamic-uniform descriptors were tested and reverted because their FPS benefit did not reproduce.
 
 **Remaining work:** broader GPU/device coverage, dungeon/act/waypoint transitions, larger fights and skill effects, controlled 30-minute thermal testing, and further performance optimization. iOS feature parity has not been established.
 

@@ -8,9 +8,15 @@ typography:
   status:
     fontFamily: "Android system sans-serif, Noto Sans CJK"
     fontSize: "18px"
+  fps:
+    fontFamily: "Android system monospace"
+    fontSize: "12px"
 spacing:
   statusHorizontal: "28px"
   statusVertical: "18px"
+  fpsHorizontal: "8px"
+  fpsVertical: "4px"
+  fpsTop: "10px"
 omitted:
   - section: rounded
     reason: "Touch controls reuse the upstream circular targets, not card geometry."
@@ -32,8 +38,13 @@ Use Android's locale-capable native font and scaled text. Chinese is the shell's
 current language. Original game language follows Activity.Configuration.
 
 ## Layout
-Landscape full-screen SurfaceView; preparation and failure occupy a stable
-overlay. Gameplay controls reuse the upstream C layout and gesture state machine.
+The root fills the available Android window. `GameViewport` centers the largest
+16:9 rectangle within it; the SurfaceView and every gameplay/menu touch control
+share that rectangle. The original 1600×900 / 1280×720 game image keeps its
+proportions on wide phones and taller tablets, with near-black unused space.
+This adapts presentation to the screen without changing the game's camera or HUD.
+Preparation and failure occupy a stable full-window overlay. Gameplay controls
+reuse the upstream C layout and gesture state machine.
 Status padding is
 in density-independent units and text sizing follows Android font scale.
 
@@ -50,13 +61,28 @@ native progress, reveal real presentation, retain actionable failures. Surface
 loss suspends graphics and drains before releasing its acquired native window.
 Native text status supplies an accessibility live region. No network permission.
 
+`GameDisplayMetrics` owns aspect-fit geometry and the rolling frame-count sample.
+`GameActivity` owns a passive top-center `FPS 30.0` readout inside GameViewport.
+It uses the existing native presented-frame counter and monotonic wall time,
+updates after at least one second, shows `FPS —` before its first sample, and
+resets on pause/resume. This measures the game's present submission cadence,
+not physical-display scanout timing. It never intercepts touches or announces
+every sample through an accessibility live region. The sampler can report zero
+when the game stalls; no synthetic 30/60 value is substituted.
+
+Runtime tokens remain canonical: FPS text/scrim reuse `TouchControlsView.TEXT`
+and `INK`; GameActivity maps the documented 12sp monospace role, 8dp/4dp padding
+and 10dp top inset to the native TextView. There are no new palette values.
+
 ## Android touch adapter
 The unchanged `dm/ios/Sources/dm_touch_controls.c` owns layout, hit testing,
 movement axes, skill aiming, skill-set timing and sampled-input pulse behavior.
 `TouchControlsView` owns rendering tokens: ink #30241b at 50% opacity,
 rim #a08359 at 73%, parchment #e9d9ba, pressed #80623c at 80%; its native
 Canvas painter consumes these canonical Java constants. Coordinates use dp,
-with original safe-inset and tall-screen scaling. Buttons remain anchored while
+with original safe-inset and tall-screen scaling. Android cutout insets are
+converted into GameViewport-local distances after layout, so centered margins
+are not applied a second time. Buttons remain anchored while
 pressed; the joystick knob follows actual output axes. Labels describe controller
 slots until native skill identity is audited. Virtual accessibility buttons expose
 clicks and directional movement without dragging.

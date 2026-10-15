@@ -167,7 +167,11 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     atomic_store(&input_route_ready,1);
     path(port_root,sizeof port_root,app_files,"d2r-mobile");
     if ((rc=configure_render_scale())) { LOG("ANDROID_3D_SCALE_CONFIG_FAILED errno=%d expected finite 0.70..1.0",rc); return rc; }
-    char driver_option[PATH_MAX];path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan");
+    char driver_option[PATH_MAX];
+    unsetenv("DM_ANDROID_PRESENT_60FPS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/present-60fps");
+    if(access(driver_option,F_OK)==0)setenv("DM_ANDROID_PRESENT_60FPS","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan");
     if(access(driver_option,F_OK)==0)setenv("DM_PRIVATE_VULKAN","turnip",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan-sysmem");
     if(access(driver_option,F_OK)==0){setenv("DM_PRIVATE_VULKAN","turnip",1);setenv("TU_DEBUG","sysmem",1);}

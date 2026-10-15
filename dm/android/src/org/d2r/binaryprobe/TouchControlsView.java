@@ -35,9 +35,17 @@ public final class TouchControlsView extends View {
     public void setActive(boolean on){active=on;nativeEnable(on);setVisibility(on?VISIBLE:GONE);if(on){resize();postInvalidateOnAnimation();}}
     public void cancel(){nativeCancel();}
     private void resize(){if(getWidth()==0||getHeight()==0)return;float left=0,right=0;WindowInsets insets=getRootWindowInsets();
-        if(insets!=null&&insets.getDisplayCutout()!=null){left=insets.getDisplayCutout().getSafeInsetLeft()/density;right=insets.getDisplayCutout().getSafeInsetRight()/density;}
+        if(insets!=null&&insets.getDisplayCutout()!=null){
+            int[] location=new int[2];getLocationOnScreen(location);
+            android.graphics.Point screen=new android.graphics.Point();
+            ((android.view.WindowManager)getContext().getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay().getRealSize(screen);
+            left=Math.max(0,insets.getDisplayCutout().getSafeInsetLeft()-location[0])/density;
+            right=Math.max(0,location[0]+getWidth()-(screen.x-insets.getDisplayCutout().getSafeInsetRight()))/density;
+        }
         nativeResize(getWidth()/density,getHeight()/density,left,right);frame=nativeFrame();}
-    @Override protected void onSizeChanged(int w,int h,int ow,int oh){super.onSizeChanged(w,h,ow,oh);resize();}
+    @Override protected void onLayout(boolean changed,int left,int top,int right,int bottom){
+        super.onLayout(changed,left,top,right,bottom);if(changed)resize();
+    }
     private void circle(Canvas canvas,float x,float y,float radius,String label,boolean pressed){if(radius<=0)return;
         paint.setStyle(Paint.Style.FILL);paint.setColor(pressed?PRESSED:INK);canvas.drawCircle(x,y,radius,paint);
         paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(1.4f);paint.setColor(RIM);canvas.drawCircle(x,y,radius,paint);

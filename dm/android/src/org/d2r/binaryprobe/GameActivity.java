@@ -5,6 +5,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.graphics.Typeface;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.Surface;
@@ -43,7 +45,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private volatile boolean inputReady;
     private volatile int surfaceGeneration;
     private SurfaceView game;
-    private TextView status;
+    private TextView status,fps;
+    private final GameDisplayMetrics.FpsSampler fpsSampler=new GameDisplayMetrics.FpsSampler();
+    private double displayedFps=Double.NaN;
     private TouchControlsView touchControls;
     private final java.util.ArrayList<View> menuControls=new java.util.ArrayList<>();
     private boolean prepared, configured, surfaceReady, launched, resumed, failed;
@@ -56,6 +60,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
         FrameLayout root=new FrameLayout(this);root.setBackgroundColor(0xff0d0d0f);
+        GameViewport viewport=new GameViewport(this);
+        root.addView(viewport,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
         game=new SurfaceView(this);game.setContentDescription("游戏画面");game.getHolder().addCallback(this);
         game.setOnTouchListener((view,event) -> {
             if(!configured||!surfaceReady||!inputReady||width<=0||height<=0)return true;
@@ -70,23 +76,29 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             int rc=nativeTouch(ids,xs,ys,action==MotionEvent.ACTION_CANCEL);
             if(rc!=0)fail("触摸输入不可用",new Exception("错误 "+rc));return true;
         });
-        root.addView(game,new FrameLayout.LayoutParams(-1,-1));
-        addAction(root,"确认",1,Gravity.RIGHT|Gravity.BOTTOM,18,18);
-        addAction(root,"返回",2,Gravity.RIGHT|Gravity.BOTTOM,104,18);
-        addAction(root,"开始",1L<<10,Gravity.RIGHT|Gravity.TOP,18,18);
-        addAction(root,"↑",1L<<13,Gravity.LEFT|Gravity.BOTTOM,92,92);
-        addAction(root,"↓",1L<<15,Gravity.LEFT|Gravity.BOTTOM,92,18);
-        addAction(root,"←",1L<<12,Gravity.LEFT|Gravity.BOTTOM,18,55);
-        addAction(root,"→",1L<<14,Gravity.LEFT|Gravity.BOTTOM,166,55);
+        viewport.addView(game,new FrameLayout.LayoutParams(-1,-1));
+        addAction(viewport,"确认",1,Gravity.RIGHT|Gravity.BOTTOM,18,18);
+        addAction(viewport,"返回",2,Gravity.RIGHT|Gravity.BOTTOM,104,18);
+        addAction(viewport,"开始",1L<<10,Gravity.RIGHT|Gravity.TOP,18,18);
+        addAction(viewport,"↑",1L<<13,Gravity.LEFT|Gravity.BOTTOM,92,92);
+        addAction(viewport,"↓",1L<<15,Gravity.LEFT|Gravity.BOTTOM,92,18);
+        addAction(viewport,"←",1L<<12,Gravity.LEFT|Gravity.BOTTOM,18,55);
+        addAction(viewport,"→",1L<<14,Gravity.LEFT|Gravity.BOTTOM,166,55);
         touchControls=new TouchControlsView(this,() -> inputReady&&resumed&&!failed);
-        root.addView(touchControls,new FrameLayout.LayoutParams(-1,-1));
+        viewport.addView(touchControls,new FrameLayout.LayoutParams(-1,-1));
         TextView mode=new TextView(this);mode.setText("战斗操控");mode.setTextColor(0xffe9d9ba);mode.setTextSize(16);
         mode.setGravity(Gravity.CENTER);mode.setBackgroundColor(0x8030241b);mode.setContentDescription("切换到战斗触摸操控");mode.setClickable(true);mode.setFocusable(true);
         FrameLayout.LayoutParams modeParams=new FrameLayout.LayoutParams(dp(100),dp(48),Gravity.LEFT|Gravity.TOP);modeParams.leftMargin=dp(18);modeParams.topMargin=dp(18);
         mode.setOnClickListener(v -> {boolean combat=touchControls.getVisibility()!=View.VISIBLE;actionButtons=0;if(inputReady)nativeActions(0,0,0,0,0);
             touchControls.setActive(combat);for(View control:menuControls)control.setVisibility(combat?View.GONE:View.VISIBLE);
             mode.setText(combat?"菜单操控":"战斗操控");mode.setContentDescription(combat?"切换到菜单操控":"切换到战斗触摸操控");});
-        root.addView(mode,modeParams);
+        viewport.addView(mode,modeParams);
+        fps=new TextView(this);fps.setText("FPS —");fps.setTextColor(TouchControlsView.TEXT);
+        fps.setTextSize(12);fps.setTypeface(Typeface.MONOSPACE);fps.setGravity(Gravity.CENTER);
+        fps.setMinWidth(dp(84));fps.setPadding(dp(8),dp(4),dp(8),dp(4));fps.setBackgroundColor(TouchControlsView.INK);
+        fps.setClickable(false);fps.setFocusable(false);
+        FrameLayout.LayoutParams fpsParams=new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.CENTER_HORIZONTAL);
+        fpsParams.topMargin=dp(10);viewport.addView(fps,fpsParams);
         status=new TextView(this);status.setTextColor(0xffe9d9ba);status.setTextSize(18);
         status.setGravity(Gravity.CENTER);status.setBackgroundColor(0xe60d0d0f);
         status.setPadding(dp(28),dp(18),dp(28),dp(18));status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
@@ -172,14 +184,20 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private final Runnable poll=new Runnable(){public void run(){
         if(!launched||failed)return;
         try{String raw=nativeStatus();JSONObject s=new JSONObject(raw);
-            if(s.getLong("presented_frames")>0)status.setVisibility(View.GONE);else status.setText(s.getString("phase"));
+            long frame=s.getLong("presented_frames");
+            if(frame>0)status.setVisibility(View.GONE);else status.setText(s.getString("phase"));
+            if(resumed){double current=fpsSampler.sample(frame,SystemClock.elapsedRealtime());
+                if(!Double.isNaN(current)&&Double.compare(current,displayedFps)!=0){
+                    fps.setText(String.format(getResources().getConfiguration().getLocales().get(0),"FPS %.1f",current));
+                    displayedFps=current;
+                }}
             String request=nativeKeyboardRequest();if(request!=null&&resumed&&!destroyed){JSONObject k=new JSONObject(request);long id=k.getLong("id");
                 if(keyboardDialog==null||keyboardId!=id){if(keyboardDialog!=null)keyboardDialog.dismiss();keyboardId=id;actionButtons=0;nativeActions(0,0,0,0,0);touchControls.cancel();
                     keyboardDialog=ShellTextInputDialog.show(GameActivity.this,k.getString("title"),k.getString("subtitle"),k.getString("hint"),k.getString("initial"),k.getInt("min"),k.getInt("max"),(ok,text)->{nativeKeyboardResult(id,ok,text);keyboardDialog=null;});}}
         }catch(Exception e){fail("无法读取游戏状态",e);}ui.postDelayed(this,500);
     }};
-    @Override public void onResume(){super.onResume();resumed=true;nativeKeyboardReady(true);configureAndStart();}
-    @Override public void onPause(){nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}resumed=false;inputReady=false;actionButtons=0;if(touchControls!=null)touchControls.cancel();if(configured)nativeActions(0,0,0,0,0);if(configured&&surfaceReady)publishSurface();super.onPause();}
+    @Override public void onResume(){super.onResume();resumed=true;fpsSampler.reset();nativeKeyboardReady(true);configureAndStart();}
+    @Override public void onPause(){nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}resumed=false;fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;if(touchControls!=null)touchControls.cancel();if(configured)nativeActions(0,0,0,0,0);if(configured&&surfaceReady)publishSurface();super.onPause();}
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}

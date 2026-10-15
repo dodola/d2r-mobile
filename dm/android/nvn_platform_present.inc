@@ -3,6 +3,7 @@
  */
 #include "nvn_platform_clock.h"
 #include "nvn_platform_backend.h"
+#include "nvn_present_policy.h"
 static pthread_mutex_t android_suspend_mu=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t android_suspend_cv=PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t android_lifecycle_mu=PTHREAD_MUTEX_INITIALIZER;
@@ -56,29 +57,37 @@ NVN(nvnWindowBuilderSetTextures,void,NVNwindowBuilder *b,int n,NVNtexture *const
     for(int i=0;i<n;i++){if(!textures[i])die("Android NVN null window texture %d",i);WB(b)->tex[i]=textures[i];}
 }
 NVN(nvnWindowBuilderSetPresentInterval,void,NVNwindowBuilder *b,int interval) {if(interval<0)die("negative present interval %d",interval);WB(b)->interval=interval;}
+static void android_present_log(const win_t *w);
 NVN(nvnWindowInitialize,NVNboolean,NVNwindow *window,const NVNwindowBuilder *b) {
     const win_builder_t *s=(const void *)b;if(s->ntex<1 || s->ntex>4)return 0;
     void *native=dm_vk_native_window();
     if(!native || (void *)(uintptr_t)s->native!=native)die("Android NVN window requires currently bound real Surface");
     win_t *w=(void *)window;memset(w,0,sizeof(*w));w->magic=MAGIC('W','I','N','D');w->native=s->native;
-    w->ntex=s->ntex;w->interval=s->interval;memcpy(w->tex,s->tex,sizeof(w->tex));return 1;
+    w->ntex=s->ntex;w->interval=s->interval;memcpy(w->tex,s->tex,sizeof(w->tex));android_present_log(w);return 1;
 }
 NVN(nvnWindowFinalize,void,NVNwindow *window) {mtl_finish();memset(window,0,sizeof(win_t));}
-NVN(nvnWindowSetPresentInterval,void,NVNwindow *window,int interval) {if(interval<0)die("negative present interval %d",interval);((win_t *)window)->interval=interval;}
+NVN(nvnWindowSetPresentInterval,void,NVNwindow *window,int interval) {
+    if(interval<0)die("negative present interval %d",interval);
+    win_t *w=(void *)window;
+    if(w->interval!=interval){w->interval=interval;android_present_log(w);}
+}
 NVN(nvnWindowSetCrop,void,NVNwindow *window,int x,int y,int width,int height) {
     if(x<0 || y<0 || width<0 || height<0)die("NVN crop bounds %d %d %d %d",x,y,width,height);
     int crop[4]={x,y,width,height};memcpy(((win_t *)window)->crop,crop,sizeof(crop));
 }
-static int android_present_hz=-1,android_display_intervals;
+static int android_present_hz=-1,android_display_intervals,android_present_fixed_60=-1;
 void nvn_present_config(int hz,int display_intervals) {if(hz<0 || hz>1000)die("NVN pacing hz=%d",hz);android_present_hz=hz;android_display_intervals=display_intervals;}
 static uint64_t android_present_period(const win_t *w) {
     if(android_present_hz<0) {const char *e=getenv("DM_PRESENT_HZ");android_present_hz=e?atoi(e):60;
         android_display_intervals=mtl_has_window();}
-    if(!android_present_hz)return 0;
-    /* Original frame-counting behavior remains limited to 60 Hz unless the
-     * front end explicitly supplies another tested game cadence. */
-    uint64_t interval=w->interval>0?(uint64_t)w->interval:1;
-    return (1000000000ULL/(uint64_t)android_present_hz)*(android_display_intervals?interval:1);
+    if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL;
+    return dm_android_present_period_ns(android_present_hz,android_display_intervals,w->interval,android_present_fixed_60);
+}
+static void android_present_log(const win_t *w) {
+    uint64_t period=android_present_period(w);
+    LOG("[nvn-android] PRESENT_POLICY mode=%s base_hz=%d guest_interval=%d apply_guest_interval=%d effective_period_ns=%llu",
+        android_present_fixed_60?"fixed60-experiment":"guest",android_present_hz,w->interval,
+        android_display_intervals&&!android_present_fixed_60,(unsigned long long)period);
 }
 NVN(nvnWindowAcquireTexture,NVNwindowAcquireTextureResult,NVNwindow *window,NVNsync *sync,int *index) {
     win_t *w=(void *)window;if(!index || w->ntex<1 || w->ntex>4)die("NVN acquire window",0);
