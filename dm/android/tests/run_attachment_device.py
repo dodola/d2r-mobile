@@ -27,11 +27,12 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--serial')
     parser.add_argument('--run-device', action='store_true')
+    parser.add_argument('--pipeline-check', action='store_true', help='Also repeat with a fresh persistent cache, then warm it across a process restart')
     args = parser.parse_args()
     if args.run_device and not args.serial:
         parser.error('--serial is required with --run-device')
     repo = Path(__file__).resolve().parents[3]
-    out = args.output.resolve(); out.mkdir(parents=True, exist_ok=True)
+    out = args.output.resolve(); out.mkdir(parents=True, exist_ok=not args.pipeline_check)
     report = {'passed': False, 'device_executed': False, 'original_game_frame': False,
               'recorded_at_utc': datetime.now(timezone.utc).isoformat()}
     receipt = out / 'result.json'
@@ -54,6 +55,8 @@ def main():
     anchor = 'p_TextureFinalize(&target);'
     assert source.count(anchor) == 1
     source = source.replace(anchor, cases.read_text(encoding='utf-8') + '\n' + anchor)
+    if args.pipeline_check:
+        source = source.replace('    int draw_ok=', '    if(getenv("DM_VK_PIPELINE_DIR"))sleep(6);\n    int draw_ok=')
     functions = sorted(set(re.findall(r'p_([A-Z][A-Za-z0-9]+)', source)))
     source = source.replace('@DECLARATIONS@', '\n'.join(f'static PFNNVN{x.upper()}PROC p_{x};' for x in functions))
     source = source.replace('@INITIALIZERS@', '\n'.join(f'p_{x}=(PFNNVN{x.upper()}PROC)boot("nvn{x}");' for x in functions))
@@ -90,6 +93,8 @@ def main():
         print('Build passed; device not contacted'); return
     adb = [sdk / 'platform-tools/adb.exe', '-s', args.serial]
     remote = '/data/local/tmp/d2r-attachment-20261016'
+    if args.pipeline_check:
+        remote = '/data/local/tmp/d2r-pipeline-' + re.sub(r'[^a-zA-Z0-9_-]', '_', out.name)
     run([*adb, 'shell', 'mkdir', '-p', remote + '/cache'], 'mkdir.log')
     for p in sorted(args.cache.iterdir()):
         if p.is_file():
@@ -109,6 +114,29 @@ def main():
     if not all(runtime[k] for k in ('compute_passed', 'draw_passed', 'real_write_fault_hook_passed', 'compact_records_passed')):
         raise RuntimeError('Base NVN fixture failed')
     run([*adb, 'pull', remote + '/color.rgba', out / 'color.rgba'], 'pull-color.log')
+    if args.pipeline_check:
+        baseline_hash = sha(out / 'color.rgba')
+        run([*adb, 'shell', 'mkdir', '-p', remote + '/pipeline-cache'], 'pipeline-mkdir.log')
+        pipeline_runs = []
+        for label in ('first', 'repeat'):
+            tested_pipeline = run([*adb, 'shell', 'env', 'DM_VK_PIPELINE_MODE=2',
+                'DM_VK_PIPELINE_DIR=' + remote + '/pipeline-cache', 'timeout', '90', remote + '/probe',
+                remote + '/cache', remote + '/color.rgba', 'run'], 'pipeline-' + label + '.log', 100)
+            pipeline_log = (tested_pipeline.stdout + tested_pipeline.stderr).decode(errors='replace')
+            if 'cases=120 compared_bytes=1720320 mismatches=0 same_process=1 passed=1' not in pipeline_log:
+                raise RuntimeError('Pipeline GPU pixel comparison failed')
+            run([*adb, 'pull', remote + '/color.rgba', out / ('pipeline-' + label + '.rgba')], 'pipeline-' + label + '-pull.log')
+            if sha(out / ('pipeline-' + label + '.rgba')) != baseline_hash:
+                raise RuntimeError('Persistent pipeline changed base GPU pixels')
+            loaded = int(re.search(r'PIPELINE_CACHE .*loaded_bytes=(\d+)', pipeline_log)[1])
+            claims = len(re.findall(r'PIPELINE_USE seed=1 ', pipeline_log))
+            if label == 'first' and loaded:
+                raise RuntimeError('First pipeline run must use a fresh cache directory')
+            if label == 'repeat' and (not loaded or not claims):
+                raise RuntimeError('Expected disk-cache load and manifest pipeline claim')
+            pipeline_runs.append({'label': label, 'passed': True, 'loaded_bytes': loaded,
+                                  'manifest_claims': claims, 'pixels_sha256': baseline_hash})
+        report['pipeline_runs'] = pipeline_runs
     props = run([*adb, 'shell', 'getprop'], 'device-properties.log').stdout.decode('utf-8', errors='replace')
     report.update(passed=True, phases=phases, summary=summary[0], runtime=runtime, pixel_readback_sha256=sha(out / 'color.rgba'),
                   device_log_sha256=sha(out / 'device.log'),
