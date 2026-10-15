@@ -15,6 +15,9 @@
 #include <mach-o/ldsyms.h>
 #endif
 #include "hle.h"
+#ifdef __ANDROID__
+#include "../android/relr.h"
+#endif
 
 module_t g_mod[MAX_MOD];
 int g_nmod;
@@ -139,6 +142,15 @@ static uint64_t resolve_sym(module_t *m, const char *name, int optional) {
 // 强制接管表（hle.h HLE_FORCE，__DATA,swforce 段）：命中即覆盖模块内定义
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
+#ifdef __ANDROID__
+// Standalone title bring-up only. D2R app loading keeps its existing strict
+// force-table check. A different title need not reference every D2R SDK API.
+static int g_probe_allow_unused_force;
+void dm_android_loader_probe_allow_unused_force(void) {
+    if (g_nmod) die("Android force policy must be selected before loading");
+    g_probe_allow_unused_force = 1;
+}
+#endif
 static void force_init(void) {
 #ifdef __ANDROID__
     extern const hle_force_ent __start_dm_force[] __attribute__((weak));
@@ -164,9 +176,23 @@ static void *force_lookup(const char *name) {
 }
 static void force_check(void) {
     int bad = 0;
+#ifdef __ANDROID__
+    unsigned unused = 0;
+#endif
     for (unsigned i = 0; i < g_nforce; i++)
-        if (!g_force_hits[i]) { LOG("强制接管条目无任何引用：%s", g_force[i].name); bad = 1; }
+        if (!g_force_hits[i]) {
+#ifdef __ANDROID__
+            if (g_probe_allow_unused_force) { unused++; continue; }
+#endif
+            LOG("强制接管条目无任何引用：%s", g_force[i].name); bad = 1;
+        }
     if (bad) die("强制接管清单有误");
+#ifdef __ANDROID__
+    if (g_probe_allow_unused_force) {
+        LOG("Android title probe force entries: active=%u unused=%u", g_nforce-unused, unused);
+        return;
+    }
+#endif
     LOG("force: %u 条全部命中", g_nforce);
 }
 
@@ -237,12 +263,36 @@ static void register_gates(module_t *m, const char *dir) {
 
 static void relocate(module_t *m) {
     uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0;
+#ifdef __ANDROID__
+    uint64_t relr=0, relrsz=0, relrent=0;
+#endif
     for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
         case DT_RELA: rela = d->d_un.d_ptr; break;
         case DT_RELASZ: relasz = d->d_un.d_val; break;
         case DT_JMPREL: jmprel = d->d_un.d_ptr; break;
         case DT_PLTRELSZ: pltsz = d->d_un.d_val; break;
+#ifdef __ANDROID__
+        case 35: relrsz=d->d_un.d_val; break; // DT_RELRSZ
+        case 36: relr=d->d_un.d_ptr; break;   // DT_RELR
+        case 37: relrent=d->d_un.d_val; break;// DT_RELRENT
+#endif
     }
+#ifdef __ANDROID__
+    if(relrsz) {
+        if(relrent!=8 || relrsz%8 || relr>m->size || relrsz>m->size-relr)
+            die("%s: invalid Android RELR table",m->name);
+        uint64_t *words=malloc((size_t)relrsz);
+        if(!words)die("%s: RELR table allocation",m->name);
+        memcpy(words,m->base+relr,(size_t)relrsz);
+        size_t count=0;
+        size_t writable_start=(m->text_end+0x3fff)&~(size_t)0x3fff;
+        if(dm_android_relr_apply(m->base,m->size,writable_start,m->key_page_off,
+                                words,(size_t)relrsz/8,&count))
+            die("%s: invalid Android RELR target",m->name);
+        free(words);
+        LOG("%s: RELR words=%llu relocated=%zu",m->name,relrsz/8,count);
+    }
+#endif
     int cnt[3] = {0};
     const Elf64_Rela *tabs[2] = {(const Elf64_Rela *)(m->base + rela), (const Elf64_Rela *)(m->base + jmprel)};
     uint64_t sizes[2] = {relasz, pltsz};
