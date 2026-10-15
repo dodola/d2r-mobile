@@ -8,6 +8,15 @@ Platforms: iPhone / iPad (iOS 26 and later); Android (experimental, arm64-v8a, A
 
 中文: [README.zh-CN.md](README.zh-CN.md)
 
+The `codex/zelda-echoes-of-wisdom-android` branch also starts Android bring-up for
+**The Legend of Zelda: Echoes of Wisdom**. Pinned title profiles, executable
+extraction/auditing, and Android instruction rewriting are available; validation
+of version 1.1.0 now covers four-module loading, SDK OS initialization,
+thread/event checks, and SDK startup with temporary fixtures on PPG-AN00.
+Resource and graphics adaptation remain in progress, with **no playable APK
+yet**. See the [Android title notes](dm/android/titles/README.md) for status,
+commands, and remaining work. Android gameplay measurements below refer to D2R.
+
 ## Android support — experimental
 
 As of **2026-10-15**, this fork runs the original game on a physical Android device through a native ARM64 host and a Vulkan implementation of the game's NVN graphics interface. It reaches character selection and town, with touch controls, inventory and options, basic melee combat, an Act I camp-to-wilderness round trip, and save/exit followed by a cold restart verified on device.

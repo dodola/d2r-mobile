@@ -8,6 +8,8 @@ iOS 版已打磨到可以天天玩、从开荒一路玩到终局；Android 版�
 
 English: [README.md](README.md)
 
+当前 `codex/zelda-echoes-of-wisdom-android` 分支也开始了《塞尔达传说 智慧的再现》的 Android 适配：已加入独立版本档案、程序提取审计和指令改写流程，1.1.0 已在 PPG-AN00 上通过四模块装载、SDK OS 初始化、线程/事件测试，以及使用临时 fixture 的 SDK 启动检查。资源与图形适配仍在进行，**尚无可玩 APK**。进度、命令和后续工作见 [Android 游戏适配档案](dm/android/titles/README.md)。下方 Android 玩法和 FPS 数据仍然只对应 D2R。
+
 ## Android 支持（实验性）
 
 截至 **2026-10-15**，本分支已通过原生 ARM64 宿主与 Vulkan 实现的 NVN 图形接口，在 Android 真机上运行原版游戏。已验证选角、进入镇内、触屏操作、背包与选项菜单、基础近战、第一幕营地与荒地往返，以及存档退出后冷启动重入。

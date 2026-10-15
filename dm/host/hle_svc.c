@@ -22,6 +22,13 @@
 // reserving up to 8 GB would make builds from developer accounts that cannot sign that entitlement (free accounts) exit at this step.
 static size_t g_reserve;           // 实际预留大小（逐档降级后成功的值） | Actual reserved size (the value that succeeded after stepping down)
 static uint8_t *g_as;              // ASLR 区基址 = 整块 | ASLR region base = the whole block
+#ifdef __ANDROID__
+static uint64_t g_android_program_id = 0x0100726014352000ull;
+void dm_android_svc_set_program_id(uint64_t program_id) {
+    if (!program_id || g_as || g_nmod) die("Android program ID must be selected before loading");
+    g_android_program_id = program_id;
+}
+#endif
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap; static int g_heap_rejects;
 // 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
@@ -250,16 +257,32 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = g_reserve;     break;
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = app_pool(); break;
-        case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + image_bytes(); break;   // 已用 = 堆 + 映像，与 SetHeapSize 的核对同一口径（原先写死 64 MB）。sdk 的 QueryMemoryInfo（sdk+0x34f4ec）只拿它算「程序占用」那一格； | Used = heap + image, the same accounting as the check in SetHeapSize (it used to be hard-coded to 64 MB). The sdk's QueryMemoryInfo (sdk+0x34f4ec) only uses it to compute the "program usage" field;
-                                                 // 「可用总量」那一格直接是池总量，所以游戏启动设堆仍要从整池起按 2 MB 往下减到 池 − 映像（约 34 次被拒）——这是原版在真机上的走法，不是我们的口径错
-                                                 // The "total available" field is simply the pool total, so at startup the game still has to step down from the whole pool by 2 MB at a time until pool - image (about 34 refusals) when setting its heap -- this is how the original behaves on the real device, not a mistake in our accounting
+        case I_UsedMem: case I_UsedNonSys:
+#ifdef __ANDROID__
+            v = g_heap_cur + image_bytes();
+#else
+            v = g_heap_cur + image_bytes();
+#endif
+            break;
         case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
         case I_DebuggerAttached: v = 0; break;
         case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
-        case I_ProgramId: v = 0x0100726014352000ull; break;
+        case I_ProgramId:
+#ifdef __ANDROID__
+            v = g_android_program_id;
+#else
+            v = 0x0100726014352000ull;
+#endif
+            break;
         case I_IsApplication: v = 1; break;
         case I_UserExcAddr: v = 0; break;
 #ifdef __ANDROID__
+        // Newer SDK OS initialization queries InfoType_AliasRegionExtraSize
+        // (28). This host reserves only g_alias_cap, with no extra alias area.
+        case 28:
+            if (regs[2] != 0xffff8001u || regs[3])
+                die("Android unsupported AliasRegionExtraSize handle=%#llx subid=%#llx",regs[2],regs[3]);
+            v = 0; break;
         default: die("Android unsupported GetInfo id=%llu handle=%#llx subid=%#llx", id, regs[2], regs[3]);
 #else
         default: v = 0; break;
