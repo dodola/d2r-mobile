@@ -62,6 +62,12 @@ static PFN_vkCmdSetScissor dm_vkCmdSetScissor;
 #define vkCmdSetScissor dm_vkCmdSetScissor
 static PFN_vkCmdSetViewport dm_vkCmdSetViewport;
 #define vkCmdSetViewport dm_vkCmdSetViewport
+static PFN_vkCmdPushConstants dm_vkCmdPushConstants;
+#define vkCmdPushConstants dm_vkCmdPushConstants
+static PFN_vkCmdSetStencilReference dm_vkCmdSetStencilReference;
+#define vkCmdSetStencilReference dm_vkCmdSetStencilReference
+static PFN_vkCmdSetStencilWriteMask dm_vkCmdSetStencilWriteMask;
+#define vkCmdSetStencilWriteMask dm_vkCmdSetStencilWriteMask
 static PFN_vkCmdUpdateBuffer dm_vkCmdUpdateBuffer;
 #define vkCmdUpdateBuffer dm_vkCmdUpdateBuffer
 static PFN_vkCmdWriteTimestamp dm_vkCmdWriteTimestamp;
@@ -203,6 +209,9 @@ static PFN_vkDestroyBufferView dm_vkDestroyBufferView;
 static PFN_vkCmdCopyImage dm_vkCmdCopyImage;
 #define vkCmdCopyImage dm_vkCmdCopyImage
 static void dm_vk_resolve(VkInstance instance) {
+    dm_vkCmdPushConstants=(PFN_vkCmdPushConstants)dm_vk_get(instance,"vkCmdPushConstants");if(!dm_vkCmdPushConstants)die("Vulkan dispatch vkCmdPushConstants",0);
+    dm_vkCmdSetStencilReference=(PFN_vkCmdSetStencilReference)dm_vk_get(instance,"vkCmdSetStencilReference");if(!dm_vkCmdSetStencilReference)die("Vulkan dispatch vkCmdSetStencilReference",0);
+    dm_vkCmdSetStencilWriteMask=(PFN_vkCmdSetStencilWriteMask)dm_vk_get(instance,"vkCmdSetStencilWriteMask");if(!dm_vkCmdSetStencilWriteMask)die("Vulkan dispatch vkCmdSetStencilWriteMask",0);
     dm_vkResetCommandPool=(PFN_vkResetCommandPool)dm_vk_get(instance,"vkResetCommandPool");if(!dm_vkResetCommandPool)die("Vulkan dispatch vkResetCommandPool",0);
     dm_vkResetDescriptorPool=(PFN_vkResetDescriptorPool)dm_vk_get(instance,"vkResetDescriptorPool");if(!dm_vkResetDescriptorPool)die("Vulkan dispatch vkResetDescriptorPool",0);
     dm_vkResetFences=(PFN_vkResetFences)dm_vk_get(instance,"vkResetFences");if(!dm_vkResetFences)die("Vulkan dispatch vkResetFences",0);

@@ -39,6 +39,7 @@ def main():
         for suffix in ('*.h', '*.inc'):
             sources.update((repo / directory).glob(suffix))
     sources.update([repo / 'dm/android/CMakeLists.txt', repo / 'dm/ios/Sources/dm_touch_controls.h'])
+    sources.update(p for p in (repo / 'dm/gfx/nvn/shaders').glob('*') if p.is_file())
     native = build / 'libd2r_mobile_android.so'
     report = dict(built_at=datetime.now(timezone.utc).isoformat(), repository=str(repo),
                   commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),

@@ -34,11 +34,14 @@ def main():
     parser.add_argument('--cache-roundtrip', action='store_true', help='Compare cold/warm/corrupt/repaired caches with identical GPU readbacks')
     parser.add_argument('--sampler-checks', action='store_true', help='Also read back integer, float and depth comparison sampling')
     parser.add_argument('--command-state-checks', action='store_true', help='Compare all four command-state/PSO-last cache modes with GPU readback')
+    parser.add_argument('--depth-copy-checks', action='store_true', help='Compare native/forced drawn depth+stencil copies with independent expected pixels and command caching off/on')
     args = parser.parse_args()
     if args.run_device and not args.serial:
         parser.error('--serial is required with --run-device')
     if args.command_state_checks and args.cache_roundtrip:
         parser.error('Run command-state and persistent-cache comparisons separately')
+    if args.depth_copy_checks and (args.command_state_checks or args.cache_roundtrip or args.sampler_checks):
+        parser.error('Run depth-copy comparisons separately from other optional suites')
     repo = Path(__file__).resolve().parents[3]
     out = args.output.resolve(); out.mkdir(parents=True, exist_ok=True)
     report = {'passed': False, 'device_executed': False, 'original_game_frame': False,
@@ -65,6 +68,13 @@ def main():
     anchor = 'p_TextureFinalize(&target);'
     assert source.count(anchor) == 1
     extra_cases = cases.read_text(encoding='utf-8')
+    if args.depth_copy_checks:
+        source = source.replace('#include "nvn_obj.h"', '#include "nvn_obj.h"\n#include <math.h>')
+        source = source.replace('void dm_vk_attachment_config(int);',
+            'void dm_vk_depth_copy_stats(uint64_t *,uint64_t *,uint64_t *);\nvoid dm_vk_attachment_config(int);')
+        depth_cases = Path(__file__).with_name('depth_copy_device_cases.inc')
+        extra_cases = depth_cases.read_text(encoding='utf-8') + '\n' + extra_cases
+        report['depth_copy_fixture_sha256'] = sha(depth_cases)
     if args.command_state_checks:
         commands = importlib.import_module('command_state_device_check')
         pso = importlib.import_module('pso_state_device_check')
@@ -129,6 +139,8 @@ def main():
     binary = out / 'attachment_probe'
     flags = ['-std=c11', '-O2', '-g', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror',
              '-Wno-format', '-Wno-unused-function', '-ffixed-x18']
+    if args.depth_copy_checks:
+        flags += ['-DDM_VK_COPY_TEST']
     for include in ('gfx/nvn/include', 'gfx/nvn', 'android', 'host'):
         flags += ['-I', dm / include]
     flags += sources + objects + ['-lvulkan', '-landroid', '-llog', '-ldl', '-lz', '-lm', '-laaudio',
@@ -139,7 +151,7 @@ def main():
     report.update(build_passed=True, binary_sha256=sha(binary), harness_sha256=sha(harness),
                   template_sha256=sha(args.fixture_tools / 'shader_nvn_api_check.py'),
                   source_sha256={str(p.relative_to(repo)): sha(p) for p in sorted(dm.rglob('*'))
-                                 if p.suffix in ('.c', '.h', '.inc') and 'third_party' not in p.parts},
+                                 if p.suffix in ('.c', '.h', '.inc', '.vert', '.frag') and 'third_party' not in p.parts},
                   linked_core_objects_sha256={str(p.relative_to(args.build)): sha(p) for p in objects},
                   shader_cache_sha256={p.name: sha(p) for p in sorted(args.cache.iterdir()) if p.is_file()})
     receipt.write_text(json.dumps(report, indent=2) + '\n')
@@ -156,6 +168,8 @@ def main():
     cache_env = []
     if args.command_state_checks:
         cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=0', 'DM_PSO_LAST_CACHE=0']
+    if args.depth_copy_checks:
+        cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_VK_DEPTH_COPY_DRAW=0', 'DM_COMMAND_STATE_CACHE=0']
     if args.cache_roundtrip:
         run([*adb, 'shell', 'mkdir', remote + '/pipeline'], 'mkdir-pipeline.log')
         cache_env = ['env', 'DM_VK_PIPELINE_CACHE_DIR=' + remote + '/pipeline']
@@ -176,6 +190,44 @@ def main():
         raise RuntimeError('Sampler GPU/fallback proof missing')
     report['sampler_checks'] = args.sampler_checks
     run([*adb, 'pull', remote + '/color.rgba', out / 'color.rgba'], 'pull-color.log')
+    if args.depth_copy_checks:
+        records = []
+        for mode in range(4):
+            text = output
+            if mode:
+                checked = run([*adb, 'shell', 'env', 'DM_RESOURCE_STATS=1',
+                    'DM_VK_DEPTH_COPY_DRAW=' + str(mode & 1), 'DM_COMMAND_STATE_CACHE=' + str(int(bool(mode & 2))),
+                    'timeout', '90', remote + '/probe', remote + '/cache', remote + '/color.rgba', 'run'],
+                    f'depth-{mode}-device.log', 100)
+                text = (checked.stdout + checked.stderr).decode('utf-8', errors='replace')
+                runtime_mode = json.loads(checked.stdout.decode().strip().splitlines()[-1])
+                if not all(runtime_mode[k] for k in ('compute_passed', 'draw_passed', 'real_write_fault_hook_passed', 'compact_records_passed')):
+                    raise RuntimeError('Depth-copy base fixture failed')
+            found = re.findall(r'DEPTH_COPY_DEVICE formats=4 cases=36 read_texels=(\d+) read_bytes=(\d+) plain=4 blits=(\d+) draws=(\d+) color_rebind=36 occlusion=36 passed=1', text)
+            driver = re.search(r'\[nvn-vulkan\] driver id=(\d+)', text)
+            if len(found) != 1 or not driver or 'mismatches=0 same_process=1 passed=1' not in text:
+                raise RuntimeError('Depth-copy GPU proof missing')
+            texels, size, blits, draws = map(int, found[0])
+            if texels != 138240 or size != 622080 or blits + draws != 32 or (mode & 1 and (blits or draws != 32)):
+                raise RuntimeError('Depth-copy path/coverage mismatch')
+            commands = [dict(re.findall(r'(\w+)=([^\s]+)', row)) for row in text.splitlines()
+                        if 'COMMAND_STATE_STATS ' in row]
+            if not commands or any(int(row['enabled']) != bool(mode & 2) for row in commands):
+                raise RuntimeError('Depth-copy command-cache mode not exercised')
+            if bool(int(commands[-1]['skipped'])) != bool(mode & 2):
+                raise RuntimeError('Depth-copy command-cache skip proof missing')
+            pixels_file = out / f'depth-{mode}.bin'
+            run([*adb, 'pull', remote + '/color.rgba.depth', pixels_file], f'depth-{mode}-pull.log')
+            if pixels_file.stat().st_size != size + 36 * 64 * 64 * 4:
+                raise RuntimeError('Depth-copy readback size mismatch')
+            records.append(dict(mode=mode, force_draw=bool(mode & 1), command_cache=bool(mode & 2),
+                driver_id=int(driver[1]), read_texels=texels, read_bytes=size, blits=blits, draws=draws,
+                command_stats=commands[-1], readback_sha256=sha(pixels_file)))
+        if len({r['readback_sha256'] for r in records}) != 1 or len({r['driver_id'] for r in records}) != 1:
+            raise RuntimeError('Depth-copy modes changed GPU pixels or driver')
+        report['depth_copy_ab'] = records
+        report['native_depth_blit_exercised'] = any(r['blits'] for r in records)
+        report['natural_depth_draw_exercised'] = any(r['draws'] for r in records if not r['force_draw'])
     if args.command_state_checks:
         def state_record(text, mode):
             if ('COMMAND_STATE_DEVICE state_cases=8 indexed_draws=64 event_cuts=8 compute_switches=8 passed=1' not in text

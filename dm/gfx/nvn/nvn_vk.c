@@ -2859,6 +2859,7 @@ static VkImageSubresourceLayers copy_layers(const tex_t *t,VkFormat gpu_format,c
      * Their guest format is not a Vulkan image format in this backend. */
     return (VkImageSubresourceLayers){aspect(gpu_format),level,volume?0:base+r->zoffset,volume?1:r->depth};
 }
+#include "nvn_vk_depth_copy.h"
 static void copy_t2t(const p_copy_t2t *p) {
     if(p->flags&~(NVN_COPY_FLAGS_ENGINE_2D_BIT|NVN_COPY_FLAGS_LINEAR_FILTER_BIT))die("texture copy flags",p->flags);
     uint32_t decoded_format;int decoded_bpp;
@@ -2872,22 +2873,46 @@ static void copy_t2t(const p_copy_t2t *p) {
     /* Copies are normal per-frame work. Keep their resource details for startup
      * and requested frame traces without growing the on-device log per copy. */
     if(G.present_count<2 || G.trace_frame)fprintf(stderr,"[nvn-vulkan] COPY_T2T src=%llu dst=%llu region=%d,%d,%d -> %d,%d,%d flags=%#x src_level=%u dst_level=%u src_layer=%u dst_layer=%u\n",(unsigned long long)p->src->serial,(unsigned long long)p->dst->serial,p->sr.width,p->sr.height,p->sr.depth,p->dr.width,p->dr.height,p->dr.depth,p->flags,sl.mipLevel,dl.mipLevel,sl.baseArrayLayer,dl.baseArrayLayer);
-    texture_transition(s,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);texture_transition(d,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);all_barrier();
     VkOffset3D so={p->sr.xoffset,p->sr.yoffset,sv?p->sr.zoffset:0},doff={p->dr.xoffset,p->dr.yoffset,dv?p->dr.zoffset:0};
+    int depth=(sl.aspectMask&VK_IMAGE_ASPECT_DEPTH_BIT)!=0;
     G.profile_t2t_copies++;G.profile_t2t_texels+=(uint64_t)p->dr.width*p->dr.height*p->dr.depth;
     if(p->sr.width==p->dr.width&&p->sr.height==p->dr.height&&p->sr.depth==p->dr.depth) {
+        texture_transition(s,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);texture_transition(d,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);all_barrier();
         VkImageCopy c={.srcSubresource=sl,.srcOffset=so,.dstSubresource=dl,.dstOffset=doff,.extent={p->sr.width,p->sr.height,sv?p->sr.depth:1}};
-        vkCmdCopyImage(S.command,s->image,s->layout,d->image,d->layout,1,&c);
+        VkImageCopy copies[2]={c,c};unsigned count=1;
+        if(sl.aspectMask&VK_IMAGE_ASPECT_STENCIL_BIT){
+            copies[0].srcSubresource.aspectMask=copies[0].dstSubresource.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;
+            copies[1].srcSubresource.aspectMask=copies[1].dstSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;count=2;
+        }
+        vkCmdCopyImage(S.command,s->image,s->layout,d->image,d->layout,count,copies);
+        if(depth)DepthCopy.plain_copies++;
     }else {
         G.profile_t2t_scaled++;
         VkFormatProperties fp=format_properties(s->format);
-        if(aspect(s->format)!=VK_IMAGE_ASPECT_COLOR_BIT || !(p->flags&NVN_COPY_FLAGS_ENGINE_2D_BIT) || (!sv&&p->sr.depth!=p->dr.depth) ||
-           !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT)||!(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT))die("texture scaled copy feature/flags",p->flags);
+        if(!(p->flags&NVN_COPY_FLAGS_ENGINE_2D_BIT) || (!sv&&p->sr.depth!=p->dr.depth))die("texture scaled copy flags/layers",p->flags);
         VkFilter filter=p->flags&NVN_COPY_FLAGS_LINEAR_FILTER_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST;
+        if(depth&&filter!=VK_FILTER_NEAREST)die("depth copy requires nearest filtering",p->flags);
         if(filter==VK_FILTER_LINEAR&&!(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))die("texture blit linear feature",s->format);
-        VkImageBlit c={.srcSubresource=sl,.srcOffsets={so,{so.x+p->sr.width,so.y+p->sr.height,so.z+(sv?p->sr.depth:1)}},
-            .dstSubresource=dl,.dstOffsets={doff,{doff.x+p->dr.width,doff.y+p->dr.height,doff.z+(dv?p->dr.depth:1)}}};
-        vkCmdBlitImage(S.command,s->image,s->layout,d->image,d->layout,1,&c,filter);
+        int blit=(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT)&&(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT);
+        const char *force=depth?getenv("DM_VK_DEPTH_COPY_DRAW"):NULL;
+        int drawn=depth&&(!blit||(force&&!strcmp(force,"1")));
+        if(drawn){
+            VkFormatFeatureFlags needed=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+            if(sv||dv||(fp.optimalTilingFeatures&needed)!=needed)die("drawn depth copy format/dimension",s->format);
+            depth_copy_log(s->format,1);depth_copy_draw(s,d,sl,dl,&p->sr,&p->dr);
+        }else{
+            if(!blit)die("texture scaled copy blit unavailable",s->format);
+            texture_transition(s,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);texture_transition(d,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);all_barrier();
+            VkImageBlit c={.srcSubresource=sl,.srcOffsets={so,{so.x+p->sr.width,so.y+p->sr.height,so.z+(sv?p->sr.depth:1)}},
+                .dstSubresource=dl,.dstOffsets={doff,{doff.x+p->dr.width,doff.y+p->dr.height,doff.z+(dv?p->dr.depth:1)}}};
+            VkImageBlit copies[2]={c,c};unsigned count=1;
+            if(sl.aspectMask&VK_IMAGE_ASPECT_STENCIL_BIT){
+                copies[0].srcSubresource.aspectMask=copies[0].dstSubresource.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;
+                copies[1].srcSubresource.aspectMask=copies[1].dstSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;count=2;
+            }
+            vkCmdBlitImage(S.command,s->image,s->layout,d->image,d->layout,count,copies,filter);
+            if(depth){depth_copy_log(s->format,0);DepthCopy.blits++;}
+        }
     }
     d->cpu_owned=0;tex_dirty(d);all_barrier();
 }
@@ -3333,10 +3358,27 @@ void mtl_read_texels(const tex_t *source,unsigned level,unsigned layer,const NVN
     if(region->xoffset<0||region->yoffset<0||region->width<0||region->height<0||
       (uint64_t)region->xoffset+region->width>width||(uint64_t)region->yoffset+region->height>height)die("CPU texture read bounds",region->width);
     size_t pitch=(size_t)region->width*t->bpp;if(row<pitch || (img && img<row*(size_t)region->height))die("CPU texture read stride",row);
-    VBuffer readback=buffer_make(pitch*region->height,VK_BUFFER_USAGE_TRANSFER_DST_BIT);texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    VkBufferImageCopy copy={.imageSubresource={aspect(t->format),level,layer,1},.imageOffset={region->xoffset,region->yoffset,region->zoffset},.imageExtent={region->width,region->height,1}};
-    vkCmdCopyImageToBuffer(S.command,t->image,t->layout,readback.b,1,&copy);mtl_sub_commit();
-    for(int y=0;y<region->height;y++)memcpy(dst+y*row,readback.map+y*pitch,pitch);buffer_free(&readback);
+    int packed_stencil=(aspect(t->format)&VK_IMAGE_ASPECT_STENCIL_BIT)!=0;
+    uint64_t texels=(uint64_t)region->width*region->height,stencil_offset=texels*4;
+    VBuffer readback=buffer_make(packed_stencil?(stencil_offset+texels+3)&~3ull:pitch*region->height,VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy copy={.imageSubresource={packed_stencil?VK_IMAGE_ASPECT_DEPTH_BIT:aspect(t->format),level,layer,1},
+        .imageOffset={region->xoffset,region->yoffset,region->zoffset},.imageExtent={region->width,region->height,1}};
+    VkBufferImageCopy copies[2]={copy,copy};unsigned count=1;
+    if(packed_stencil){copies[1].bufferOffset=stencil_offset;copies[1].imageSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;count=2;}
+    vkCmdCopyImageToBuffer(S.command,t->image,t->layout,readback.b,count,copies);mtl_sub_commit();
+    for(int y=0;y<region->height;y++){
+        if(!packed_stencil){memcpy(dst+y*row,readback.map+y*pitch,pitch);continue;}
+        /* Vulkan transfers one tightly packed aspect at a time. Restore NVN's
+         * D24S8 or D32FS8 texel layout without exposing undefined padding. */
+        for(int x=0;x<region->width;x++){
+            size_t pixel=(size_t)y*region->width+x;uint32_t z;memcpy(&z,readback.map+pixel*4,4);
+            uint8_t stencil=readback.map[stencil_offset+pixel];uint8_t *out=dst+y*row+x*t->bpp;
+            if(t->format==VK_FORMAT_D24_UNORM_S8_UINT){z=(z&0xffffffu)|((uint32_t)stencil<<24);memcpy(out,&z,4);}
+            else{memcpy(out,&z,4);out[4]=stencil;memset(out+5,0,3);}
+        }
+    }
+    buffer_free(&readback);
 }
 #ifdef DM_VK_COPY_TEST
 void dm_vk_copy_test_pool_bytes(uint64_t *logical,uint64_t *resident) {
