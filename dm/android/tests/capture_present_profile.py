@@ -1,7 +1,8 @@
 """Read-only capture of actual SurfaceFlinger presentation times and renderer logs.
 
 Does not install, restart, send input, change settings or clear display statistics.
-The scene label describes the operator's observation; it does not verify game state.
+The scene label alone does not verify game state. Optional build91738 scene probes
+check player/level identity at startup, every state sample and capture completion.
 """
 import argparse
 from datetime import datetime, timezone
@@ -29,9 +30,16 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--seconds', type=int, default=60)
     parser.add_argument('--scene', required=True)
+    parser.add_argument('--scene-probe', help='Installed app-relative read-only scene_91738_probe executable')
+    parser.add_argument('--level', type=int, help='Require exactly one player in this game area; needs --scene-probe')
+    parser.add_argument('--stationary', action='store_true', help='Also require unchanged player coordinates at every scene sample')
     args = parser.parse_args()
     if args.seconds < 30:
         parser.error('Capture at least 30 seconds')
+    if bool(args.scene_probe) != (args.level is not None) or (args.stationary and not args.scene_probe):
+        parser.error('--scene-probe and --level must be supplied together; --stationary needs both')
+    if args.scene_probe and not re.fullmatch(r'files/[A-Za-z0-9_./-]+', args.scene_probe):
+        parser.error('--scene-probe must be an app-relative path under files/')
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     adb = Path(os.environ['LOCALAPPDATA']) / 'Android/Sdk/platform-tools/adb.exe'
@@ -90,7 +98,43 @@ def main():
         cutoff = max(row[1] for row in initial)
         previous_latest = cutoff
         offset = int(private('stat', '-c', '%s', LOG))
-        (out / 'startup-header.log').write_bytes(private('head', '-c', '160000', LOG))
+        header = private('head', '-c', '160000', LOG)
+        (out / 'startup-header.log').write_bytes(header)
+        scene_samples, scene_identity, scene_clock = [], None, -1
+        main_base = None
+        if args.scene_probe:
+            base = re.search(rb'\bmain: base (0x[0-9a-f]+)', header)
+            if not base:
+                raise RuntimeError('Original game module base missing from startup log')
+            main_base = base[1].decode('ascii')
+            digest = run('shell', 'run-as', PKG, 'sha256sum', args.scene_probe).decode().split()[0]
+            if not re.fullmatch(r'[0-9a-f]{64}', digest):
+                raise RuntimeError('Could not hash installed scene probe')
+            report.update(scene_probe=args.scene_probe, scene_probe_sha256=digest,
+                          main_base=main_base, expected_level=args.level, stationary_required=args.stationary)
+
+        def check_scene():
+            nonlocal scene_identity, scene_clock
+            if not args.scene_probe:
+                return None
+            snapshot = json.loads(run('shell', 'run-as', PKG, args.scene_probe, pid, main_base))
+            players = snapshot.get('players', [])
+            if not snapshot.get('readable') or not snapshot.get('version_verified') or snapshot.get('pid') != int(pid):
+                raise RuntimeError('Scene probe could not verify the pinned game layout/process')
+            if len(players) != 1 or players[0].get('level') != args.level:
+                raise RuntimeError('Expected one player in area ' + str(args.level) + ': ' + json.dumps(snapshot))
+            identity = {key: players[0][key] for key in ('slot', 'id', 'unit', 'path', 'level', 'level_ptr')}
+            if args.stationary:
+                identity.update({key: players[0][key] for key in ('x_fixed', 'y_fixed')})
+            if scene_identity is not None and identity != scene_identity:
+                raise RuntimeError('Player/scene identity changed during capture')
+            if snapshot.get('mono_ns', 0) <= scene_clock:
+                raise RuntimeError('Scene probe monotonic timestamp did not advance')
+            scene_identity, scene_clock = identity, snapshot['mono_ns']
+            scene_samples.append(snapshot)
+            return snapshot
+
+        check_scene()
         samples, states, frames = [], [], {}
         next_state = 0
         def append_log(log_file):
@@ -131,6 +175,8 @@ def main():
                                  battery_c=int(re.search(r'temperature:\s*(\d+)', battery)[1]) / 10,
                                  thermal_status=int(re.search(r'Thermal Status:\s*(\d+)', thermal)[1]),
                                  battery_raw=battery, thermal_raw=thermal)
+                    if args.scene_probe:
+                        state['scene'] = check_scene()
                     states.append(state)
                     state_file.write(json.dumps(state) + '\n')
                     state_file.flush()
@@ -140,6 +186,7 @@ def main():
             append_log(log_file)
         if run('shell', 'pidof', PKG).decode().strip() != pid:
             raise RuntimeError('App process changed at capture end')
+        check_scene()
         timestamps = sorted(frames)
         if len(timestamps) < 2 or timestamps[-1] - timestamps[0] < (args.seconds - 10) * 1e9:
             raise RuntimeError('Insufficient new presented frames; check foreground/layer')
@@ -158,6 +205,8 @@ def main():
                 groups.setdefault(match[1], []).append(dict(re.findall(r'(\w+)=([^\s]+)', line)))
         (out / 'profile-groups.json').write_text(json.dumps(groups, indent=2) + '\n', encoding='utf-8')
         report.update(completed=True, actual_present_frames=len(timestamps),
+                      scene_identity_verified=bool(args.scene_probe), scene_identity=scene_identity,
+                      scene_sample_count=len(scene_samples), scene_verification='sampled, not continuous' if args.scene_probe else 'operator label only',
                       actual_present_span_s=(timestamps[-1] - timestamps[0]) / 1e9,
                       actual_present_fps=(len(timestamps) - 1) * 1e9 / (timestamps[-1] - timestamps[0]),
                       interval_ms=dict(median=statistics.median(intervals), p95=percentile(intervals, .95),
@@ -174,6 +223,11 @@ def main():
         report['error'] = str(error)
         raise
     finally:
+        if 'scene_samples' in locals() and args.scene_probe:
+            (out / 'scene-samples.json').write_text(json.dumps(scene_samples, indent=2) + '\n', encoding='utf-8')
+            report['scene_samples_sha256'] = hashlib.sha256((out / 'scene-samples.json').read_bytes()).hexdigest()
+        if not report['completed']:
+            report['scene_identity_verified'] = False
         report['ended_utc'] = datetime.now(timezone.utc).isoformat()
         save()
     print(json.dumps(report, ensure_ascii=False), flush=True)
