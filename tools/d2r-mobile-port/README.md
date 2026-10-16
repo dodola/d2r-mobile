@@ -53,3 +53,9 @@ Verification combines host/Android corruption and recovery tests, a real 9.18GB
 import with `-Xmx64m`, actual system document selection, and first-launch evidence.
 These checks establish installation behavior, not compatibility with every GPU
 or complete-game playability. Source/build provenance is recorded beside the APK.
+
+The optional `make_install_guide.py` creates the seven-page illustrated Chinese
+PDF using the retained real QA screenshots in `build/offline-installer-tests`.
+It needs ReportLab, Pillow, pypdf and the Windows Microsoft YaHei fonts. The PDF
+is written under `output/pdf` and copied into the offline release directory.
+System installation and file-navigation diagrams are labelled as illustrations.
