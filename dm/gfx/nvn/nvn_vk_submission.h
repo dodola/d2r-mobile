@@ -66,9 +66,12 @@ typedef struct {
     Range direct_reads[LIMIT_WRITES];
     int direct_read_write_count[LIMIT_WRITES],ndirect_reads;
 
-    VkImageView temporary_views[LIMIT_WRITES];
+    /* Optional slot-local immutable resources survive fence completion. They
+     * are invalidated before any source image is destroyed, never while live. */
+    int retain_resources,retained_views,retained_passes;
+    VkImageView temporary_views[LIMIT_WRITES+RETAINED_VIEW_LIMIT];
     int nview;
-    ImageViewKey view_keys[LIMIT_WRITES];
+    ImageViewKey view_keys[LIMIT_WRITES+RETAINED_VIEW_LIMIT];
     uint32_t view_table[VIEW_TABLE_SIZE];
     VkBufferView buffer_views[LIMIT_WRITES];
     int nbuffer_view;
@@ -76,10 +79,10 @@ typedef struct {
     VkPipelineLayout layouts[LIMIT_WRITES];
     int npipeline;
     PassKey pass_key;
-    VkRenderPass passes[LIMIT_WRITES];
-    VkFramebuffer framebuffers[LIMIT_WRITES];
+    VkRenderPass passes[LIMIT_WRITES+RETAINED_PASS_LIMIT];
+    VkFramebuffer framebuffers[LIMIT_WRITES+RETAINED_PASS_LIMIT];
     int npass;
-    FramebufferKey framebuffer_keys[LIMIT_WRITES];
+    FramebufferKey framebuffer_keys[LIMIT_WRITES+RETAINED_PASS_LIMIT];
     int active_pass,in_pass,depth_sampled,pass_depth_read_only;
     unsigned pending_clear,pass_discard;
     int flushing_clear;

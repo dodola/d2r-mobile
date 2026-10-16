@@ -37,9 +37,12 @@ def main():
     parser.add_argument('--depth-copy-checks', action='store_true', help='Compare native/forced drawn depth+stencil copies with independent expected pixels and command caching off/on')
     parser.add_argument('--vertex-checks', action='store_true', help='Read back 79 vertex formats, four shader widths and four layouts with native/forced split and command caching off/on')
     parser.add_argument('--index-checks', action='store_true', help='Compare CPU/GPU-authored 16/32-bit indices, high raw indices and negative base vertices across chunk thresholds')
+    parser.add_argument('--resource-checks', action='store_true', help='Verify cross-submit view/framebuffer reuse, texture reincarnation and bounded retention with GPU pixels')
     parser.add_argument('--chunk-checks', action='store_true', help='Compare live submission thresholds with GPU-produced vertex data and alternating attachments')
     parser.add_argument('--pass-stats-checks', action='store_true', help='With --chunk-checks, compare disabled/enabled pipeline statistics, query overflow and both reset paths')
     args = parser.parse_args()
+    if args.resource_checks and any((args.index_checks,args.chunk_checks,args.vertex_checks,args.depth_copy_checks,args.command_state_checks,args.cache_roundtrip,args.sampler_checks)):
+        parser.error('Run resource-retention checks separately from other optional suites')
     if args.run_device and not args.serial:
         parser.error('--serial is required with --run-device')
     if args.pass_stats_checks and not args.chunk_checks:
@@ -80,6 +83,12 @@ def main():
     anchor = 'p_TextureFinalize(&target);'
     assert source.count(anchor) == 1
     extra_cases = cases.read_text(encoding='utf-8')
+    if args.resource_checks:
+        source = source.replace('void dm_vk_attachment_config(int);',
+            'void dm_vk_resource_config(int);\nint dm_vk_resource_applied(void);\nvoid dm_vk_resource_stats(uint64_t [8]);\nvoid dm_vk_attachment_config(int);')
+        resource_cases = Path(__file__).with_name('resource_device_cases.inc')
+        extra_cases += '\n' + resource_cases.read_text(encoding='utf-8')
+        report['resource_fixture_sha256'] = sha(resource_cases)
     if args.index_checks:
         import index_device_assets
         source = source.replace('void dm_vk_attachment_config(int);',
@@ -217,7 +226,7 @@ def main():
         run([*adb, 'shell', 'mkdir', remote + '/adapted'], 'mkdir-adapted.log')
         cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_VK_VERTEX_SPLIT=0', 'DM_COMMAND_STATE_CACHE=0',
                      'DM_VERTEX_SHADER_DIR=' + remote + '/adapted']
-    if args.chunk_checks or args.index_checks:
+    if args.chunk_checks or args.index_checks or args.resource_checks:
         cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=0']
     if args.cache_roundtrip:
         run([*adb, 'shell', 'mkdir', remote + '/pipeline'], 'mkdir-pipeline.log')
@@ -239,6 +248,30 @@ def main():
         raise RuntimeError('Sampler GPU/fallback proof missing')
     report['sampler_checks'] = args.sampler_checks
     run([*adb, 'pull', remote + '/color.rgba', out / 'color.rgba'], 'pull-color.log')
+    if args.resource_checks:
+        records=[]
+        for mode in range(2):
+            text=output
+            if mode:
+                checked=run([*adb,'shell','env','DM_RESOURCE_STATS=1','DM_COMMAND_STATE_CACHE=1','DM_VK_RETAIN_RESOURCES=1',
+                    'timeout','90',remote+'/probe',remote+'/cache',remote+'/color.rgba','run'], 'resource-cache-on.log',100)
+                text=(checked.stdout+checked.stderr).decode('utf-8',errors='replace')
+                runtime_mode=json.loads(checked.stdout.decode().strip().splitlines()[-1])
+                if not all(runtime_mode[k] for k in ('compute_passed','draw_passed','real_write_fault_hook_passed','compact_records_passed')):
+                    raise RuntimeError('Resource base fixture failed')
+            rows=[dict(re.findall(r'(\w+)=([^\s]+)',row)) for row in text.splitlines() if 'RESOURCE_PHASE ' in row]
+            expected=[dict(phase=str(i),enabled=str(on),draws='24',creates=str(2 if i==1 else 0 if i==2 else 24),hits=str(22 if i==1 else 24 if i==2 else 0),passed='1') for i,on in enumerate((0,1,1,0))]
+            if rows!=expected or 'RESOURCE_DEVICE modes=4 draws=374 read_bytes=6127616 recreations=4 trim_views=270 trim_passes=270 passed=1' not in text:
+                raise RuntimeError('Resource reuse/invalidation/trim evidence missing: '+repr(rows))
+            driver=re.search(r'\[nvn-vulkan\] driver id=(\d+)',text)
+            if not driver: raise RuntimeError('Resource driver identity missing')
+            pixels_file=out/f'resources-{mode}.bin'
+            run([*adb,'pull',remote+'/color.rgba.resources',pixels_file],f'resources-{mode}-pull.log')
+            if pixels_file.stat().st_size!=6127616: raise RuntimeError('Resource readback size mismatch')
+            records.append(dict(command_cache=bool(mode),driver_id=int(driver[1]),phases=rows,readback_bytes=pixels_file.stat().st_size,sha256=sha(pixels_file)))
+        if len({r['sha256'] for r in records})!=1 or len({r['driver_id'] for r in records})!=1:
+            raise RuntimeError('Resource modes changed pixels or driver')
+        report['resource_modes']=records
     if args.index_checks:
         records = []
         for mode in range(2):

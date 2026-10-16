@@ -284,6 +284,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_DESC_CACHE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-resource-cache");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_RESOURCE_CACHE","1",1);
+    unsetenv("DM_VK_RESOURCE_CONTROL");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/resource-control.txt");
+    if(access(driver_option,F_OK)==0)setenv("DM_VK_RESOURCE_CONTROL",driver_option,1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-dirty-uploads");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_DIRTY_UPLOADS","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-control-cache");
