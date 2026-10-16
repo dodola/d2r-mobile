@@ -37,9 +37,12 @@ def main():
     parser.add_argument('--depth-copy-checks', action='store_true', help='Compare native/forced drawn depth+stencil copies with independent expected pixels and command caching off/on')
     parser.add_argument('--vertex-checks', action='store_true', help='Read back 79 vertex formats, four shader widths and four layouts with native/forced split and command caching off/on')
     parser.add_argument('--chunk-checks', action='store_true', help='Compare live submission thresholds with GPU-produced vertex data and alternating attachments')
+    parser.add_argument('--pass-stats-checks', action='store_true', help='With --chunk-checks, compare disabled/enabled pipeline statistics, query overflow and both reset paths')
     args = parser.parse_args()
     if args.run_device and not args.serial:
         parser.error('--serial is required with --run-device')
+    if args.pass_stats_checks and not args.chunk_checks:
+        parser.error('--pass-stats-checks requires --chunk-checks')
     if args.command_state_checks and args.cache_roundtrip:
         parser.error('Run command-state and persistent-cache comparisons separately')
     if args.depth_copy_checks and (args.command_state_checks or args.cache_roundtrip or args.sampler_checks):
@@ -77,7 +80,7 @@ def main():
     if args.chunk_checks:
         import chunk_device_assets
         source = source.replace('void dm_vk_attachment_config(int);',
-            'void dm_vk_chunk_config(int);\nint dm_vk_chunk_applied(void);\nuint64_t dm_vk_chunk_count(void);\nvoid dm_vk_attachment_config(int);')
+            'void dm_vk_pass_stats(uint64_t [7]);\nvoid dm_vk_chunk_config(int);\nint dm_vk_chunk_applied(void);\nuint64_t dm_vk_chunk_count(void);\nvoid dm_vk_attachment_config(int);')
         copied_cache = out / 'chunk-cache'
         shutil.copytree(args.cache, copied_cache, dirs_exist_ok=True); args.cache = copied_cache
         chunk_cases, report['chunk_shaders'] = chunk_device_assets.prepare(args.cache, out, ndk, run)
@@ -223,12 +226,16 @@ def main():
     run([*adb, 'pull', remote + '/color.rgba', out / 'color.rgba'], 'pull-color.log')
     if args.chunk_checks:
         records = []
-        for mode in range(2):
+        for mode in range(5 if args.pass_stats_checks else 2):
+            command_cache=mode in (1,3,4)
+            pipeline_stats=mode>=2
+            reset_range=mode in (2,3)
             text = output
             if mode:
-                checked = run([*adb, 'shell', 'env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=1',
+                checked = run([*adb, 'shell', 'env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE='+str(int(command_cache)),
+                    'DM_PASS_STATS='+str(int(pipeline_stats)), 'DM_QUERY_RESET_RANGE='+str(int(reset_range)),
                     'timeout', '90', remote + '/probe', remote + '/cache', remote + '/color.rgba', 'run'],
-                    'chunk-cached-device.log', 100)
+                    f'chunk-{mode}-device.log', 100)
                 text = (checked.stdout + checked.stderr).decode('utf-8', errors='replace')
             phase_rows = [dict(re.findall(r'(\w+)=([^\s]+)', row)) for row in text.splitlines() if 'CHUNK_PHASE ' in row]
             thresholds = [0, 16, 48, 256, 256, 48, 16, 0]
@@ -245,13 +252,24 @@ def main():
                 raise RuntimeError('Chunk base fixture failed')
             driver = re.search(r'\[nvn-vulkan\] driver id=(\d+)', text)
             stats = [dict(re.findall(r'(\w+)=([^\s]+)', row)) for row in text.splitlines() if 'COMMAND_STATE_STATS ' in row]
-            if not driver or not stats or any(int(row['enabled']) != mode for row in stats) or bool(int(stats[-1]['skipped'])) != bool(mode):
+            if not driver or not stats or any(int(row['enabled']) != command_cache for row in stats) or bool(int(stats[-1]['skipped'])) != command_cache:
                 raise RuntimeError('Chunk command cache path not exercised')
+            query_rows = [dict(re.findall(r'(\w+)=([^\s]+)', row)) for row in text.splitlines() if 'PASS_STATS_PHASE ' in row]
+            caps = re.search(r'PASS_STATS_CAPS requested=(\d+) supported=(\d+) enabled=(\d+)', text)
+            if not caps or int(caps[1])!=pipeline_stats or int(caps[3])!=pipeline_stats or len(query_rows)!=8:
+                raise RuntimeError('Pipeline statistics capability/path proof missing')
+            for i,row in enumerate(query_rows):
+                expected={'mode':i,'enabled':int(pipeline_stats),'passes':500 if pipeline_stats else 0,
+                    'omitted':100 if pipeline_stats else 0,'ia_vertices':1500 if pipeline_stats else 0,
+                    'ia_primitives':500 if pipeline_stats else 0,'passed':1}
+                if any(int(row[k])!=v for k,v in expected.items()) or any(bool(int(row[k]))!=pipeline_stats for k in ('vs_invocations','fs_invocations')):
+                    raise RuntimeError('Pipeline statistics counters/overflow mismatch')
             pixels_file = out / f'chunk-{mode}.bin'
             run([*adb, 'pull', remote + '/color.rgba.chunks', pixels_file], f'chunk-{mode}-pull.log')
             if pixels_file.stat().st_size != 262144:
                 raise RuntimeError('Chunk readback length mismatch')
-            records.append(dict(command_cache=bool(mode), driver_id=int(driver[1]), phases=phase_rows,
+            records.append(dict(command_cache=command_cache, pipeline_statistics=pipeline_stats, query_reset_range=reset_range,
+                pipeline_stat_phases=query_rows, driver_id=int(driver[1]), phases=phase_rows,
                 read_bytes=pixels_file.stat().st_size, sha256=sha(pixels_file)))
         if len({r['sha256'] for r in records}) != 1 or len({r['driver_id'] for r in records}) != 1:
             raise RuntimeError('Chunk command-cache modes changed GPU pixels or driver')

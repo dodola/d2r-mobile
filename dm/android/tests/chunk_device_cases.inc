@@ -20,6 +20,17 @@
     uint64_t chunk_bytes=0;
     for(unsigned mode=0;mode<sizeof chunk_modes/sizeof *chunk_modes;mode++){
         p_QueueFinish(&queue);dm_vk_chunk_config(chunk_modes[mode]);
+        /* Keep clears outside the measured submission: implementations can
+         * execute attachment clears with internal geometry counted by queries. */
+        p_CommandBufferAddCommandMemory(&cb,&chunk_pool,0,2*1024*1024);p_CommandBufferBeginRecording(&cb);
+        p_CommandBufferSetScissor(&cb,0,0,64,64);
+        for(unsigned image=0;image<2;image++){
+            const NVNtexture *active=image?&chunk_other:&target;
+            p_CommandBufferSetRenderTargets(&cb,1,&active,NULL,NULL,NULL);
+            p_CommandBufferClearColor(&cb,0,clear,15);
+        }
+        handle=p_CommandBufferEndRecording(&cb);p_QueueSubmitCommands(&queue,1,&handle);p_QueueFinish(&queue);
+        uint64_t stats_before[7],stats_after[7];dm_vk_pass_stats(stats_before);
         memcpy(memory+131072,vertices,sizeof vertices);
         p_CommandBufferAddCommandMemory(&cb,&chunk_pool,0,2*1024*1024);p_CommandBufferBeginRecording(&cb);
         p_CommandBufferBindProgram(&cb,&graphics,NVN_SHADER_STAGE_VERTEX_BIT|NVN_SHADER_STAGE_FRAGMENT_BIT);
@@ -31,7 +42,6 @@
         for(unsigned draw=0;draw<600;draw++){
             const NVNtexture *active=(draw&1)?&chunk_other:&target;
             p_CommandBufferSetRenderTargets(&cb,1,&active,NULL,NULL,NULL);
-            if(draw<2)p_CommandBufferClearColor(&cb,0,clear,15);
             if(draw==100||draw==300||draw==500){
                 p_CommandBufferBindProgram(&cb,&chunk_compute[draw==300],NVN_SHADER_STAGE_COMPUTE_BIT);
                 p_CommandBufferBindStorageBuffer(&cb,NVN_SHADER_STAGE_COMPUTE,3,base+131072,sizeof vertices);
@@ -45,6 +55,21 @@
         uint64_t chunks_before=dm_vk_chunk_count();
         handle=p_CommandBufferEndRecording(&cb);p_QueueSubmitCommands(&queue,1,&handle);p_QueueFinish(&queue);
         uint64_t chunks=dm_vk_chunk_count()-chunks_before;
+        dm_vk_pass_stats(stats_after);
+        uint64_t stats_delta[6];for(unsigned s=0;s<6;s++)stats_delta[s]=stats_after[s+1]-stats_before[s+1];
+        if(stats_before[0]!=stats_after[0])return 139;
+        if(stats_after[0]){
+            /* Exactly one triangle per pass, including work after query capacity
+             * is exhausted. Query omission must never omit a real draw. */
+            if(stats_delta[0]!=500||stats_delta[1]!=100||stats_delta[2]!=1500||stats_delta[3]!=500||!stats_delta[4]||!stats_delta[5]){
+                fprintf(stderr,"PASS_STATS_BAD mode=%u passes=%llu omitted=%llu ia=%llu primitives=%llu vs=%llu fs=%llu\n",mode,
+                    (unsigned long long)stats_delta[0],(unsigned long long)stats_delta[1],(unsigned long long)stats_delta[2],
+                    (unsigned long long)stats_delta[3],(unsigned long long)stats_delta[4],(unsigned long long)stats_delta[5]);return 140;
+            }
+        }else for(unsigned s=0;s<6;s++)if(stats_delta[s])return 141;
+        fprintf(stderr,"PASS_STATS_PHASE mode=%u enabled=%llu passes=%llu omitted=%llu ia_vertices=%llu ia_primitives=%llu vs_invocations=%llu fs_invocations=%llu passed=1\n",
+            mode,(unsigned long long)stats_after[0],(unsigned long long)stats_delta[0],(unsigned long long)stats_delta[1],
+            (unsigned long long)stats_delta[2],(unsigned long long)stats_delta[3],(unsigned long long)stats_delta[4],(unsigned long long)stats_delta[5]);
         if(dm_vk_chunk_applied()!=chunk_modes[mode]||(!chunk_modes[mode]?chunks!=0:chunks!=599/(unsigned)chunk_modes[mode])){
             fprintf(stderr,"CHUNK_COUNT mode=%u threshold=%d actual=%llu\n",mode,chunk_modes[mode],(unsigned long long)chunks);return 132;
         }

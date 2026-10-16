@@ -25,11 +25,11 @@ typedef struct {
     unsigned profile_segment; /* Captured at submit, before asynchronous completion. */
     VkDescriptorPool descriptors;
     VkFence gpu_fence;
-    VkQueryPool occlusion,timestamps,pass_ts,chunk_ts;
+    VkQueryPool occlusion,timestamps,pass_ts,chunk_ts,pass_stats;
     uint32_t nchunk_ts;
     uint64_t chunk_pass0[130],chunk_draw0[130];
     uint32_t nocc,ntime,active_occlusion;
-    uint32_t occlusion_reset_count,timestamp_reset_count,pass_reset_count;
+    uint32_t occlusion_reset_count,timestamp_reset_count,pass_reset_count,pass_stats_reset_count;
     int command_dirty;
     VkSemaphore present_available;
     struct { unsigned reports;int candidate,traced;uint64_t wait_cpu,wait_start; } commit_info;

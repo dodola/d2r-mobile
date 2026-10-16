@@ -135,7 +135,10 @@ typedef struct { uint32_t hash;VBuffer *buffer; } DriverTable;
 typedef struct { uint64_t serial; unsigned roles; } ImageUse;
 typedef struct { const uint8_t *entry;uint64_t hash; } ShaderEntry;
 typedef struct { uint64_t hash;VShader *shader;VkDescriptorSet set;uint32_t nb,off; } DescEntry;
-typedef struct { uint64_t key,draws;uint32_t w,h,n,passes;double ms; } PassAcc;
+/* Vulkan returns selected statistics in ascending flag-bit order: input
+ * vertices, input primitives, vertex invocations, fragment invocations. */
+#define PASS_STATS_FLAGS (VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT|VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT|VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT|VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)
+typedef struct { uint64_t key,draws,stats[4];uint32_t w,h,n,passes;double ms; } PassAcc;
 typedef struct { const void *control;uint32_t stage,valid;VShader *shader;uint8_t bytes[0x880]; } ControlCache;
 #define DESC_ENTRIES 8192
 #define DESC_TABLE 16384
@@ -239,7 +242,8 @@ static struct {
     uint64_t profile_write_submits,profile_event_submits,profile_report_submits,profile_trace_submits,profile_cpu_readback_submits,profile_event_wait_submits;
 
     uint64_t profile_desc_alloc_ns,profile_desc_update_ns,profile_prep_ns,profile_lookup_ns,profile_pool_ns,profile_bind_ns,profile_render_ns,profile_present_ns;unsigned trace_meshes;
-    int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing;
+    int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing,pass_stats;
+    uint64_t pass_stats_total[4],pass_stats_passes,pass_stats_omitted,pass_stats_window_omitted;
     int attachment_defaults,attachment_flags;
     NvnAttachmentStats attachment_stats;
     const uint8_t **attachment_ops;size_t attachment_count,attachment_capacity,attachment_pos;
@@ -505,11 +509,16 @@ static void backend_init(void) {
     enabled.vertexPipelineStoresAndAtomics=available.vertexPipelineStoresAndAtomics;
     enabled.shaderClipDistance=available.shaderClipDistance;
     enabled.shaderCullDistance=available.shaderCullDistance;
+    G.pass_stats=getenv("DM_PASS_STATS") && !strcmp(getenv("DM_PASS_STATS"),"1") && available.pipelineStatisticsQuery;
+    enabled.pipelineStatisticsQuery=G.pass_stats;
+    fprintf(stderr,"[nvn-vulkan] PASS_STATS_CAPS requested=%d supported=%u enabled=%d\n",
+        getenv("DM_PASS_STATS") && !strcmp(getenv("DM_PASS_STATS"),"1"),available.pipelineStatisticsQuery,G.pass_stats);
     G.enabled_features=enabled;
     const VkBool32 cache_features[]={enabled.shaderStorageImageReadWithoutFormat,enabled.shaderStorageImageWriteWithoutFormat,
         enabled.shaderImageGatherExtended,enabled.samplerAnisotropy,enabled.imageCubeArray,enabled.occlusionQueryPrecise,
         enabled.independentBlend,enabled.fragmentStoresAndAtomics,enabled.vertexPipelineStoresAndAtomics,
-        enabled.shaderClipDistance,enabled.shaderCullDistance,draw_parameters.shaderDrawParameters,G.feedback_layout};
+        enabled.shaderClipDistance,enabled.shaderCullDistance,draw_parameters.shaderDrawParameters,G.feedback_layout,
+        enabled.pipelineStatisticsQuery};
     for(unsigned i=0;i<sizeof cache_features/sizeof cache_features[0];i++)
         if(cache_features[i])G.pipeline_cache_key.enabled_features|=1u<<i;
     G.precise_occlusion=enabled.occlusionQueryPrecise;
@@ -530,7 +539,7 @@ static void backend_init(void) {
     {const char *force=getenv("DM_VK_VERTEX_SPLIT");G.force_vertex_split=force&&!strcmp(force,"1");}
     G.disable_query_batch=getenv("DM_DISABLE_QUERY_BATCH")!=NULL;G.diag_no_occlusion=getenv("DM_DIAG_NO_OCCLUSION")!=NULL;G.barrier_pass_elide=getenv("DM_BARRIER_PASS_ELIDE")!=NULL;G.diag_no_pass_deps=getenv("DM_DIAG_NO_PASS_DEPS")!=NULL;G.precise_sync=getenv("DM_DISABLE_PRECISE_SYNC")==NULL;{const char *hd=getenv("DM_HZ_DIAG");G.hz_diag=hd?atoi(hd):0;}{const char *cd=getenv("DM_CHUNK_DRAWS");G.chunk_draws=cd?atoi(cd):48;G.chunk_log=getenv("DM_RESOURCE_STATS")!=NULL;G.profile_detail=getenv("DM_PROFILE_DETAIL")!=NULL;G.diag_skip_draws=getenv("DM_DIAG_SKIP_DRAWS")!=NULL;{const char *sh=getenv("DM_DIAG_SHAPE");G.diag_shape=sh?atoi(sh):0;}G.disable_setrt_skip=getenv("DM_DISABLE_SETRT_SKIP")!=NULL;G.disable_subres=getenv("DM_DISABLE_SUBRES")!=NULL;G.enable_narrow_access=getenv("DM_NARROW_ACCESS")!=NULL;G.diag_fixed_desc=getenv("DM_DIAG_FIXED_DESC")!=NULL;G.disable_wait_elision=getenv("DM_DISABLE_WAIT_ELISION")!=NULL;G.async_enabled=getenv("DM_DISABLE_ASYNC_COMMIT")==NULL;G.async_drain_after_submit=getenv("DM_ASYNC_DRAIN")!=NULL;{const char *sc=getenv("DM_DIAG_SKIP_CLASS");G.diag_skip_class=sc?atoi(sc):0;}G.wb_stage_enabled=getenv("DM_DISABLE_WB_STAGE")==NULL;G.disable_pass_reuse=getenv("DM_DISABLE_PASS_REUSE")!=NULL;G.disable_cpu_uniform_snapshot=getenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT")!=NULL;{const char *sx=getenv("DM_DIAG_SKIP_XFER");G.diag_skip_xfer=sx?atoi(sx):0;}}fprintf(stderr,"[nvn-vulkan] PRECISE_SYNC=%d hz_diag=%d\n",G.precise_sync,G.hz_diag);{const char *iu=getenv("DM_DIAG_IMG_USAGE");G.diag_img_usage=iu?atoi(iu):0;}
     {const char *range=getenv("DM_QUERY_RESET_RANGE");G.enable_query_reset_range=range&&atoi(range)!=0;}
-    G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
+    G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL||G.pass_stats;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
     G.disable_resource_cache=getenv("DM_DISABLE_RESOURCE_CACHE")!=NULL;
     G.disable_binding_plans=getenv("DM_DISABLE_BINDING_PLANS")!=NULL;
     {const char *cache=getenv("DM_COMMAND_STATE_CACHE");G.enable_command_cache=cache&&atoi(cache)!=0;}
@@ -758,7 +767,9 @@ static void attachment_ab_frame(uint64_t frame) {
         (unsigned long long)a->load_bytes_avoided,(unsigned long long)a->store_bytes_avoided);
     attachment_ab_poll(frame);
 }
-static void pass_end_at(int line) { if(S.in_pass) { G.pass_end_sites[line&4095]++;if(G.profile_detail&&G.profile_frames==30)fprintf(stderr,"[nvn-vulkan] PASSLOG seg=%u rt=%s ps=%.6s n=%d bb=%#x uses=%s draws=%llu end_line=%d\n",G.seg_index,G.pass_desc,G.last_ps,G.last_count,G.last_barrier_bits,G.last_uses,(unsigned long long)(G.draws-G.pass_draws0),line);occlusion_end();vkCmdEndRenderPass(S.command); S.in_pass=0;
+static void pass_end_at(int line) { if(S.in_pass) { G.pass_end_sites[line&4095]++;if(G.profile_detail&&G.profile_frames==30)fprintf(stderr,"[nvn-vulkan] PASSLOG seg=%u rt=%s ps=%.6s n=%d bb=%#x uses=%s draws=%llu end_line=%d\n",G.seg_index,G.pass_desc,G.last_ps,G.last_count,G.last_barrier_bits,G.last_uses,(unsigned long long)(G.draws-G.pass_draws0),line);occlusion_end();
+    if(S.pt_open&&S.pass_stats)vkCmdEndQuery(S.command,S.pass_stats,S.npt);
+    vkCmdEndRenderPass(S.command); S.in_pass=0;
     if(S.pt_open){S.pt_open=0;vkCmdWriteTimestamp(S.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,S.pass_ts,S.pt[S.npt].q0+1);S.pt[S.npt].q1=S.pt[S.npt].q0+1;S.pt[S.npt].draws=G.draws-S.pt_draws0;S.npt++;} } }
 #define pass_end() pass_end_at(__LINE__)
 static void query_reset(VkQueryPool pool,uint32_t first,uint32_t count) {
@@ -782,17 +793,29 @@ static void query_reserve(VkQueryPool pool,uint32_t *reset_count,uint32_t first,
 static void pass_timing_collect(VkSubmission *sub) {
     if(!sub->pass_ts)return;
     if(sub->npt){uint64_t ticks[1024];CHECK(vkGetQueryPoolResults(G.device,sub->pass_ts,0,sub->npt*2,sizeof(ticks[0])*sub->npt*2,ticks,8,VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT));
+        uint64_t stats[512][4];
+        if(sub->pass_stats)CHECK(vkGetQueryPoolResults(G.device,sub->pass_stats,0,sub->npt,sizeof(stats[0])*sub->npt,stats,sizeof(stats[0]),VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT));
         uint64_t mask=G.timestamp_bits>=64?UINT64_MAX:((1ULL<<G.timestamp_bits)-1);
         double total_ms=0,max_ms=0;
         for(uint32_t i=0;i<sub->npt;i++){uint64_t a=ticks[sub->pt[i].q0],b=ticks[sub->pt[i].q1];
             double ms=(double)((b-a)&mask)*G.properties.limits.timestampPeriod/1e6;uint32_t k=0;
             total_ms+=ms;if(ms>max_ms)max_ms=ms;
+            if(sub->pass_stats){G.pass_stats_passes++;for(unsigned c=0;c<4;c++)G.pass_stats_total[c]+=stats[i][c];}
             while(k<G.npacc&&!(G.pacc[k].key==sub->pt[i].key&&G.pacc[k].w==sub->pt[i].w&&G.pacc[k].h==sub->pt[i].h&&G.pacc[k].n==sub->pt[i].n))k++;
             if(k==G.npacc){if(k==128)continue;G.pacc[k]=(PassAcc){.key=sub->pt[i].key,.w=sub->pt[i].w,.h=sub->pt[i].h,.n=sub->pt[i].n};G.npacc++;}
-            G.pacc[k].ms+=ms;G.pacc[k].passes++;G.pacc[k].draws+=sub->pt[i].draws;}
+            G.pacc[k].ms+=ms;G.pacc[k].passes++;G.pacc[k].draws+=sub->pt[i].draws;
+            if(sub->pass_stats)for(unsigned c=0;c<4;c++)G.pacc[k].stats[c]+=stats[i][c];}
         if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] PASS_QUERY_STATS passes=%u chunks=%u total_ms=%.6f max_ms=%.6f\n",sub->npt,sub->chunk_index+1,total_ms,max_ms);
     }
     sub->npt=0;sub->pt_open=0; /* Query storage belongs to the completed context; keep it for reuse. */
+}
+/* Cumulative completed-query snapshot for the real backend device fixture.
+ * Caller first finishes its NVN queue; this never drains or changes guest work. */
+void dm_vk_pass_stats(uint64_t out[7]) {
+    pthread_mutex_lock(&G.lock);
+    out[0]=G.pass_stats;out[1]=G.pass_stats_passes;out[2]=G.pass_stats_omitted;
+    memcpy(out+3,G.pass_stats_total,sizeof G.pass_stats_total);
+    pthread_mutex_unlock(&G.lock);
 }
 enum { HZ_GV,HZ_GF,HZ_T,HZ_CS };
 #define HZ_ATT_STAGES (VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT)
@@ -919,6 +942,7 @@ static void submission_pools_create(VkSubmission *sub) {
     CHECK(vkCreateQueryPool(G.device,&q,NULL,&sub->timestamps));
     if(G.pass_timing){q.queryCount=1024;CHECK(vkCreateQueryPool(G.device,&q,NULL,&sub->pass_ts));}
     if(G.profile_detail){q.queryCount=128;CHECK(vkCreateQueryPool(G.device,&q,NULL,&sub->chunk_ts));}
+    if(G.pass_stats){q.queryType=VK_QUERY_TYPE_PIPELINE_STATISTICS;q.queryCount=512;q.pipelineStatistics=PASS_STATS_FLAGS;CHECK(vkCreateQueryPool(G.device,&q,NULL,&sub->pass_stats));}
     VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,16384},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,8192},
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,16384},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,4096},{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,16384},
       {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,4096},{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,4096}};
@@ -1084,7 +1108,7 @@ static void sub_begin_ctx(VkSubmission *ctx) {
     {int flags=atomic_load(&attachment_override);G.attachment_flags=flags<0?G.attachment_defaults:flags;atomic_store(&attachment_applied,G.attachment_flags);}
     S.ndriver_tables=0;memset(S.driver_table_slots,0,sizeof S.driver_table_slots);memset(S.last_driver_table,0,sizeof S.last_driver_table);
     S.nocc=S.ntime=0;S.ncounter=0;S.nview=0;S.nbuffer_view=0;memset(S.view_table,0,sizeof S.view_table);
-    S.occlusion_reset_count=S.timestamp_reset_count=S.pass_reset_count=0;
+    S.occlusion_reset_count=S.timestamp_reset_count=S.pass_reset_count=S.pass_stats_reset_count=0;
     S.ndesc=0;S.desc_arena_used=0;memset(S.desc_table,0,sizeof S.desc_table);S.command_dirty=1;memset(S.pend,0,sizeof S.pend);
     S.submission_cpu_readback=S.submission_event_wait=0;S.active_occlusion=UINT32_MAX;
     VkCommandBufferBeginInfo b={.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
@@ -1093,6 +1117,7 @@ static void sub_begin_ctx(VkSubmission *ctx) {
     if(S.chunk_ts){vkCmdResetQueryPool(S.command,S.chunk_ts,0,128);S.nchunk_ts=0;chunk_ts_write(0);}
     if(!G.enable_query_reset_range){query_reset(S.occlusion,0,LIMIT_WRITES);query_reset(S.timestamps,0,LIMIT_WRITES);S.occlusion_reset_count=S.timestamp_reset_count=LIMIT_WRITES;}
     if(S.pass_ts){if(!G.enable_query_reset_range){query_reset(S.pass_ts,0,1024);S.pass_reset_count=1024;}S.npt=0;S.pt_open=0;}
+    if(S.pass_stats&&!G.enable_query_reset_range){query_reset(S.pass_stats,0,512);S.pass_stats_reset_count=512;}
     G.profile_begin_cpu_ns+=dm_android_nvn_thread_cpu_ns()-begin_cpu;G.profile_begin_calls++;
 }
 void mtl_sub_begin(void) { sub_begin_ctx(&G.submission_slot); }
@@ -2516,11 +2541,14 @@ static VkRenderPass render_begin(void) {
     S.active_pass=index;G.pass_draws0=G.draws;{const tex_t *f0=rt->n>0?rt->color[0]:rt->depth;snprintf(G.pass_desc,sizeof G.pass_desc,"%ux%u c%d d%d s%llu",f0?f0->d.width:0,f0?f0->d.height:0,rt->n,rt->depth!=NULL,(unsigned long long)(f0?f0->serial:0));}
     VkRenderPassBeginInfo begin={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,.renderPass=S.passes[index],.framebuffer=S.framebuffers[index],
        .renderArea={{0,0},{(G.diag_shape&4)&&width>16?16:width,(G.diag_shape&4)&&height>16?16:height}},.clearValueCount=n,.pClearValues=clears};
-    if(S.pass_ts&&S.npt<500){uint32_t q=S.npt*2;query_reserve(S.pass_ts,&S.pass_reset_count,q,2,1024);vkCmdWriteTimestamp(S.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,S.pass_ts,q);
+    if(S.pass_ts&&S.npt<500){uint32_t q=S.npt*2;query_reserve(S.pass_ts,&S.pass_reset_count,q,2,1024);
+        if(S.pass_stats)query_reserve(S.pass_stats,&S.pass_stats_reset_count,S.npt,1,512);
+        vkCmdWriteTimestamp(S.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,S.pass_ts,q);
         S.pt[S.npt].q0=q;S.pt[S.npt].w=width;S.pt[S.npt].h=height;S.pt[S.npt].n=rt->n;
         S.pt[S.npt].key=(rt->color[0]?rt->color[0]->serial:0)*1315423911ULL^(rt->depth?rt->depth->serial:0);S.pt_draws0=G.draws;S.pt_open=1;}
     if(G.precise_sync)hz_pass_sync();
     vkCmdBeginRenderPass(S.command,&begin,VK_SUBPASS_CONTENTS_INLINE);S.pending_clear=0;S.in_pass=1;G.pass_count++;
+    if(S.pass_stats){if(S.pt_open)vkCmdBeginQuery(S.command,S.pass_stats,S.npt,0);else{G.pass_stats_omitted++;G.pass_stats_window_omitted++;}}
     S.pass_feedback_flags=S.feedback_flags;S.pass_depth_read_only=read_only;
     return S.passes[index];
 }
@@ -3402,6 +3430,15 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         if(G.pass_timing){for(uint32_t a=0;a<G.npacc;a++)for(uint32_t b=a+1;b<G.npacc;b++)if(G.pacc[b].ms>G.pacc[a].ms){PassAcc tmp=G.pacc[a];G.pacc[a]=G.pacc[b];G.pacc[b]=tmp;}
             double total=0;for(uint32_t a=0;a<G.npacc;a++)total+=G.pacc[a].ms;fprintf(stderr,"[nvn-vulkan] PASS_TIME_TOTAL frame=%llu groups=%u gpu_ms=%.3f\n",(unsigned long long)G.present_count+1,G.npacc,total);
             for(uint32_t a=0;a<G.npacc&&a<12;a++)fprintf(stderr,"[nvn-vulkan] PASS_TIME rank=%u rt_key=%llx size=%ux%u colors=%u passes=%u draws=%llu ms=%.3f\n",a,(unsigned long long)G.pacc[a].key,G.pacc[a].w,G.pacc[a].h,G.pacc[a].n,G.pacc[a].passes,(unsigned long long)G.pacc[a].draws,G.pacc[a].ms);
+            if(G.pass_stats){
+                for(uint32_t a=0;a<G.npacc;a++)fprintf(stderr,"[nvn-vulkan] PASS_STATS frame=%llu frames=%llu rt_key=%llx size=%ux%u colors=%u passes=%u draws=%llu ms=%.3f ia_vertices=%llu ia_primitives=%llu vs_invocations=%llu fs_invocations=%llu\n",
+                    (unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,(unsigned long long)G.pacc[a].key,
+                    G.pacc[a].w,G.pacc[a].h,G.pacc[a].n,G.pacc[a].passes,(unsigned long long)G.pacc[a].draws,G.pacc[a].ms,
+                    (unsigned long long)G.pacc[a].stats[0],(unsigned long long)G.pacc[a].stats[1],(unsigned long long)G.pacc[a].stats[2],(unsigned long long)G.pacc[a].stats[3]);
+                fprintf(stderr,"[nvn-vulkan] PASS_STATS_COVERAGE frame=%llu omitted_passes=%llu groups=%u group_limit=%d\n",
+                    (unsigned long long)G.present_count+1,(unsigned long long)G.pass_stats_window_omitted,G.npacc,G.npacc==128);
+                G.pass_stats_window_omitted=0;
+            }
             for(uint32_t a=0;a<G.nhot;a++)for(uint32_t b=a+1;b<G.nhot;b++)if(G.hot[b].draws>G.hot[a].draws){char tk[17];uint32_t td=G.hot[a].draws;memcpy(tk,G.hot[a].key,17);memcpy(G.hot[a].key,G.hot[b].key,17);G.hot[a].draws=G.hot[b].draws;memcpy(G.hot[b].key,tk,17);G.hot[b].draws=td;}
             for(uint32_t a=0;a<G.nhot&&a<12;a++)fprintf(stderr,"[nvn-vulkan] HOT_PS rank=%u key=%s draws=%u\n",a,G.hot[a].key,G.hot[a].draws);
             G.nhot=0;G.npacc=0;}

@@ -200,7 +200,7 @@ def main():
         for line in text.splitlines():
             match = re.search(r'\b((?:RENDER|ADPF_WORK)\w*PROFILE)\s', line)
             if not match:
-                match = re.search(r'\b(SEG[0-3]|PASS_TIME_TOTAL|PASS_TIME|HOT_PS)\s', line)
+                match = re.search(r'\b(SEG[0-3]|PASS_TIME_TOTAL|PASS_TIME|PASS_STATS_COVERAGE|PASS_STATS|HOT_PS)\s', line)
             if match:
                 groups.setdefault(match[1], []).append(dict(re.findall(r'(\w+)=([^\s]+)', line)))
         (out / 'profile-groups.json').write_text(json.dumps(groups, indent=2) + '\n', encoding='utf-8')

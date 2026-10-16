@@ -303,6 +303,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_EVENT_TRACE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-timing");
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_TIMING","1",1);
+    unsetenv("DM_PASS_STATS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-stats");
+    if(access(driver_option,F_OK)==0)setenv("DM_PASS_STATS","1",1);
     /* Hint sessions are an explicit A/B experiment, off when the marker is absent. */
     unsetenv("DM_PERFORMANCE_HINTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/performance-hints");
