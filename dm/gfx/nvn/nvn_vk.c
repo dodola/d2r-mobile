@@ -92,6 +92,7 @@ static void hz_note(int kind);
 #undef vkCmdPipelineBarrier
 #define vkCmdPipelineBarrier(...) (S.command_dirty=1,dm_vkCmdPipelineBarrier(__VA_ARGS__))
 #include "nvn_vk_storage_bias.h"
+#include "nvn_vk_ballot.h"
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *map; uint64_t size,allocation_size;VkBufferUsageFlags usage;int cached;uint64_t dirty; } VBuffer;
 enum { TEMP_OTHER,TEMP_DRIVER,TEMP_ALIGNED,TEMP_COMPARISON,TEMP_ROLES };
 typedef struct { const uint8_t *guest; uint64_t size,serial; VBuffer v; } VPool;
@@ -210,6 +211,7 @@ static struct {
     uint64_t profile_view_hits,profile_view_misses,profile_framebuffer_hits,profile_framebuffer_misses;
     int active,feedback_layout,shader_draw_parameters;
     ReplayState state; VkPhysicalDeviceSubgroupProperties subgroup;
+    int lower_compute_ballot;
     uint8_t *shader_index; size_t index_bytes; char shader_root[1024]; ANativeWindow *window;
     ShaderEntry *shader_entries;size_t shader_entry_capacity;
     VkSurfaceKHR surface; VkSwapchainKHR swapchain; VkImage *swap_images; VkImageLayout *swap_layouts;
@@ -413,6 +415,9 @@ static void backend_init(void) {
     VkPhysicalDeviceDriverProperties driver_properties={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,.pNext=&G.subgroup};
     VkPhysicalDeviceProperties2 properties2={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,.pNext=&driver_properties};
     vkGetPhysicalDeviceProperties2(G.physical,&properties2);
+    G.lower_compute_ballot=driver_properties.driverID==VK_DRIVER_ID_QUALCOMM_PROPRIETARY &&
+        (G.subgroup.supportedStages&VK_SHADER_STAGE_COMPUTE_BIT) &&
+        (G.subgroup.supportedOperations&VK_SUBGROUP_FEATURE_ARITHMETIC_BIT);
     if(private_driver && !strcmp(private_driver,"turnip") && driver_properties.driverID!=VK_DRIVER_ID_MESA_TURNIP)die("requested private driver was not loaded",driver_properties.driverID);
     fprintf(stderr,"[nvn-vulkan] driver id=%u name=%s info=%s\n",driver_properties.driverID,driver_properties.driverName,driver_properties.driverInfo);
     fprintf(stderr,"[nvn-vulkan] subgroup size=%u stages=%#x operations=%#x\n",G.subgroup.subgroupSize,G.subgroup.supportedStages,G.subgroup.supportedOperations);
@@ -1575,6 +1580,11 @@ static VShader *shader_get(const void *control,uint32_t stage) {
     } else {snprintf(name,sizeof(name),"%s.spv",key);bytes=read_file(name,&size);}
     if(size%4 || size<20 || ((uint32_t *)bytes)[0]!=0x07230203)die("SPIR-V module",size);
     bytes=buffer_image_module(bytes,&size,s);
+    if(stage==5&&G.lower_compute_ballot){
+        unsigned ballots=0;uint8_t *adapted=dm_compute_ballot_apply(bytes,&size,&ballots);
+        if(!adapted)die("compute ballot adaptation bounds/interface",0);bytes=adapted;
+        if(ballots)fprintf(stderr,"[nvn-vulkan] COMPUTE_BALLOT_REDUCE shader=%s ballots=%u driver=Qualcomm bytes=%zu\n",key,ballots,size);
+    }
     uint32_t *words=(uint32_t *)bytes;int fetch=0,sampling=0;
     for(size_t offset=5;offset<size/4;) {
         unsigned length=words[offset]>>16,op=words[offset]&0xffff;
