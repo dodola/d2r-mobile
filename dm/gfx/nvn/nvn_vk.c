@@ -249,6 +249,9 @@ static struct {
     uint64_t profile_write_submits,profile_event_submits,profile_report_submits,profile_trace_submits,profile_cpu_readback_submits,profile_event_wait_submits;
 
     uint64_t profile_desc_alloc_ns,profile_desc_update_ns,profile_prep_ns,profile_lookup_ns,profile_pool_ns,profile_bind_ns,profile_render_ns,profile_present_ns;unsigned trace_meshes;
+    int pool_range_stats,pool_owned_bypass;
+    uint64_t profile_owned_reads,profile_owned_bytes;
+    struct {uint64_t reads,hits,protects,read_bytes,protect_bytes,uniforms;} pool_ranges[9];
     int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing,pass_stats;
     uint64_t pass_stats_total[4],pass_stats_passes,pass_stats_omitted,pass_stats_window_omitted;
     int attachment_defaults,attachment_flags;
@@ -557,6 +560,8 @@ static void backend_init(void) {
     G.disable_resource_cache=getenv("DM_DISABLE_RESOURCE_CACHE")!=NULL;
     {const char *retain=getenv("DM_VK_RETAIN_RESOURCES");G.retain_resources=!retain||atoi(retain)!=0;}
     {const char *usage=getenv("DM_VK_IMAGE_USAGE_FLAGS");G.image_usage_by_flags=!usage||atoi(usage)!=0;}
+    G.pool_range_stats=getenv("DM_POOL_RANGE_STATS")!=NULL;
+    G.pool_owned_bypass=getenv("DM_POOL_OWNED_READ_BYPASS")!=NULL;
     G.disable_binding_plans=getenv("DM_DISABLE_BINDING_PLANS")!=NULL;
     {const char *cache=getenv("DM_COMMAND_STATE_CACHE");G.enable_command_cache=cache&&atoi(cache)!=0;}
     G.disable_dirty_uploads=getenv("DM_DISABLE_DIRTY_UPLOADS")!=NULL;
@@ -645,12 +650,7 @@ void mtl_pool_del(const void *mem) {
 }
 static int overlap(uint64_t a,uint64_t an,uint64_t b,uint64_t bn) { return a<b+bn && b<a+an; }
 static int fully_gpu_owned(Range range) {
-    uint64_t cursor=range.addr,end=range.addr+range.size;
-    while(cursor<end){uint64_t next=cursor;
-        for(int i=0;i<S.nwrites;i++){Range w=S.writes[i];if(w.addr<=cursor&&w.addr+w.size>next)next=w.addr+w.size;}
-        if(next==cursor)return 0;cursor=next<end?next:end;
-    }
-    return 1;
+    return nvn_vk_pool_fully_gpu_owned(range.addr,range.size,S.writes,(size_t)S.nwrites);
 }
 static int cached_snapshot(Range range,VBuffer **buffer) {
     *buffer=NULL;if(!S.read_snapshots_allowed)return -1;
@@ -668,9 +668,23 @@ static int cached_snapshot(Range range,VBuffer **buffer) {
 static void pool_upload_guest_span(VPool *p,uint64_t base,uint64_t base_off,uint64_t addr,uint64_t len) {
     G.profile_pool_uploaded_bytes+=nvn_vk_pool_copy_guest_span(p->v.map,base,base_off,addr,len,S.writes,S.nwrites);
 }
+static unsigned pool_range_bucket(uint64_t len) {
+    static const uint64_t bounds[]={64,256,1024,4096,16384,65536,262144,1048576};
+    unsigned i=0;while(i<8&&len>bounds[i])i++;return i;
+}
 static VPool *pool_read_resolved(VPool *p,uint64_t addr,uint64_t len,uint64_t *off) {
     uint64_t started=prof_now();
+    unsigned range_bucket=0;
+    if(G.pool_range_stats){range_bucket=pool_range_bucket(len);G.pool_ranges[range_bucket].reads++;G.pool_ranges[range_bucket].read_bytes+=len;}
     pool_materialize(p);
+    /* The existing guest-span copier omits every byte in queued write ranges.
+     * When their union covers this entire read, no CPU upload is possible.
+     * Leave the upload cache untouched: a later uncovered read still needs
+     * its ordinary generation check and upload after submission retirement. */
+    if(G.pool_owned_bypass&&len&&S.nwrites&&fully_gpu_owned((Range){addr,len})){
+        G.profile_owned_reads++;G.profile_owned_bytes+=len;
+        G.profile_pool_ns+=prof_now()-started;return p;
+    }
     /* Cache exact read ranges. On a dirty cache hit, copy only changed page
      * intersections with this exact range; bytes outside it may belong to a
      * different range referenced by already-recorded draws. Page generations
@@ -685,6 +699,7 @@ static VPool *pool_read_resolved(VPool *p,uint64_t addr,uint64_t len,uint64_t *o
             if(entry->pool_serial==p->serial&&entry->address==addr&&entry->size==len){
                 upload=entry;upload_stamp=entry->stamp;
                 if(!nvn_dirty_since((const void *)(uintptr_t)addr,len,entry->stamp)){
+                    if(G.pool_range_stats)G.pool_ranges[range_bucket].hits++;
                     entry->age=++G.upload_age;G.profile_pool_reused_ranges++;G.profile_pool_reused_bytes+=len;
                     G.profile_pool_ns+=prof_now()-started;return p;
                 }
@@ -693,6 +708,7 @@ static VPool *pool_read_resolved(VPool *p,uint64_t addr,uint64_t len,uint64_t *o
             }
             if(entry->age<upload->age)upload=entry;
         }
+        if(G.pool_range_stats){G.pool_ranges[range_bucket].protects++;G.pool_ranges[range_bucket].protect_bytes+=len;}
         stamp=nvn_dirty_now();nvn_dirty_protect((const void *)(uintptr_t)addr,len);
     }
     /* A GPU-written range in this command stream must retain its queued value. */
@@ -1223,6 +1239,7 @@ static uint64_t commit_after_gpu(CommitInfo ci,uint64_t waited) {
     if(getenv("DM_PSO_STATS"))fprintf(stderr,"[nvn-vulkan] PSO_STATS cached=%u hits=%llu misses=%llu\n",G.npso,(unsigned long long)G.profile_pso_hits,(unsigned long long)G.profile_pso_misses);
     if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] VIEW_CACHE_STATS view_hits=%llu view_misses=%llu framebuffer_hits=%llu framebuffer_misses=%llu\n",(unsigned long long)G.profile_view_hits,(unsigned long long)G.profile_view_misses,(unsigned long long)G.profile_framebuffer_hits,(unsigned long long)G.profile_framebuffer_misses);
     if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] POOL_UPLOAD_STATS uploaded_bytes=%llu reused_ranges=%llu reused_bytes=%llu\n",(unsigned long long)G.profile_pool_uploaded_bytes,(unsigned long long)G.profile_pool_reused_ranges,(unsigned long long)G.profile_pool_reused_bytes);
+    if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] POOL_OWNED_READ_STATS enabled=%d bypassed_ranges=%llu bypassed_bytes=%llu\n",G.pool_owned_bypass,(unsigned long long)G.profile_owned_reads,(unsigned long long)G.profile_owned_bytes);
     if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] RESOURCE_STATS driver_tables=%llu driver_table_reuses=%llu buffer_allocs=%llu buffer_bytes=%llu\n",(unsigned long long)G.profile_driver_tables,(unsigned long long)G.profile_driver_table_reuses,(unsigned long long)G.profile_buffer_allocs,(unsigned long long)G.profile_buffer_bytes);
     if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] TEMP_STATS reuses=%llu cached=%u cached_bytes=%llu aligned_bytes=%llu comparison_bytes=%llu driver_bytes=%llu other_bytes=%llu\n",(unsigned long long)G.profile_temp_reuses,G.nretired,(unsigned long long)G.retired_bytes,(unsigned long long)G.profile_temp_bytes[TEMP_ALIGNED],(unsigned long long)G.profile_temp_bytes[TEMP_COMPARISON],(unsigned long long)G.profile_temp_bytes[TEMP_DRIVER],(unsigned long long)G.profile_temp_bytes[TEMP_OTHER]);
     if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] STORAGE_BIAS_STATS bindings=%llu avoided_snapshot_bytes=%llu\n",(unsigned long long)G.profile_storage_bias_bindings,(unsigned long long)G.profile_storage_bias_bytes);
@@ -2203,6 +2220,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
        else if(b->kind==2 || b->kind==3 || b->kind==9) {
            if(b->slot<0 || b->slot>=16)die("shader buffer slot",b->slot);
            Range r=(b->kind==2||b->kind==9)?G.state.uniform[s->h.stage][b->slot]:G.state.storage[s->h.stage][b->slot];
+           if(G.pool_range_stats&&b->kind==2)G.pool_ranges[pool_range_bucket(r.size)].uniforms++;
            if(!r.addr || !r.size)die("unbound original shader buffer",b->slot);
            uint64_t offset=0;VPool *p=pool_read(r.addr,r.size,&offset);
            uint64_t alignment=b->kind==2?G.properties.limits.minUniformBufferOffsetAlignment:G.properties.limits.minStorageBufferOffsetAlignment;
@@ -3455,6 +3473,15 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         fprintf(stderr,"[nvn-vulkan] RENDER_VIEW_CACHE_PROFILE frame=%llu view_hits=%llu view_misses=%llu framebuffer_hits=%llu framebuffer_misses=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_view_hits,(unsigned long long)G.profile_view_misses,(unsigned long long)G.profile_framebuffer_hits,(unsigned long long)G.profile_framebuffer_misses);
         G.profile_view_hits=G.profile_view_misses=G.profile_framebuffer_hits=G.profile_framebuffer_misses=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_POOL_UPLOAD_PROFILE frame=%llu uploaded_bytes=%llu reused_ranges=%llu reused_bytes=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_pool_uploaded_bytes,(unsigned long long)G.profile_pool_reused_ranges,(unsigned long long)G.profile_pool_reused_bytes);
+        fprintf(stderr,"[nvn-vulkan] RENDER_POOL_OWNERSHIP_PROFILE frame=%llu enabled=%d bypassed_ranges=%llu bypassed_bytes=%llu\n",(unsigned long long)G.present_count+1,G.pool_owned_bypass,(unsigned long long)G.profile_owned_reads,(unsigned long long)G.profile_owned_bytes);
+        G.profile_owned_reads=G.profile_owned_bytes=0;
+        if(G.pool_range_stats){
+            static const uint64_t bounds[]={64,256,1024,4096,16384,65536,262144,1048576,UINT64_MAX};
+            for(unsigned i=0;i<9;i++)fprintf(stderr,"[nvn-vulkan] POOL_READ_RANGE_PROFILE frame=%llu max_bytes=%llu reads=%llu hits=%llu protect_calls=%llu read_bytes=%llu protect_bytes=%llu uniforms=%llu\n",
+                (unsigned long long)G.present_count+1,(unsigned long long)bounds[i],(unsigned long long)G.pool_ranges[i].reads,(unsigned long long)G.pool_ranges[i].hits,
+                (unsigned long long)G.pool_ranges[i].protects,(unsigned long long)G.pool_ranges[i].read_bytes,(unsigned long long)G.pool_ranges[i].protect_bytes,(unsigned long long)G.pool_ranges[i].uniforms);
+            memset(G.pool_ranges,0,sizeof G.pool_ranges);
+        }
         G.profile_pool_uploaded_bytes=G.profile_pool_reused_ranges=G.profile_pool_reused_bytes=0;
         if(G.pass_timing){for(uint32_t a=0;a<G.npacc;a++)for(uint32_t b=a+1;b<G.npacc;b++)if(G.pacc[b].ms>G.pacc[a].ms){PassAcc tmp=G.pacc[a];G.pacc[a]=G.pacc[b];G.pacc[b]=tmp;}
             double total=0;for(uint32_t a=0;a<G.npacc;a++)total+=G.pacc[a].ms;fprintf(stderr,"[nvn-vulkan] PASS_TIME_TOTAL frame=%llu groups=%u gpu_ms=%.3f\n",(unsigned long long)G.present_count+1,G.npacc,total);

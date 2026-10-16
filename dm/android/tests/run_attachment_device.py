@@ -39,6 +39,7 @@ def main():
     parser.add_argument('--index-checks', action='store_true', help='Compare CPU/GPU-authored 16/32-bit indices, high raw indices and negative base vertices across chunk thresholds')
     parser.add_argument('--resource-checks', action='store_true', help='Verify cross-submit view/framebuffer reuse, texture reincarnation and bounded retention with GPU pixels')
     parser.add_argument('--image-usage-checks', action='store_true', help='Compare image usage policies and late storage promotion across mip/layer GPU contents')
+    parser.add_argument('--pool-owned-bypass', action='store_true', help='Enable fully GPU-owned pool-read bypass in all fixture processes')
     parser.add_argument('--chunk-checks', action='store_true', help='Compare live submission thresholds with GPU-produced vertex data and alternating attachments')
     parser.add_argument('--pass-stats-checks', action='store_true', help='With --chunk-checks, compare disabled/enabled pipeline statistics, query overflow and both reset paths')
     args = parser.parse_args()
@@ -68,6 +69,10 @@ def main():
     receipt.write_text(json.dumps(report) + '\n')
 
     def run(command, log, timeout=90):
+        command=list(command)
+        if args.pool_owned_bypass and 'shell' in command and 'timeout' in command and 'run' in command:
+            at=command.index('shell')+1
+            command[at:at]=['env','DM_POOL_OWNED_READ_BYPASS=1']
         process = subprocess.run([str(x) for x in command], cwd=repo, capture_output=True, timeout=timeout)
         (out / log).write_bytes(process.stdout + process.stderr)
         if process.returncode:
@@ -245,7 +250,7 @@ def main():
     if args.cache_roundtrip:
         run([*adb, 'shell', 'mkdir', remote + '/pipeline'], 'mkdir-pipeline.log')
         cache_env = ['env', 'DM_VK_PIPELINE_CACHE_DIR=' + remote + '/pipeline']
-    report.update(device_executed=True, serial=args.serial)
+    report.update(device_executed=True, serial=args.serial,pool_owned_bypass=args.pool_owned_bypass)
     receipt.write_text(json.dumps(report, indent=2) + '\n')
     tested = run([*adb, 'shell', *cache_env, 'timeout', '90', remote + '/probe', remote + '/cache', remote + '/color.rgba', 'run'], 'device.log', 100)
     output = (tested.stdout + tested.stderr).decode('utf-8', errors='replace')
