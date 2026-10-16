@@ -33,9 +33,12 @@ def main():
     parser.add_argument('--run-device', action='store_true')
     parser.add_argument('--cache-roundtrip', action='store_true', help='Compare cold/warm/corrupt/repaired caches with identical GPU readbacks')
     parser.add_argument('--sampler-checks', action='store_true', help='Also read back integer, float and depth comparison sampling')
+    parser.add_argument('--command-state-checks', action='store_true', help='Compare all four command-state/PSO-last cache modes with GPU readback')
     args = parser.parse_args()
     if args.run_device and not args.serial:
         parser.error('--serial is required with --run-device')
+    if args.command_state_checks and args.cache_roundtrip:
+        parser.error('Run command-state and persistent-cache comparisons separately')
     repo = Path(__file__).resolve().parents[3]
     out = args.output.resolve(); out.mkdir(parents=True, exist_ok=True)
     report = {'passed': False, 'device_executed': False, 'original_game_frame': False,
@@ -62,6 +65,23 @@ def main():
     anchor = 'p_TextureFinalize(&target);'
     assert source.count(anchor) == 1
     extra_cases = cases.read_text(encoding='utf-8')
+    if args.command_state_checks:
+        commands = importlib.import_module('command_state_device_check')
+        pso = importlib.import_module('pso_state_device_check')
+        draw = 'p_CommandBufferDrawArrays(&cb,test==5?NVN_DRAW_PRIMITIVE_TRIANGLE_STRIP:NVN_DRAW_PRIMITIVE_TRIANGLES,0,3);'
+        if pso.EXTRA.count(draw) != 1:
+            raise RuntimeError('Command fixture draw anchor changed')
+        state_cases = commands.SETUP + pso.EXTRA.replace(draw, commands.REPEATED)
+        if state_cases.count('FILE *states=fopen("/data/local/tmp/d2r-mobile-nvn-api/states.rgba","wb");') != 1:
+            raise RuntimeError('Command fixture output anchor changed')
+        state_cases = state_cases.replace(
+            'FILE *states=fopen("/data/local/tmp/d2r-mobile-nvn-api/states.rgba","wb");',
+            'char state_path[1200];snprintf(state_path,sizeof state_path,"%s.states",argv[2]);FILE *states=fopen(state_path,"wb");')
+        state_cases += '\n    p_EventFinalize(&command_event);\n    p_TextureBuilderSetFormat(&tb,NVN_FORMAT_RGBA8);\n    memcpy(pixels,baseline,sizeof pixels);\n    fprintf(stderr,"COMMAND_STATE_DEVICE state_cases=8 indexed_draws=64 event_cuts=8 compute_switches=8 passed=1\\n");\n'
+        extra_cases = state_cases + extra_cases
+        report['command_fixture_sha256'] = {
+            p.name: sha(p) for p in (args.fixture_tools / 'command_state_device_check.py',
+                                     args.fixture_tools / 'pso_state_device_check.py')}
     if args.sampler_checks:
         copied_cache = out / 'sampler-cache'
         shutil.copytree(args.cache, copied_cache, dirs_exist_ok=True); args.cache = copied_cache
@@ -134,6 +154,8 @@ def main():
     run([*adb, 'push', binary, remote + '/probe'], 'push-probe.log')
     run([*adb, 'shell', 'chmod', '700', remote + '/probe'], 'chmod.log')
     cache_env = []
+    if args.command_state_checks:
+        cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=0', 'DM_PSO_LAST_CACHE=0']
     if args.cache_roundtrip:
         run([*adb, 'shell', 'mkdir', remote + '/pipeline'], 'mkdir-pipeline.log')
         cache_env = ['env', 'DM_VK_PIPELINE_CACHE_DIR=' + remote + '/pipeline']
@@ -154,6 +176,54 @@ def main():
         raise RuntimeError('Sampler GPU/fallback proof missing')
     report['sampler_checks'] = args.sampler_checks
     run([*adb, 'pull', remote + '/color.rgba', out / 'color.rgba'], 'pull-color.log')
+    if args.command_state_checks:
+        def state_record(text, mode):
+            if ('COMMAND_STATE_DEVICE state_cases=8 indexed_draws=64 event_cuts=8 compute_switches=8 passed=1' not in text
+                    or 'PSO_STATE mask=1' not in text
+                    or 'mismatches=0 same_process=1 passed=1' not in text):
+                raise RuntimeError('Command-state GPU proof missing')
+            stats = [dict(re.findall(r'(\w+)=([^\s]+)', line)) for line in text.splitlines()
+                     if 'COMMAND_STATE_STATS ' in line]
+            if not stats or any(int(row['enabled']) != bool(mode & 1) for row in stats):
+                raise RuntimeError('Command-state mode inconsistent')
+            last = stats[-1]
+            if not (mode & 1) and int(last['skipped']):
+                raise RuntimeError('Disabled command cache skipped commands')
+            if mode & 1 and any(not int(last[key + '_skipped']) for key in
+                               ('pipeline', 'descriptors', 'viewport', 'scissor', 'blend', 'vertex', 'index')):
+                raise RuntimeError('Fixture did not exercise every command cache')
+            driver = re.search(r'\[nvn-vulkan\] driver id=(\d+)', text)
+            pso_stats = [dict(re.findall(r'(\w+)=([^\s]+)', line)) for line in text.splitlines()
+                         if 'PSO_LOOKUP_STATS ' in line]
+            if not pso_stats or any(int(row['last_cache']) != bool(mode & 2) for row in pso_stats):
+                raise RuntimeError('PSO last-cache mode inconsistent')
+            if bool(int(pso_stats[-1]['last_hits'])) != bool(mode & 2):
+                raise RuntimeError('PSO last-cache path not exercised')
+            return dict(mode=mode, command_cache=bool(mode & 1), pso_last=bool(mode & 2),
+                        driver_id=int(driver[1]), command_stats=last, pso_stats=pso_stats[-1])
+        records = []
+        for mode in range(4):
+            text = output
+            if mode:
+                checked = run([*adb, 'shell', 'env', 'DM_RESOURCE_STATS=1',
+                               'DM_COMMAND_STATE_CACHE=' + str(mode & 1), 'DM_PSO_LAST_CACHE=' + str(int(bool(mode & 2))),
+                               'timeout', '90', remote + '/probe', remote + '/cache', remote + '/color.rgba', 'run'],
+                              f'command-{mode}-device.log', 100)
+                text = (checked.stdout + checked.stderr).decode('utf-8', errors='replace')
+                state_runtime = json.loads(checked.stdout.decode().strip().splitlines()[-1])
+                if not all(state_runtime[k] for k in ('compute_passed', 'draw_passed',
+                                                     'real_write_fault_hook_passed', 'compact_records_passed')):
+                    raise RuntimeError('Command-state base fixture failed')
+            record = state_record(text, mode)
+            pixels = out / f'command-{mode}.rgba'
+            run([*adb, 'pull', remote + '/color.rgba.states', pixels], f'command-{mode}-pull.log')
+            record.update(readback_bytes=pixels.stat().st_size, readback_sha256=sha(pixels))
+            if record['readback_bytes'] != 8 * 64 * 64 * 4:
+                raise RuntimeError('Command-state readback size mismatch')
+            records.append(record)
+        if len({r['readback_sha256'] for r in records}) != 1 or len({r['driver_id'] for r in records}) != 1:
+            raise RuntimeError('Command-state mode changed GPU pixels or driver')
+        report['command_state_ab'] = records
     if args.cache_roundtrip:
         expected_pixels = sha(out / 'color.rgba')
         def cache_record(text, mode, expected_status):

@@ -187,6 +187,7 @@ static struct {
     VkFormatProperties format_properties[256];uint8_t format_known[256];
     VkPipelineCache pipeline_cache;
     VkSubmission submission_slot,submission_slot2;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
+    uint64_t profile_slot_wait_ns,profile_drain_wait_ns,profile_completion_wait_ns,profile_completion_waits;
     VBuffer support,zero; VPool pools[LIMIT_POOLS]; int npool;
     PoolUpload pool_uploads[UPLOAD_BUCKETS][UPLOAD_WAYS];uint64_t upload_age;
     int disable_dirty_uploads,enable_writeback_prepare,enable_writeback_coalesce,event_trace;
@@ -1004,10 +1005,24 @@ typedef struct { VkSubmission *ctx;int kind; } AsyncJob;
 static AsyncJob g_jobs[8];static int g_jhead,g_jcount,g_worker_up;
 static int ctx_busy(const VkSubmission *c) { return c->phase==SUBMISSION_INFLIGHT||c->phase==SUBMISSION_GPU_DONE||c->phase==SUBMISSION_PUBLISHED; }
 /* Caller holds G.lock; the condition wait releases it so the completion worker can publish. */
-static void async_drain_locked(void) { while(g_jcount)pthread_cond_wait(&g_done_cv,&G.lock); }
+static void async_drain_locked(void) {
+    if(!g_jcount)return;
+    uint64_t started=dm_android_nvn_clock_ns();
+    uint64_t work_wait=dm_android_nvn_work_wait_begin(DM_NVN_WAIT_FENCE);
+    while(g_jcount)pthread_cond_wait(&g_done_cv,&G.lock);
+    dm_android_nvn_work_wait_end(work_wait);
+    G.profile_drain_wait_ns+=dm_android_nvn_clock_ns()-started;
+}
 static void sub_begin_ctx(VkSubmission *ctx) {
     mtl_init();uint64_t begin_cpu=dm_android_nvn_thread_cpu_ns();pthread_mutex_lock(&G.lock);
-    if(ctx_busy(ctx)){uint64_t w0=dm_android_nvn_clock_ns();while(ctx_busy(ctx))pthread_cond_wait(&g_done_cv,&G.lock);G.profile_wait_ns+=dm_android_nvn_clock_ns()-w0;}
+    if(ctx_busy(ctx)){
+        uint64_t w0=dm_android_nvn_clock_ns();
+        uint64_t work_wait=dm_android_nvn_work_wait_begin(DM_NVN_WAIT_FENCE);
+        while(ctx_busy(ctx))pthread_cond_wait(&g_done_cv,&G.lock);
+        dm_android_nvn_work_wait_end(work_wait);
+        uint64_t waited=dm_android_nvn_clock_ns()-w0;
+        G.profile_wait_ns+=waited;G.profile_slot_wait_ns+=waited;
+    }
     G.current_submission=ctx;
     if(G.active || (S.phase!=SUBMISSION_UNUSED && S.phase!=SUBMISSION_RETIRED))die("nested/unretired submission",S.epoch);
     if(S.phase==SUBMISSION_UNUSED)submission_pools_create(&S);
@@ -1125,6 +1140,9 @@ static uint64_t commit_after_gpu(CommitInfo ci,uint64_t waited) {
     if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] STORAGE_BIAS_STATS bindings=%llu avoided_snapshot_bytes=%llu\n",(unsigned long long)G.profile_storage_bias_bindings,(unsigned long long)G.profile_storage_bias_bytes);
     if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] QUERY_STATS queries=%u counter_ops=%d\n",S.nocc,S.ncounter);
     if(getenv("DM_RESOURCE_STATS"))command_state_profile("COMMAND_STATE_STATS",G.present_count+1,G.profile_frames);
+    if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] PSO_LOOKUP_STATS last_cache=%d lookups=%llu hash_calls=%llu last_hits=%llu last_misses=%llu\n",
+        G.enable_pso_last,(unsigned long long)G.profile_pso_lookups,(unsigned long long)G.profile_pso_hash_calls,
+        (unsigned long long)G.profile_pso_last_hits,(unsigned long long)G.profile_pso_last_misses);
     if(getenv("DM_RESOURCE_STATS"))dirty_query_profile("DIRTY_QUERY_STATS",G.present_count+1,G.profile_frames,0);
     if(getenv("DM_RESOURCE_STATS"))fprintf(stderr,"[nvn-vulkan] SUBMISSION_POOL_STATS epoch=%llu ticket=%llu phase=%u creates=%llu reuses=%llu command=%llx descriptors=%llx query=%llx fence=%llx gpu_complete=1 effects_published=1\n",
         (unsigned long long)S.epoch,(unsigned long long)S.ticket,(unsigned)S.phase,(unsigned long long)G.profile_submission_creates,(unsigned long long)G.profile_submission_reuses,
@@ -1149,8 +1167,11 @@ static void *async_worker(void *arg) {
         AsyncJob job=g_jobs[g_jhead];
         pthread_mutex_unlock(&G.lock);
         VkFence fence=job.ctx->gpu_fence;
+        uint64_t wait_started=dm_android_nvn_clock_ns();
         CHECK(vkWaitForFences(G.device,1,&fence,VK_TRUE,UINT64_MAX));
+        uint64_t waited=dm_android_nvn_clock_ns()-wait_started;
         pthread_mutex_lock(&G.lock);
+        G.profile_completion_wait_ns+=waited;G.profile_completion_waits++;
         VkSubmission *saved=G.current_submission;int saved_active=G.active;G.current_submission=job.ctx;G.completing=1;job.ctx->recorder=pthread_self();
         if(job.kind==0){CommitInfo ci;memcpy(&ci,&job.ctx->commit_info,sizeof ci);ci.wait_cpu=dm_android_nvn_thread_cpu_ns();commit_after_gpu(ci,0);}
         else present_after_gpu();
@@ -3206,9 +3227,17 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         fprintf(stderr,"[nvn-vulkan] RENDER_CPU_PROFILE frame=%llu lookup_ms=%.3f pool_ms=%.3f bind_ms=%.3f renderpass_ms=%.3f present_ms=%.3f desc_alloc_ms=%.3f desc_update_ms=%.3f prep_ms=%.3f\n",(unsigned long long)G.present_count+1,G.profile_lookup_ns/1e6,G.profile_pool_ns/1e6,G.profile_bind_ns/1e6,G.profile_render_ns/1e6,G.profile_present_ns/1e6,G.profile_desc_alloc_ns/1e6,G.profile_desc_update_ns/1e6,G.profile_prep_ns/1e6);
         fprintf(stderr,"[nvn-vulkan] RENDER_WRITEBACK_PROFILE frame=%llu enabled=%u raw_ranges=%llu copied_ranges=%llu raw_bytes=%llu copied_bytes=%llu plan_thread_cpu_ms=%.3f\n",(unsigned long long)G.present_count+1,G.enable_writeback_coalesce,(unsigned long long)G.profile_writeback_raw_ranges,(unsigned long long)G.profile_writeback_copy_ranges,(unsigned long long)G.profile_writeback_raw_bytes,(unsigned long long)G.profile_writeback_bytes,G.profile_writeback_plan_cpu_ns/1e6);
         fprintf(stderr,"[nvn-vulkan] RENDER_PSO_PROFILE frame=%llu cached=%u hits=%llu misses=%llu\n",(unsigned long long)G.present_count+1,G.npso,(unsigned long long)G.profile_pso_hits,(unsigned long long)G.profile_pso_misses);
-        if(G.profile_frames>=60)fprintf(stderr,"[nvn-vulkan] RENDER_PSO_HASH_PROFILE frame=%llu frames=%llu key_bytes=%zu hash_mode=byte_fnv1a last_cache=%d lookups=%llu hash_calls=%llu hash_ms=%.3f lookup_ms=%.3f last_hits=%llu last_misses=%llu table_hits=%llu misses=%llu table_probes=%llu max_probe=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,sizeof(PsoKey),G.enable_pso_last,(unsigned long long)G.profile_pso_lookups,(unsigned long long)G.profile_pso_hash_calls,G.profile_pso_hash_ns/1e6,G.profile_pso_lookup_ns/1e6,(unsigned long long)G.profile_pso_last_hits,(unsigned long long)G.profile_pso_last_misses,(unsigned long long)G.profile_pso_table_hits,(unsigned long long)G.profile_pso_misses,(unsigned long long)G.profile_pso_probes,(unsigned long long)G.profile_pso_max_probe);
+        if(G.profile_frames>=60)fprintf(stderr,"[nvn-vulkan] RENDER_PSO_HASH_PROFILE frame=%llu frames=%llu key_bytes=%zu hash_mode=word4_mix last_cache=%d lookups=%llu hash_calls=%llu hash_ms=%.3f lookup_ms=%.3f last_hits=%llu last_misses=%llu table_hits=%llu misses=%llu table_probes=%llu max_probe=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,sizeof(PsoKey),G.enable_pso_last,(unsigned long long)G.profile_pso_lookups,(unsigned long long)G.profile_pso_hash_calls,G.profile_pso_hash_ns/1e6,G.profile_pso_lookup_ns/1e6,(unsigned long long)G.profile_pso_last_hits,(unsigned long long)G.profile_pso_last_misses,(unsigned long long)G.profile_pso_table_hits,(unsigned long long)G.profile_pso_misses,(unsigned long long)G.profile_pso_probes,(unsigned long long)G.profile_pso_max_probe);
         if(G.profile_frames>=60)fprintf(stderr,"[nvn-vulkan] RENDER_PHASE_CPU_PROFILE frame=%llu frames=%llu clock=thread_cpu writeback_prepare=%d replay_inclusive_ms=%.3f begin_ms=%.3f commit_prepare_ms=%.3f commit_wait_ms=%.3f retire_ms=%.3f writeback_subset_ms=%.3f present_body_inclusive_ms=%.3f replay_calls=%llu begin_calls=%llu commit_calls=%llu writeback_calls=%llu present_calls=%llu wb_global_faults=%llu wb_global_preps=%llu wb_global_mp_calls=%llu wb_global_mp_pages=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,G.enable_writeback_prepare,G.profile_replay_cpu_ns/1e6,G.profile_begin_cpu_ns/1e6,G.profile_commit_prepare_cpu_ns/1e6,G.profile_commit_wait_cpu_ns/1e6,G.profile_retire_cpu_ns/1e6,G.profile_writeback_cpu_ns/1e6,G.profile_present_cpu_ns/1e6,(unsigned long long)G.profile_replay_calls,(unsigned long long)G.profile_begin_calls,(unsigned long long)G.profile_commit_calls,(unsigned long long)G.profile_writeback_calls,(unsigned long long)G.profile_present_calls,(unsigned long long)G.profile_writeback_global_faults,(unsigned long long)G.profile_writeback_global_preps,(unsigned long long)G.profile_writeback_global_mp_calls,(unsigned long long)G.profile_writeback_global_mp_pages);
-        if(G.profile_frames>=60)fprintf(stderr,"[nvn-vulkan] RENDER_SUBMISSION_PROFILE frame=%llu contexts=1 epoch=%llu creates=%llu reuses=%llu publications=%llu context_bytes=%zu async=0\n",(unsigned long long)G.present_count+1,(unsigned long long)S.epoch,(unsigned long long)G.profile_submission_creates,(unsigned long long)G.profile_submission_reuses,(unsigned long long)G.profile_submission_publications,sizeof(VkSubmission)+DESC_ARENA+DESC_ENTRIES*sizeof(DescEntry));
+        if(G.profile_frames>=60){
+            unsigned contexts=(G.submission_slot.phase!=SUBMISSION_UNUSED)+(G.submission_slot2.phase!=SUBMISSION_UNUSED);
+            fprintf(stderr,"[nvn-vulkan] RENDER_SUBMISSION_PROFILE frame=%llu contexts=%u epoch=%llu creates=%llu reuses=%llu publications=%llu context_struct_bytes=%zu descriptor_arena_bytes=%u descriptor_entry_bytes=%zu async=%d slot_wait_ms=%.3f drain_wait_ms=%.3f completion_fence_wait_ms=%.3f completion_waits=%llu\n",
+                (unsigned long long)G.present_count+1,contexts,(unsigned long long)S.epoch,
+                (unsigned long long)G.profile_submission_creates,(unsigned long long)G.profile_submission_reuses,
+                (unsigned long long)G.profile_submission_publications,sizeof(VkSubmission),(unsigned)DESC_ARENA,
+                DESC_ENTRIES*sizeof(DescEntry),G.async_enabled,G.profile_slot_wait_ns/1e6,
+                G.profile_drain_wait_ns/1e6,G.profile_completion_wait_ns/1e6,(unsigned long long)G.profile_completion_waits);
+        }
         if(G.profile_frames>=60)fprintf(stderr,"[nvn-vulkan] RENDER_COMMAND_PROFILE frame=%llu records=%llu bytes=%llu lease_hits=%llu pool_resolves=%llu epoch_bound=1\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_command_records,(unsigned long long)G.profile_command_bytes,(unsigned long long)G.profile_command_lease_hits,(unsigned long long)G.profile_command_resolves);
         if(G.profile_frames>=60)command_state_profile("RENDER_COMMAND_STATE_PROFILE",G.present_count+1,G.profile_frames);
         dirty_query_profile("RENDER_DIRTY_QUERY_PROFILE",G.present_count+1,G.profile_frames,1);
@@ -3218,6 +3247,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         G.profile_pso_hits=G.profile_pso_misses=0;
         G.profile_pso_lookups=G.profile_pso_hash_calls=G.profile_pso_hash_ns=G.profile_pso_lookup_ns=0;
         G.profile_pso_last_hits=G.profile_pso_last_misses=G.profile_pso_table_hits=G.profile_pso_probes=G.profile_pso_max_probe=0;
+        G.profile_slot_wait_ns=G.profile_drain_wait_ns=G.profile_completion_wait_ns=G.profile_completion_waits=0;
         G.profile_replay_cpu_ns=G.profile_begin_cpu_ns=G.profile_commit_prepare_cpu_ns=G.profile_commit_wait_cpu_ns=G.profile_retire_cpu_ns=G.profile_writeback_cpu_ns=G.profile_present_cpu_ns=0;
         G.profile_replay_calls=G.profile_begin_calls=G.profile_commit_calls=G.profile_writeback_calls=G.profile_present_calls=0;
         G.profile_writeback_global_faults=G.profile_writeback_global_preps=G.profile_writeback_global_mp_calls=G.profile_writeback_global_mp_pages=0;

@@ -35,3 +35,10 @@ DriverProperties 在 Vulkan 1.1 上无条件查询，需要按核心版本或扩
 夹具与真实角色选择启动验证。详见
 [本轮记录](ANDROID_COMPAT_PERFORMANCE_2026-10-16.zh-CN.md)。这不是整个目标完成：
 驱动矩阵、实际显示帧时间、营地/战斗对照、CPU/GPU 主瓶颈优化及故障恢复仍需继续。
+
+第二批修正了写死的提交模式/PSO hash 日志及 ADPF 对 submission 条件等待的计时，
+新增只读的实际呈现采集入口，完成四种 CPU 缓存组合的系统驱动 GPU 读回与六轮菜单对照。
+状态缓存减少约 67% 状态命令，但尚无显著、普遍 FPS 收益证据，故保留实验开关。
+菜单 GPU chunk 时间约 51 ms/帧，继续定位具体 GPU Pass；详细结果见
+[CPU/GPU 诊断与对照](ANDROID_CPU_GPU_PROFILE_2026-10-16.zh-CN.md)。
+实际呈现采集已有本机证据，营地/战斗和跨设备验收仍未完成，总目标保持进行中。
