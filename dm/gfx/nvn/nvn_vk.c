@@ -93,6 +93,7 @@ static void hz_note(int kind);
 #define vkCmdPipelineBarrier(...) (S.command_dirty=1,dm_vkCmdPipelineBarrier(__VA_ARGS__))
 #include "nvn_vk_storage_bias.h"
 #include "nvn_vk_ballot.h"
+#include "nvn_vk_skin.h"
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *map; uint64_t size,allocation_size;VkBufferUsageFlags usage;int cached;uint64_t dirty; } VBuffer;
 enum { TEMP_OTHER,TEMP_DRIVER,TEMP_ALIGNED,TEMP_COMPARISON,TEMP_ROLES };
 typedef struct { const uint8_t *guest; uint64_t size,serial; VBuffer v; } VPool;
@@ -212,6 +213,7 @@ static struct {
     int active,feedback_layout,shader_draw_parameters;
     ReplayState state; VkPhysicalDeviceSubgroupProperties subgroup;
     int lower_compute_ballot;
+    int lower_skin_ubo;
     uint8_t *shader_index; size_t index_bytes; char shader_root[1024]; ANativeWindow *window;
     ShaderEntry *shader_entries;size_t shader_entry_capacity;
     VkSurfaceKHR surface; VkSwapchainKHR swapchain; VkImage *swap_images; VkImageLayout *swap_layouts;
@@ -418,6 +420,7 @@ static void backend_init(void) {
     G.lower_compute_ballot=driver_properties.driverID==VK_DRIVER_ID_QUALCOMM_PROPRIETARY &&
         (G.subgroup.supportedStages&VK_SHADER_STAGE_COMPUTE_BIT) &&
         (G.subgroup.supportedOperations&VK_SUBGROUP_FEATURE_ARITHMETIC_BIT);
+    G.lower_skin_ubo=driver_properties.driverID==VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
     if(private_driver && !strcmp(private_driver,"turnip") && driver_properties.driverID!=VK_DRIVER_ID_MESA_TURNIP)die("requested private driver was not loaded",driver_properties.driverID);
     fprintf(stderr,"[nvn-vulkan] driver id=%u name=%s info=%s\n",driver_properties.driverID,driver_properties.driverName,driver_properties.driverInfo);
     fprintf(stderr,"[nvn-vulkan] subgroup size=%u stages=%#x operations=%#x\n",G.subgroup.subgroupSize,G.subgroup.supportedStages,G.subgroup.supportedOperations);
@@ -1584,6 +1587,11 @@ static VShader *shader_get(const void *control,uint32_t stage) {
         unsigned ballots=0;uint8_t *adapted=dm_compute_ballot_apply(bytes,&size,&ballots);
         if(!adapted)die("compute ballot adaptation bounds/interface",0);bytes=adapted;
         if(ballots)fprintf(stderr,"[nvn-vulkan] COMPUTE_BALLOT_REDUCE shader=%s ballots=%u driver=Qualcomm bytes=%zu\n",key,ballots,size);
+    }
+    if(stage==0&&G.lower_skin_ubo&&(!strcmp(key,"54c93fa22abff9ee")||!strcmp(key,"3deaf68fd65b5298"))){
+        unsigned accesses=0;uint8_t *adapted=dm_skin_ubo_apply(bytes,&size,&accesses);
+        if(!adapted)die("skin UBO adaptation bounds/interface",0);bytes=adapted;
+        if(accesses)fprintf(stderr,"[nvn-vulkan] SKIN_UBO_VEC4_EXTRACT shader=%s accesses=%u driver=Qualcomm bytes=%zu\n",key,accesses,size);
     }
     uint32_t *words=(uint32_t *)bytes;int fetch=0,sampling=0;
     for(size_t offset=5;offset<size/4;) {
