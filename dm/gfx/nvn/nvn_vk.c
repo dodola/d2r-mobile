@@ -509,6 +509,12 @@ static void backend_init(void) {
     enabled.vertexPipelineStoresAndAtomics=available.vertexPipelineStoresAndAtomics;
     enabled.shaderClipDistance=available.shaderClipDistance;
     enabled.shaderCullDistance=available.shaderCullDistance;
+    /* GPU-authored NVN indices can use all 32 bits, even when a negative base
+     * vertex brings the effective vertex back into a small bound stream. */
+    enabled.fullDrawIndexUint32=available.fullDrawIndexUint32;
+    fprintf(stderr,"[nvn-vulkan] INDEX_CAPS full_uint32_supported=%u full_uint32_enabled=%u max_device_index=%u\n",
+        available.fullDrawIndexUint32,enabled.fullDrawIndexUint32,
+        G.properties.limits.maxDrawIndexedIndexValue);
     G.pass_stats=getenv("DM_PASS_STATS") && !strcmp(getenv("DM_PASS_STATS"),"1") && available.pipelineStatisticsQuery;
     enabled.pipelineStatisticsQuery=G.pass_stats;
     fprintf(stderr,"[nvn-vulkan] PASS_STATS_CAPS requested=%d supported=%u enabled=%d\n",
@@ -518,7 +524,7 @@ static void backend_init(void) {
         enabled.shaderImageGatherExtended,enabled.samplerAnisotropy,enabled.imageCubeArray,enabled.occlusionQueryPrecise,
         enabled.independentBlend,enabled.fragmentStoresAndAtomics,enabled.vertexPipelineStoresAndAtomics,
         enabled.shaderClipDistance,enabled.shaderCullDistance,draw_parameters.shaderDrawParameters,G.feedback_layout,
-        enabled.pipelineStatisticsQuery};
+        enabled.pipelineStatisticsQuery,enabled.fullDrawIndexUint32};
     for(unsigned i=0;i<sizeof cache_features/sizeof cache_features[0];i++)
         if(cache_features[i])G.pipeline_cache_key.enabled_features|=1u<<i;
     G.precise_occlusion=enabled.occlusionQueryPrecise;
@@ -570,6 +576,9 @@ static void backend_init(void) {
     G.profile_start_ns=dm_android_nvn_clock_ns();
 }
 void mtl_init(void) { if(pthread_once(&init_once,backend_init))die("Vulkan initialize once",0); }
+#ifdef DM_VK_INDEX_TEST
+int dm_vk_index_full_uint32(void) { mtl_init();return G.enabled_features.fullDrawIndexUint32; }
+#endif
 void *dm_vk_native_window(void) {pthread_mutex_lock(&G.lock);void *w=G.window;pthread_mutex_unlock(&G.lock);return w;}
 int dm_vk_graphics_live(void) {pthread_mutex_lock(&G.lock);int live=G.graphics_live;pthread_mutex_unlock(&G.lock);return live;}
 void dm_vk_graphics_begin(void *memory,size_t size) {

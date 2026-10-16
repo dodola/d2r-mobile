@@ -36,6 +36,7 @@ def main():
     parser.add_argument('--command-state-checks', action='store_true', help='Compare all four command-state/PSO-last cache modes with GPU readback')
     parser.add_argument('--depth-copy-checks', action='store_true', help='Compare native/forced drawn depth+stencil copies with independent expected pixels and command caching off/on')
     parser.add_argument('--vertex-checks', action='store_true', help='Read back 79 vertex formats, four shader widths and four layouts with native/forced split and command caching off/on')
+    parser.add_argument('--index-checks', action='store_true', help='Compare CPU/GPU-authored 16/32-bit indices, high raw indices and negative base vertices across chunk thresholds')
     parser.add_argument('--chunk-checks', action='store_true', help='Compare live submission thresholds with GPU-produced vertex data and alternating attachments')
     parser.add_argument('--pass-stats-checks', action='store_true', help='With --chunk-checks, compare disabled/enabled pipeline statistics, query overflow and both reset paths')
     args = parser.parse_args()
@@ -43,6 +44,8 @@ def main():
         parser.error('--serial is required with --run-device')
     if args.pass_stats_checks and not args.chunk_checks:
         parser.error('--pass-stats-checks requires --chunk-checks')
+    if args.index_checks and (args.chunk_checks or args.vertex_checks or args.depth_copy_checks or args.command_state_checks or args.cache_roundtrip or args.sampler_checks):
+        parser.error('Run index comparisons separately from other optional suites')
     if args.command_state_checks and args.cache_roundtrip:
         parser.error('Run command-state and persistent-cache comparisons separately')
     if args.depth_copy_checks and (args.command_state_checks or args.cache_roundtrip or args.sampler_checks):
@@ -77,6 +80,16 @@ def main():
     anchor = 'p_TextureFinalize(&target);'
     assert source.count(anchor) == 1
     extra_cases = cases.read_text(encoding='utf-8')
+    if args.index_checks:
+        import index_device_assets
+        source = source.replace('void dm_vk_attachment_config(int);',
+            'int dm_vk_index_full_uint32(void);\nvoid dm_vk_chunk_config(int);\nint dm_vk_chunk_applied(void);\nuint64_t dm_vk_chunk_count(void);\nvoid dm_vk_attachment_config(int);')
+        copied_cache = out / 'index-cache'
+        shutil.copytree(args.cache, copied_cache, dirs_exist_ok=True); args.cache = copied_cache
+        index_cases, report['index_shaders'] = index_device_assets.prepare(args.cache, out, ndk, run)
+        extra_cases += '\n' + index_cases
+        report['index_fixture_sha256'] = {p.name: sha(p) for p in
+            (Path(__file__).with_name('index_device_assets.py'), Path(__file__).with_name('index_device_cases.inc'))}
     if args.chunk_checks:
         import chunk_device_assets
         source = source.replace('void dm_vk_attachment_config(int);',
@@ -169,6 +182,8 @@ def main():
              '-Wno-format', '-Wno-unused-function', '-ffixed-x18']
     if args.depth_copy_checks:
         flags += ['-DDM_VK_COPY_TEST']
+    if args.index_checks:
+        flags += ['-DDM_VK_INDEX_TEST']
     for include in ('gfx/nvn/include', 'gfx/nvn', 'android', 'host'):
         flags += ['-I', dm / include]
     flags += sources + objects + ['-lvulkan', '-landroid', '-llog', '-ldl', '-lz', '-lm', '-laaudio',
@@ -202,7 +217,7 @@ def main():
         run([*adb, 'shell', 'mkdir', remote + '/adapted'], 'mkdir-adapted.log')
         cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_VK_VERTEX_SPLIT=0', 'DM_COMMAND_STATE_CACHE=0',
                      'DM_VERTEX_SHADER_DIR=' + remote + '/adapted']
-    if args.chunk_checks:
+    if args.chunk_checks or args.index_checks:
         cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=0']
     if args.cache_roundtrip:
         run([*adb, 'shell', 'mkdir', remote + '/pipeline'], 'mkdir-pipeline.log')
@@ -224,6 +239,48 @@ def main():
         raise RuntimeError('Sampler GPU/fallback proof missing')
     report['sampler_checks'] = args.sampler_checks
     run([*adb, 'pull', remote + '/color.rgba', out / 'color.rgba'], 'pull-color.log')
+    if args.index_checks:
+        records = []
+        for mode in range(2):
+            text = output
+            if mode:
+                checked = run([*adb, 'shell', 'env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=1',
+                    'timeout', '90', remote + '/probe', remote + '/cache', remote + '/color.rgba', 'run'],
+                    'index-cache-on-device.log', 100)
+                text = (checked.stdout + checked.stderr).decode('utf-8', errors='replace')
+                tested_runtime = json.loads(checked.stdout.decode().strip().splitlines()[-1])
+                if not all(tested_runtime[k] for k in ('compute_passed', 'draw_passed', 'real_write_fault_hook_passed', 'compact_records_passed')):
+                    raise RuntimeError('Indexed base fixture failed')
+            if ('INDEX_CAPS full_uint32_supported=1 full_uint32_enabled=1 max_device_index=4294967295' not in text or
+                    'INDEX_DEVICE modes=3 index_cases=7 sources=2 draws=2688 compute=21 read_bytes=1376256 full_uint32=1 writeback_canaries=1 passed=1' not in text or
+                    'mismatches=0 same_process=1 passed=1' not in text):
+                raise RuntimeError('Full-width GPU index proof missing')
+            rows = [dict(re.findall(r'(\w+)=([^\s]+)', row)) for row in text.splitlines() if 'INDEX_PHASE ' in row]
+            specs = [(16, 0, 0, 16), (16, 65533, -65533, 16), (32, 0, 0, 16),
+                     (32, 0x00fffffe, -0x00fffffe, 16), (32, 0x7ffffffe, -0x7ffffffe, 16),
+                     (32, 0x80000000, -2147483648, 16), (32, 0xfffffffd, -2147483648, 0)]
+            expected = [dict(mode=str(m), threshold=str(threshold), case=str(ci), bits=str(bits),
+                             first=str(first), base=str(base), stride=str(stride), gpu_producer=str(producer),
+                             draws='64', chunks=str(63 // threshold if threshold else 0), passed='1')
+                        for m, threshold in enumerate((0, 16, 48))
+                        for ci, (bits, first, base, stride) in enumerate(specs) for producer in range(2)]
+            if rows != expected:
+                raise RuntimeError('GPU index case/chunk coverage mismatch')
+            commands = [dict(re.findall(r'(\w+)=([^\s]+)', row)) for row in text.splitlines() if 'COMMAND_STATE_STATS ' in row]
+            driver = re.search(r'\[nvn-vulkan\] driver id=(\d+)', text)
+            if (not driver or not commands or any(int(row['enabled']) != mode for row in commands) or
+                    bool(int(commands[-1]['index_skipped'])) != bool(mode)):
+                raise RuntimeError('Index command cache/driver proof missing')
+            pixels = out / f'index-{mode}.rgba'
+            run([*adb, 'pull', remote + '/color.rgba.indices', pixels], f'index-{mode}-pull.log')
+            if pixels.stat().st_size != 1376256:
+                raise RuntimeError('Index readback size mismatch')
+            records.append(dict(command_cache=bool(mode), phases=rows, draws=2688, compute=21,
+                readback_bytes=pixels.stat().st_size, readback_sha256=sha(pixels), driver_id=int(driver[1]),
+                command_stats=commands[-1]))
+        if len({r['readback_sha256'] for r in records}) != 1 or len({r['driver_id'] for r in records}) != 1:
+            raise RuntimeError('Index modes changed pixels or driver')
+        report['index_ab'] = records
     if args.chunk_checks:
         records = []
         for mode in range(5 if args.pass_stats_checks else 2):
