@@ -94,6 +94,8 @@ static void hz_note(int kind);
 #include "nvn_vk_storage_bias.h"
 #include "nvn_vk_ballot.h"
 #include "nvn_vk_skin.h"
+#include "nvn_vk_profile.h"
+#include "nvn_vk_pipeline_cache_key.h"
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *map; uint64_t size,allocation_size;VkBufferUsageFlags usage;int cached;uint64_t dirty; } VBuffer;
 enum { TEMP_OTHER,TEMP_DRIVER,TEMP_ALIGNED,TEMP_COMPARISON,TEMP_ROLES };
 typedef struct { const uint8_t *guest; uint64_t size,serial; VBuffer v; } VPool;
@@ -212,8 +214,8 @@ static struct {
     uint64_t profile_view_hits,profile_view_misses,profile_framebuffer_hits,profile_framebuffer_misses;
     int active,feedback_layout,shader_draw_parameters;
     ReplayState state; VkPhysicalDeviceSubgroupProperties subgroup;
-    int lower_compute_ballot;
-    int lower_skin_ubo;
+    NvnVkGpuProfile profile; NvnVkQuirkRegistry quirks;
+    NvnVkPipelineCacheKey pipeline_cache_key;
     uint8_t *shader_index; size_t index_bytes; char shader_root[1024]; ANativeWindow *window;
     ShaderEntry *shader_entries;size_t shader_entry_capacity;
     VkSurfaceKHR surface; VkSwapchainKHR swapchain; VkImage *swap_images; VkImageLayout *swap_layouts;
@@ -417,13 +419,17 @@ static void backend_init(void) {
     VkPhysicalDeviceDriverProperties driver_properties={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,.pNext=&G.subgroup};
     VkPhysicalDeviceProperties2 properties2={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,.pNext=&driver_properties};
     vkGetPhysicalDeviceProperties2(G.physical,&properties2);
-    G.lower_compute_ballot=driver_properties.driverID==VK_DRIVER_ID_QUALCOMM_PROPRIETARY &&
-        (G.subgroup.supportedStages&VK_SHADER_STAGE_COMPUTE_BIT) &&
-        (G.subgroup.supportedOperations&VK_SUBGROUP_FEATURE_ARITHMETIC_BIT);
-    G.lower_skin_ubo=driver_properties.driverID==VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
+    G.profile=nvn_vk_gpu_profile_make(&G.properties,&driver_properties,&G.subgroup);
+    G.quirks=nvn_vk_quirk_registry_resolve(&G.profile);
+    G.pipeline_cache_key=nvn_vk_pipeline_cache_key_make(&G.properties,&G.profile,&G.quirks);
     if(private_driver && !strcmp(private_driver,"turnip") && driver_properties.driverID!=VK_DRIVER_ID_MESA_TURNIP)die("requested private driver was not loaded",driver_properties.driverID);
     fprintf(stderr,"[nvn-vulkan] driver id=%u name=%s info=%s\n",driver_properties.driverID,driver_properties.driverName,driver_properties.driverInfo);
     fprintf(stderr,"[nvn-vulkan] subgroup size=%u stages=%#x operations=%#x\n",G.subgroup.subgroupSize,G.subgroup.supportedStages,G.subgroup.supportedOperations);
+    fprintf(stderr,"[nvn-vulkan] render tier=%u quirks=%#x\n",(unsigned)G.quirks.render_tier,G.quirks.flags);
+    fprintf(stderr,"[nvn-vulkan] pipeline cache identity version=%u uuid=%02x%02x%02x%02x quirks=%#x\n",
+        G.pipeline_cache_key.version,G.pipeline_cache_key.pipeline_cache_uuid[0],
+        G.pipeline_cache_key.pipeline_cache_uuid[1],G.pipeline_cache_key.pipeline_cache_uuid[2],
+        G.pipeline_cache_key.pipeline_cache_uuid[3],G.pipeline_cache_key.quirk_flags);
     vkGetPhysicalDeviceQueueFamilyProperties(G.physical,&n,NULL);
     VkQueueFamilyProperties *families=calloc(n,sizeof(*families)); if(!families) die("queue list",n);
     vkGetPhysicalDeviceQueueFamilyProperties(G.physical,&n,families); G.family=UINT32_MAX;
@@ -1583,12 +1589,13 @@ static VShader *shader_get(const void *control,uint32_t stage) {
     } else {snprintf(name,sizeof(name),"%s.spv",key);bytes=read_file(name,&size);}
     if(size%4 || size<20 || ((uint32_t *)bytes)[0]!=0x07230203)die("SPIR-V module",size);
     bytes=buffer_image_module(bytes,&size,s);
-    if(stage==5&&G.lower_compute_ballot){
+    if(stage==5&&nvn_vk_quirk_enabled(&G.quirks,NVN_VK_QUIRK_LOWER_COMPUTE_BALLOT)){
         unsigned ballots=0;uint8_t *adapted=dm_compute_ballot_apply(bytes,&size,&ballots);
         if(!adapted)die("compute ballot adaptation bounds/interface",0);bytes=adapted;
         if(ballots)fprintf(stderr,"[nvn-vulkan] COMPUTE_BALLOT_REDUCE shader=%s ballots=%u driver=Qualcomm bytes=%zu\n",key,ballots,size);
     }
-    if(stage==0&&G.lower_skin_ubo&&(!strcmp(key,"54c93fa22abff9ee")||!strcmp(key,"3deaf68fd65b5298"))){
+    if(stage==0&&nvn_vk_quirk_enabled(&G.quirks,NVN_VK_QUIRK_LOWER_SKIN_UBO)&&
+       (!strcmp(key,"54c93fa22abff9ee")||!strcmp(key,"3deaf68fd65b5298"))){
         unsigned accesses=0;uint8_t *adapted=dm_skin_ubo_apply(bytes,&size,&accesses);
         if(!adapted)die("skin UBO adaptation bounds/interface",0);bytes=adapted;
         if(accesses)fprintf(stderr,"[nvn-vulkan] SKIN_UBO_VEC4_EXTRACT shader=%s accesses=%u driver=Qualcomm bytes=%zu\n",key,accesses,size);
