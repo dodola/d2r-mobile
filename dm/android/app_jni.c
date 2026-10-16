@@ -227,6 +227,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_CHUNK_DRAWS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/chunk-draws.txt");
     {FILE *cf=fopen(driver_option,"r");if(cf){char cv[12]={0};size_t cn=fread(cv,1,11,cf);fclose(cf);if(cn)setenv("DM_CHUNK_DRAWS",cv,1);}}
+    unsetenv("DM_VK_CHUNK_CONTROL");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/chunk-control.txt");
+    if(access(driver_option,F_OK)==0)setenv("DM_VK_CHUNK_CONTROL",driver_option,1);
     unsetenv("DM_PROFILE_DETAIL");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/profile-detail");
     if(access(driver_option,F_OK)==0)setenv("DM_PROFILE_DETAIL","1",1);

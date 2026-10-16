@@ -699,6 +699,32 @@ static void chunk_ts_write(int end);
 static void pending_clears_flush(void);
 static _Atomic int attachment_override=-1;
 static _Atomic int attachment_applied=3;
+static _Atomic int chunk_override=-1,chunk_applied=48;
+static uint64_t chunk_control_sequence,chunk_applied_sequence,chunk_total;
+void dm_vk_chunk_config(int draws) {if(draws < -1||draws>2048)die("chunk threshold bounds",draws);atomic_store(&chunk_override,draws);}
+int dm_vk_chunk_applied(void) {return atomic_load(&chunk_applied);}
+uint64_t dm_vk_chunk_count(void) {pthread_mutex_lock(&G.lock);uint64_t result=chunk_total;pthread_mutex_unlock(&G.lock);return result;}
+/* Diagnostic control only. No file is polled unless enabled before startup.
+ * A request takes effect at the next submission, never midway through a slot. */
+static void chunk_control_poll(void) {
+    const char *path=getenv("DM_VK_CHUNK_CONTROL");if(!path)return;
+    static uint64_t last;uint64_t now=dm_android_nvn_clock_ns();if(now-last<100000000)return;last=now;
+    FILE *f=fopen(path,"r");if(!f)return;
+    char text[96]={0};size_t size=fread(text,1,sizeof text-1,f);int tail=fgetc(f),error=ferror(f);fclose(f);
+    if(!size||error||tail!=EOF||memchr(text,0,size))return;
+    uint64_t numbers[2]={0};const char *p=text;
+    for(unsigned field=0;field<2;field++) {
+        if(*p<'0'||*p>'9')return;
+        uint64_t limit=field?2048:UINT64_MAX;
+        do {unsigned digit=(unsigned)(*p++-'0');if(numbers[field]>(limit-digit)/10)return;numbers[field]=numbers[field]*10+digit;}while(*p>='0'&&*p<='9');
+        if(!field&&*p!=' '&&*p!='\t')return;
+        while(*p==' '||*p=='\t'||*p=='\r'||*p=='\n')p++;
+    }
+    if(*p||numbers[0]<=chunk_control_sequence)return;
+    chunk_control_sequence=numbers[0];dm_vk_chunk_config((int)numbers[1]);
+    fprintf(stderr,"[nvn-vulkan] CHUNK_CONTROL pid=%d sequence=%llu threshold=%d mono_ns=%llu\n",
+        getpid(),(unsigned long long)numbers[0],(int)numbers[1],(unsigned long long)now);
+}
 int dm_vk_attachment_applied_flags(void) {return atomic_load(&attachment_applied);}
 /* Diagnostic A/B control, latched at submit begin. Call between QueueFinish
  * boundaries to compare the same workload within one process. */
@@ -721,6 +747,7 @@ static void attachment_ab_poll(uint64_t completed_frame) {
         getpid(),sequence,flags,(unsigned long long)completed_frame,(unsigned long long)dm_android_nvn_clock_ns());
 }
 static void attachment_ab_frame(uint64_t frame) {
+    chunk_control_poll();
     if(!getenv("DM_VK_AB_CONTROL")){attachment_ab_poll(frame);return;}
     const NvnAttachmentStats *a=&G.attachment_stats;
     fprintf(stderr,"[nvn-vulkan] ATTACHMENT_FRAME pid=%d frame=%llu sequence=%llu flags=%d mono_ns=%llu width=%u height=%u draws=%llu clear_loads=%llu inline_clears=%llu transfer_clears=%llu discard_stores=%llu logical_load_bytes=%llu logical_store_bytes=%llu\n",
@@ -1043,6 +1070,14 @@ static void sub_begin_ctx(VkSubmission *ctx) {
     }
     S.command=S.command_primary;S.chunk_index=0;S.chunk_mark=G.draws;G.seg_begin_ns=dm_android_nvn_clock_ns();
     S.phase=SUBMISSION_RECORDING;S.epoch=++G.recording_epoch;S.ticket=0;S.recorder=pthread_self();G.active=1;
+    if(!G.present_count&&!chunk_control_sequence)chunk_control_poll();
+    {int target=atomic_load(&chunk_override);S.chunk_draws=target<0?(uint32_t)G.chunk_draws:(uint32_t)target;
+        if(atomic_load(&chunk_applied)!=(int)S.chunk_draws||chunk_applied_sequence!=chunk_control_sequence){
+            fprintf(stderr,"[nvn-vulkan] CHUNK_MODE pid=%d sequence=%llu threshold=%u epoch=%llu mono_ns=%llu\n",getpid(),
+                (unsigned long long)chunk_control_sequence,S.chunk_draws,(unsigned long long)S.epoch,(unsigned long long)dm_android_nvn_clock_ns());
+            chunk_applied_sequence=chunk_control_sequence;
+        }
+        atomic_store(&chunk_applied,(int)S.chunk_draws);}
     S.nwrites=S.nevents=S.ntemporary=S.npipeline=S.npass=S.nread_snapshots=S.ndirect_reads=0;S.in_pass=0;
     S.pending_clear=0;S.flushing_clear=0;S.pass_discard=0;
     if(!G.present_count&&!attachment_ab_sequence)attachment_ab_poll(0);
@@ -1098,7 +1133,7 @@ static CommitInfo commit_submit(void) {
     wb_stage_record();
     VkMemoryBarrier barrier={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT,.dstAccessMask=VK_ACCESS_HOST_READ_BIT};
     vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,NULL,0,NULL);
-    if(G.chunk_draws&&S.chunk_index&&G.chunk_log)fprintf(stderr,"[nvn-vulkan] CHUNKED_SUBMIT chunks=%u\n",S.chunk_index+1);
+    if(S.chunk_draws&&S.chunk_index&&G.chunk_log)fprintf(stderr,"[nvn-vulkan] CHUNKED_SUBMIT chunks=%u threshold=%u\n",S.chunk_index+1,S.chunk_draws);
     chunk_ts_write(1);CHECK(vkEndCommandBuffer(S.command));VkFence fence=S.gpu_fence;VkSubmitInfo si={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&S.command};
     if(S.phase!=SUBMISSION_RECORDING)die("submit phase",S.phase);
     CHECK(vkQueueSubmit(G.queue,1,&si,fence));S.ticket=++G.fence;S.phase=SUBMISSION_INFLIGHT;
@@ -2344,7 +2379,7 @@ static void sub_chunk_flush(void) {
     /* Pass queries belong to the submission, not a command buffer. Fresh query
      * prefixes are reset before first use and all chunks retire at the final
      * fence; profiling therefore need not disable normal early submission. */
-    if(S.in_pass||S.active_occlusion!=UINT32_MAX||G.draws-S.chunk_mark<(uint64_t)G.chunk_draws||S.chunk_index+1>=48)return;
+    if(!S.chunk_draws||S.in_pass||S.active_occlusion!=UINT32_MAX||G.draws-S.chunk_mark<S.chunk_draws||S.chunk_index+1>=48)return;
     chunk_ts_write(1);CHECK(vkEndCommandBuffer(S.command));
     VkSubmitInfo si={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&S.command};
     CHECK(vkQueueSubmit(G.queue,1,&si,VK_NULL_HANDLE));
@@ -2356,7 +2391,7 @@ static void sub_chunk_flush(void) {
     S.command=S.chunk_cb[S.chunk_index];
     VkCommandBufferBeginInfo b={.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     CHECK(vkBeginCommandBuffer(S.command,&b));chunk_ts_write(0);
-    nvn_vk_command_state_reset(&S.command_state);S.command_dirty=1;S.chunk_mark=G.draws;G.profile_chunks++;
+    nvn_vk_command_state_reset(&S.command_state);S.command_dirty=1;S.chunk_mark=G.draws;G.profile_chunks++;chunk_total++;
 }
 static p_scissor attachment_scissor(void) {
     return (p_scissor){G.state.scissor.offset.x,G.state.scissor.offset.y,
@@ -2398,7 +2433,7 @@ static VkRenderPass render_begin(void) {
         return S.passes[S.active_pass];
     }
     pass_end();G.pass_side_effects=0;
-    if(G.chunk_draws)sub_chunk_flush();
+    if(S.chunk_draws)sub_chunk_flush();
     VkAttachmentDescription attachments[9];VkAttachmentReference color[8],depth;VkImageView views[9];VkClearValue clears[9]={0};uint32_t n=0,width=0,height=0;
     uint64_t clear_bpp=0,discard_bpp=0;
     S.pass_discard=0;

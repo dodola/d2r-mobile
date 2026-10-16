@@ -20,6 +20,7 @@ typedef struct {
     VkCommandBuffer command;
     VkCommandBuffer command_primary,chunk_cb[48];
     uint32_t chunk_alloc,chunk_index;
+    uint32_t chunk_draws; /* Latched at begin; immutable through final fence. */
     uint64_t chunk_mark;
     unsigned profile_segment; /* Captured at submit, before asynchronous completion. */
     VkDescriptorPool descriptors;

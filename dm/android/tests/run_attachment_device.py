@@ -36,6 +36,7 @@ def main():
     parser.add_argument('--command-state-checks', action='store_true', help='Compare all four command-state/PSO-last cache modes with GPU readback')
     parser.add_argument('--depth-copy-checks', action='store_true', help='Compare native/forced drawn depth+stencil copies with independent expected pixels and command caching off/on')
     parser.add_argument('--vertex-checks', action='store_true', help='Read back 79 vertex formats, four shader widths and four layouts with native/forced split and command caching off/on')
+    parser.add_argument('--chunk-checks', action='store_true', help='Compare live submission thresholds with GPU-produced vertex data and alternating attachments')
     args = parser.parse_args()
     if args.run_device and not args.serial:
         parser.error('--serial is required with --run-device')
@@ -45,6 +46,8 @@ def main():
         parser.error('Run depth-copy comparisons separately from other optional suites')
     if args.vertex_checks and (args.depth_copy_checks or args.command_state_checks or args.cache_roundtrip or args.sampler_checks):
         parser.error('Run vertex comparisons separately from other optional suites')
+    if args.chunk_checks and (args.vertex_checks or args.depth_copy_checks or args.command_state_checks or args.cache_roundtrip or args.sampler_checks):
+        parser.error('Run chunk comparisons separately from other optional suites')
     repo = Path(__file__).resolve().parents[3]
     out = args.output.resolve(); out.mkdir(parents=True, exist_ok=True)
     report = {'passed': False, 'device_executed': False, 'original_game_frame': False,
@@ -71,6 +74,16 @@ def main():
     anchor = 'p_TextureFinalize(&target);'
     assert source.count(anchor) == 1
     extra_cases = cases.read_text(encoding='utf-8')
+    if args.chunk_checks:
+        import chunk_device_assets
+        source = source.replace('void dm_vk_attachment_config(int);',
+            'void dm_vk_chunk_config(int);\nint dm_vk_chunk_applied(void);\nuint64_t dm_vk_chunk_count(void);\nvoid dm_vk_attachment_config(int);')
+        copied_cache = out / 'chunk-cache'
+        shutil.copytree(args.cache, copied_cache, dirs_exist_ok=True); args.cache = copied_cache
+        chunk_cases, report['chunk_shaders'] = chunk_device_assets.prepare(args.cache, out, ndk, run)
+        extra_cases += '\n' + chunk_cases
+        report['chunk_fixture_sha256'] = {p.name: sha(p) for p in
+            (Path(__file__).with_name('chunk_device_assets.py'), Path(__file__).with_name('chunk_device_cases.inc'))}
     if args.vertex_checks:
         import vertex_device_assets
         source = source.replace('#include "nvn_obj.h"', '#include "nvn_obj.h"\n#include <math.h>')
@@ -186,6 +199,8 @@ def main():
         run([*adb, 'shell', 'mkdir', remote + '/adapted'], 'mkdir-adapted.log')
         cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_VK_VERTEX_SPLIT=0', 'DM_COMMAND_STATE_CACHE=0',
                      'DM_VERTEX_SHADER_DIR=' + remote + '/adapted']
+    if args.chunk_checks:
+        cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=0']
     if args.cache_roundtrip:
         run([*adb, 'shell', 'mkdir', remote + '/pipeline'], 'mkdir-pipeline.log')
         cache_env = ['env', 'DM_VK_PIPELINE_CACHE_DIR=' + remote + '/pipeline']
@@ -206,6 +221,41 @@ def main():
         raise RuntimeError('Sampler GPU/fallback proof missing')
     report['sampler_checks'] = args.sampler_checks
     run([*adb, 'pull', remote + '/color.rgba', out / 'color.rgba'], 'pull-color.log')
+    if args.chunk_checks:
+        records = []
+        for mode in range(2):
+            text = output
+            if mode:
+                checked = run([*adb, 'shell', 'env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=1',
+                    'timeout', '90', remote + '/probe', remote + '/cache', remote + '/color.rgba', 'run'],
+                    'chunk-cached-device.log', 100)
+                text = (checked.stdout + checked.stderr).decode('utf-8', errors='replace')
+            phase_rows = [dict(re.findall(r'(\w+)=([^\s]+)', row)) for row in text.splitlines() if 'CHUNK_PHASE ' in row]
+            thresholds = [0, 16, 48, 256, 256, 48, 16, 0]
+            if (len(phase_rows) != 8 or 'CHUNK_DEVICE modes=8 draws=4800 compute=24 read_bytes=262144 same_process=1 passed=1' not in text
+                    or 'mismatches=0 same_process=1 passed=1' not in text):
+                raise RuntimeError('Chunk GPU readback proof missing')
+            for i, row in enumerate(phase_rows):
+                expected = dict(mode=str(i), threshold=str(thresholds[i]), draws='600', compute='3',
+                    chunks=str(599 // thresholds[i] if thresholds[i] else 0), gpu_vertex_writeback='1', passed='1')
+                if row != expected:
+                    raise RuntimeError('Chunk path/coverage mismatch: ' + repr(row))
+            tested_runtime = runtime if not mode else json.loads(checked.stdout.decode().strip().splitlines()[-1])
+            if not all(tested_runtime[k] for k in ('compute_passed', 'draw_passed', 'real_write_fault_hook_passed', 'compact_records_passed')):
+                raise RuntimeError('Chunk base fixture failed')
+            driver = re.search(r'\[nvn-vulkan\] driver id=(\d+)', text)
+            stats = [dict(re.findall(r'(\w+)=([^\s]+)', row)) for row in text.splitlines() if 'COMMAND_STATE_STATS ' in row]
+            if not driver or not stats or any(int(row['enabled']) != mode for row in stats) or bool(int(stats[-1]['skipped'])) != bool(mode):
+                raise RuntimeError('Chunk command cache path not exercised')
+            pixels_file = out / f'chunk-{mode}.bin'
+            run([*adb, 'pull', remote + '/color.rgba.chunks', pixels_file], f'chunk-{mode}-pull.log')
+            if pixels_file.stat().st_size != 262144:
+                raise RuntimeError('Chunk readback length mismatch')
+            records.append(dict(command_cache=bool(mode), driver_id=int(driver[1]), phases=phase_rows,
+                read_bytes=pixels_file.stat().st_size, sha256=sha(pixels_file)))
+        if len({r['sha256'] for r in records}) != 1 or len({r['driver_id'] for r in records}) != 1:
+            raise RuntimeError('Chunk command-cache modes changed GPU pixels or driver')
+        report['chunk_modes'] = records
     if args.vertex_checks:
         records = []
         for mode in range(4):
