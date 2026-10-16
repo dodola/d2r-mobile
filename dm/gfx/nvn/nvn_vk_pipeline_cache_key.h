@@ -16,7 +16,9 @@
 #include <vulkan/vulkan.h>
 #include "nvn_vk_profile.h"
 
-#define NVN_VK_PIPELINE_CACHE_KEY_VERSION 1u
+#define NVN_VK_PIPELINE_CACHE_KEY_VERSION 2u
+/* Bump when shader rewriting or pipeline interpretation changes incompatibly. */
+#define NVN_VK_PIPELINE_SHADER_ABI 1u
 
 typedef struct {
     uint32_t version;
@@ -30,11 +32,13 @@ typedef struct {
     uint32_t subgroup_size;
     uint32_t subgroup_stages;
     uint32_t subgroup_operations;
+    uint32_t enabled_features;
+    uint32_t shader_abi;
     uint8_t pipeline_cache_uuid[VK_UUID_SIZE];
 } NvnVkPipelineCacheKey;
 
 /* A disk-cache writer serializes this record beside the Vulkan blob. */
-_Static_assert(sizeof(NvnVkPipelineCacheKey) == 60,
+_Static_assert(sizeof(NvnVkPipelineCacheKey) == 68,
     "Vulkan pipeline cache identity layout changed");
 
 static inline NvnVkPipelineCacheKey nvn_vk_pipeline_cache_key_make(
@@ -44,6 +48,7 @@ static inline NvnVkPipelineCacheKey nvn_vk_pipeline_cache_key_make(
     NvnVkPipelineCacheKey key;
     memset(&key, 0, sizeof key);
     key.version = NVN_VK_PIPELINE_CACHE_KEY_VERSION;
+    key.shader_abi = NVN_VK_PIPELINE_SHADER_ABI;
     if (properties) {
         key.api_version = properties->apiVersion;
         key.vendor_id = properties->vendorID;

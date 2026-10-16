@@ -121,7 +121,7 @@ void dm_gfx_suspend(int on) {
     pthread_mutex_lock(&android_suspend_mu);android_suspended=on!=0;
     if(on)while(android_inflight)pthread_cond_wait(&android_suspend_cv,&android_suspend_mu);
     else pthread_cond_broadcast(&android_suspend_cv);
-    pthread_mutex_unlock(&android_suspend_mu);if(on){x_drain();dm_android_nvn_work_reset(0);mtl_drain();}
+    pthread_mutex_unlock(&android_suspend_mu);if(on){x_drain();dm_android_nvn_work_reset(0);mtl_drain();dm_vk_pipeline_cache_save();}
     pthread_mutex_unlock(&android_lifecycle_mu);
 }
 uint64_t dm_nvn_frame_count(void) {return atomic_load(&android_nvn_frame);}

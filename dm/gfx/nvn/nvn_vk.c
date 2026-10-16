@@ -96,6 +96,7 @@ static void hz_note(int kind);
 #include "nvn_vk_skin.h"
 #include "nvn_vk_profile.h"
 #include "nvn_vk_pipeline_cache_key.h"
+#include "nvn_vk_sampler_policy.h"
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *map; uint64_t size,allocation_size;VkBufferUsageFlags usage;int cached;uint64_t dirty; } VBuffer;
 enum { TEMP_OTHER,TEMP_DRIVER,TEMP_ALIGNED,TEMP_COMPARISON,TEMP_ROLES };
 typedef struct { const uint8_t *guest; uint64_t size,serial; VBuffer v; } VPool;
@@ -121,7 +122,7 @@ typedef struct { uint64_t serial,incarnation; tex_t source; VkImage image; VkDev
 static void tex_dirty(VTexture *t){t->version++;t->other_version++;}
 static void tex_attach_dirty(VTexture *t,unsigned level){t->version++;t->dirty_levels|=1u<<(level&31);}
 typedef struct { int live; tex_t texture; view_t view; uint8_t has_view; uint64_t revision;TextureRef resident; } TSlot;
-typedef struct { int live; samp_par source; VkSampler sampler; } SSlot;
+typedef struct { int live; samp_par source; VkSampler sampler,nearest,integer_nearest;VkSamplerCreateInfo info; } SSlot;
 typedef struct { volatile uint32_t *addr; uint32_t mode,value; } Event;
 typedef struct { uint32_t kind,query; uint64_t address; } CounterOp;
 typedef struct { Range range; VBuffer *buffer; int written; } AlignedBinding;
@@ -182,6 +183,8 @@ typedef struct {
 static struct {
     VkInstance instance; VkPhysicalDevice physical; VkDevice device; VkQueue queue; uint32_t family; VkSampler fetch_sampler;
     VkPhysicalDeviceMemoryProperties memory; VkPhysicalDeviceProperties properties;
+    VkPhysicalDeviceFeatures enabled_features;
+    VkFormatProperties format_properties[256];uint8_t format_known[256];
     VkPipelineCache pipeline_cache;
     VkSubmission submission_slot,submission_slot2;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
     VBuffer support,zero; VPool pools[LIMIT_POOLS]; int npool;
@@ -254,6 +257,15 @@ static struct {
     pthread_mutex_t lock;
     void *transfer_memory; size_t transfer_size; int graphics_live;
 } G={.lock=PTHREAD_MUTEX_INITIALIZER};
+#include "nvn_vk_pipeline_cache_runtime.inc"
+/* Immutable per-device capabilities. Binding the same format should not call
+ * into a vendor driver again on every draw. Extension formats remain queried. */
+static VkFormatProperties format_properties(VkFormat format) {
+    if((uint32_t)format<256&&G.format_known[format])return G.format_properties[format];
+    VkFormatProperties properties;vkGetPhysicalDeviceFormatProperties(G.physical,format,&properties);
+    if((uint32_t)format<256){G.format_properties[format]=properties;G.format_known[format]=1;}
+    return properties;
+}
 /* Recording helpers access the selected slot; completion receives its owner explicitly. */
 #define S (*G.current_submission)
 static void command_state_profile(const char *tag,uint64_t frame,uint64_t frames) {
@@ -399,6 +411,10 @@ static void backend_init(void) {
     if(!loader)die("Vulkan loader unavailable",0);
     dm_vk_get=(PFN_vkGetInstanceProcAddr)dlsym(loader,"vkGetInstanceProcAddr");if(!dm_vk_get)die("Vulkan proc address unavailable",0);
     dm_vkCreateInstance=(PFN_vkCreateInstance)dm_vk_get(NULL,"vkCreateInstance");if(!dm_vkCreateInstance)die("Vulkan create instance unavailable",0);
+    PFN_vkEnumerateInstanceVersion instance_version=(PFN_vkEnumerateInstanceVersion)dm_vk_get(NULL,"vkEnumerateInstanceVersion");
+    uint32_t loader_api=VK_API_VERSION_1_0;
+    if(instance_version)CHECK(instance_version(&loader_api));
+    if(loader_api<VK_API_VERSION_1_1)die("Vulkan 1.1 loader required",loader_api);
     VkApplicationInfo app={.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO,.pApplicationName="D2R Android",.apiVersion=VK_API_VERSION_1_1};
     int validation=getenv("DM_VULKAN_VALIDATION")!=NULL;
     const char *ie[]={VK_KHR_SURFACE_EXTENSION_NAME,VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
@@ -414,10 +430,28 @@ static void backend_init(void) {
     VkPhysicalDevice *physical=calloc(n,sizeof(*physical)); if(!physical) die("allocate physical list",n);
     CHECK(vkEnumeratePhysicalDevices(G.instance,&n,physical)); G.physical=physical[0]; free(physical);
     vkGetPhysicalDeviceProperties(G.physical,&G.properties); vkGetPhysicalDeviceMemoryProperties(G.physical,&G.memory);
+    if(G.properties.apiVersion<VK_API_VERSION_1_1)die("Vulkan 1.1 device required",G.properties.apiVersion);
+    PFN_vkEnumerateDeviceExtensionProperties enumerate_extensions=(PFN_vkEnumerateDeviceExtensionProperties)dm_vk_get(G.instance,"vkEnumerateDeviceExtensionProperties");
+    uint32_t extension_count=0;CHECK(enumerate_extensions(G.physical,NULL,&extension_count,NULL));
+    VkExtensionProperties *extension_properties=calloc(extension_count?extension_count:1,sizeof(*extension_properties));
+    if(!extension_properties)die("device extension allocation",extension_count);
+    CHECK(enumerate_extensions(G.physical,NULL,&extension_count,extension_properties));
+    int has_driver_properties=G.properties.apiVersion>=VK_API_VERSION_1_2;
+    int has_feedback=0,has_performance_query=0,has_swapchain=0;
+    for(uint32_t i=0;i<extension_count;i++){
+        const char *name=extension_properties[i].extensionName;
+        has_driver_properties|=!strcmp(name,VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
+        has_feedback|=!strcmp(name,VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
+        has_performance_query|=!strcmp(name,"VK_KHR_performance_query");
+        has_swapchain|=!strcmp(name,VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    }
+    free(extension_properties);
+    if(!has_swapchain)die("Vulkan swapchain extension required",0);
     for(uint32_t i=0;i<G.memory.memoryTypeCount;i++)fprintf(stderr,"[nvn-vulkan] MEMORY_TYPE %u flags=%#x heap=%u size=%llu\n",i,G.memory.memoryTypes[i].propertyFlags,G.memory.memoryTypes[i].heapIndex,(unsigned long long)G.memory.memoryHeaps[G.memory.memoryTypes[i].heapIndex].size);
     G.subgroup=(VkPhysicalDeviceSubgroupProperties){.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
     VkPhysicalDeviceDriverProperties driver_properties={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,.pNext=&G.subgroup};
-    VkPhysicalDeviceProperties2 properties2={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,.pNext=&driver_properties};
+    VkPhysicalDeviceProperties2 properties2={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext=has_driver_properties?(void *)&driver_properties:(void *)&G.subgroup};
     vkGetPhysicalDeviceProperties2(G.physical,&properties2);
     G.profile=nvn_vk_gpu_profile_make(&G.properties,&driver_properties,&G.subgroup);
     G.quirks=nvn_vk_quirk_registry_resolve(&G.profile);
@@ -442,14 +476,6 @@ static void backend_init(void) {
     float priority=1; VkDeviceQueueCreateInfo qi={.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
        .queueFamilyIndex=G.family,.queueCount=1,.pQueuePriorities=&priority};
     const char *de[]={VK_KHR_SWAPCHAIN_EXTENSION_NAME,VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME};
-    PFN_vkEnumerateDeviceExtensionProperties enumerate_extensions=(PFN_vkEnumerateDeviceExtensionProperties)dm_vk_get(G.instance,"vkEnumerateDeviceExtensionProperties");
-    uint32_t extension_count=0;CHECK(enumerate_extensions(G.physical,NULL,&extension_count,NULL));
-    VkExtensionProperties *extension_properties=calloc(extension_count,sizeof(*extension_properties));if(!extension_properties)die("device extension allocation",extension_count);
-    CHECK(enumerate_extensions(G.physical,NULL,&extension_count,extension_properties));int has_feedback=0,has_performance_query=0;
-    for(uint32_t i=0;i<extension_count;i++){
-        has_feedback|=!strcmp(extension_properties[i].extensionName,de[1]);
-        has_performance_query|=!strcmp(extension_properties[i].extensionName,"VK_KHR_performance_query");
-    }free(extension_properties);
     if(getenv("DM_VK_AB_CONTROL"))fprintf(stderr,"[nvn-vulkan] ATTACHMENT_AB_CAPS performance_query=%d timing=cpu_present_only bandwidth=not_measured\n",has_performance_query);
     VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT feedback={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT};
     VkPhysicalDeviceShaderDrawParametersFeatures draw_parameters={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES,.pNext=has_feedback?&feedback:NULL};
@@ -469,6 +495,15 @@ static void backend_init(void) {
     enabled.independentBlend=VK_TRUE;
     enabled.fragmentStoresAndAtomics=available.fragmentStoresAndAtomics;
     enabled.vertexPipelineStoresAndAtomics=available.vertexPipelineStoresAndAtomics;
+    enabled.shaderClipDistance=available.shaderClipDistance;
+    enabled.shaderCullDistance=available.shaderCullDistance;
+    G.enabled_features=enabled;
+    const VkBool32 cache_features[]={enabled.shaderStorageImageReadWithoutFormat,enabled.shaderStorageImageWriteWithoutFormat,
+        enabled.shaderImageGatherExtended,enabled.samplerAnisotropy,enabled.imageCubeArray,enabled.occlusionQueryPrecise,
+        enabled.independentBlend,enabled.fragmentStoresAndAtomics,enabled.vertexPipelineStoresAndAtomics,
+        enabled.shaderClipDistance,enabled.shaderCullDistance,draw_parameters.shaderDrawParameters,G.feedback_layout};
+    for(unsigned i=0;i<sizeof cache_features/sizeof cache_features[0];i++)
+        if(cache_features[i])G.pipeline_cache_key.enabled_features|=1u<<i;
     G.precise_occlusion=enabled.occlusionQueryPrecise;
     vkGetPhysicalDeviceQueueFamilyProperties(G.physical,&n,NULL);
     families=calloc(n,sizeof(*families));if(!families)die("timestamp queue properties",n);
@@ -478,13 +513,7 @@ static void backend_init(void) {
     fprintf(stderr,"[nvn-vulkan] shader_draw_parameters=%d\n",G.shader_draw_parameters);
     fprintf(stderr,"[nvn-vulkan] attachment_feedback_layout=%d independent_blend=%u fragment_stores=%u\n",G.feedback_layout,enabled.independentBlend,enabled.fragmentStoresAndAtomics);
     vkGetDeviceQueue(G.device,G.family,0,&G.queue);
-    /* The backend/device live for the process lifetime. Keep driver compilation
-     * results across submissions while preserving every pipeline's full state.
-     * An empty cache belongs only to this device; no cross-device data is loaded. */
-    if(!getenv("DM_DISABLE_PIPELINE_CACHE")){
-        VkPipelineCacheCreateInfo cache={.sType=VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-        CHECK(vkCreatePipelineCache(G.device,&cache,NULL,&G.pipeline_cache));
-    }
+    pipeline_cache_start();
     fprintf(stderr,"[nvn-vulkan] driver_pipeline_cache=%d\n",G.pipeline_cache!=VK_NULL_HANDLE);
     G.disable_pso_reuse=getenv("DM_DISABLE_PSO_REUSE")!=NULL;
     {const char *last=getenv("DM_PSO_LAST_CACHE");G.enable_pso_last=last&&atoi(last)!=0;G.last_pso_slot=UINT32_MAX;}
@@ -1159,7 +1188,7 @@ int mtl_wait(uint64_t fence,uint64_t timeout) {
     }
     return 1;
 }
-void mtl_finish(void) { mtl_init(); pthread_mutex_lock(&G.lock); async_drain_locked(); CHECK(cpu_work_queue_idle(G.queue)); pthread_mutex_unlock(&G.lock); }
+void mtl_finish(void) { mtl_init(); pthread_mutex_lock(&G.lock); async_drain_locked(); CHECK(cpu_work_queue_idle(G.queue)); pipeline_cache_checkpoint(0); pthread_mutex_unlock(&G.lock); }
 void mtl_drain(void) { mtl_finish(); }
 
 static VkFormat format(int nvn) {
@@ -1341,7 +1370,7 @@ static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) 
           case 115:t->format=VK_FORMAT_R16G16B16A16_SFLOAT;break;default:die("BC decoded format",metal_format); }
         t->bpp=decompressed_bpp;
     } else { t->format=format(source->d.format); t->bpp=source->L.bpb; }
-    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(G.physical,t->format,&fp);
+    VkFormatProperties fp=format_properties(t->format);
     VkImageUsageFlags usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
     if(aspect(t->format)&VK_IMAGE_ASPECT_DEPTH_BIT) usage|=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     else if(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -1423,7 +1452,10 @@ static VkSamplerAddressMode wrap(unsigned w) { switch(w) {
     case NVN_WRAP_MODE_CLAMP_TO_BORDER:return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;default:die("sampler wrap mode",w); } }
 void mtl_reg_samp(int id,const samp_par *p) {
     mtl_init();pthread_mutex_lock(&G.lock); if(id<0 || id>=LIMIT_OBJECTS || !p)die("sampler descriptor id",id); SSlot *s=&G.sslot[id];
-    async_drain_locked();if(s->live) { if(G.active)die("sampler re-register in flight",id); vkDestroySampler(G.device,s->sampler,NULL); }
+    async_drain_locked();if(s->live) { if(G.active)die("sampler re-register in flight",id); vkDestroySampler(G.device,s->sampler,NULL);
+        if(s->nearest)vkDestroySampler(G.device,s->nearest,NULL);
+        if(s->integer_nearest)vkDestroySampler(G.device,s->integer_nearest,NULL);
+        s->nearest=s->integer_nearest=VK_NULL_HANDLE; }
     s->source=*p;
     VkSamplerCreateInfo i={.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
        .magFilter=p->magf==NVN_MAG_FILTER_NEAREST?VK_FILTER_NEAREST:VK_FILTER_LINEAR,
@@ -1442,7 +1474,17 @@ void mtl_reg_samp(int id,const samp_par *p) {
             p->border[0],p->border[1],p->border[2],p->border[3],p->ws,p->wt,p->wr);
         die("custom sampler border color",id);
     }
+    nvn_vk_sampler_limits(&i,&G.enabled_features,&G.properties.limits);
+    s->info=i;
     CHECK(vkCreateSampler(G.device,&i,NULL,&s->sampler)); s->live=1;G.registry_revision++;pthread_mutex_unlock(&G.lock);
+}
+static VkSampler sampler_for_format(SSlot *slot,VkFormat format) {
+    VkSamplerCreateInfo info=slot->info;VkFormatProperties properties=format_properties(format);
+    if(!nvn_vk_sampler_filter(&info,format,properties.optimalTilingFeatures))return slot->sampler;
+    VkSampler *variant=nvn_vk_format_integer(format)?&slot->integer_nearest:&slot->nearest;
+    if(!*variant){CHECK(vkCreateSampler(G.device,&info,NULL,variant));
+        fprintf(stderr,"[nvn-vulkan] SAMPLER_FALLBACK format=%u integer=%d\n",format,nvn_vk_format_integer(format));}
+    return *variant;
 }
 void mtl_set_tex_pool_n(int n) {
     mtl_init();pthread_mutex_lock(&G.lock);
@@ -2007,7 +2049,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
            TSlot *slot=&G.tslot[tid];tex_t *t=&slot->texture;
            if(t->d.target!=NVN_TEXTURE_TARGET_BUFFER||t->d.levels!=1||(slot->has_view&&(slot->view.set_layers||slot->view.set_levels)))die("texel buffer target/view",tid);
            int nvn=slot->has_view&&slot->view.set_format?slot->view.format:t->d.format;
-           VkFormat f=format(nvn);VkFormatProperties properties;vkGetPhysicalDeviceFormatProperties(G.physical,f,&properties);
+           VkFormat f=format(nvn);VkFormatProperties properties=format_properties(f);
            VkFormatFeatureFlags required=b->type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER?VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT:VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
            if(!(properties.bufferFeatures&required))die("texel buffer format feature",nvn);
            uint64_t offset=0;VPool *p=pool_read((uint64_t)(uintptr_t)t->mem,t->L.size,&offset);VkBuffer buffer=p->v.b;
@@ -2133,7 +2175,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
                    if(!(s->fetch_bindings&(1ull<<i)) || sid){fprintf(stderr,"[nvn-vulkan] unbound sampler shader=%s stage=%u slot=%d sampler=%d handle=%#llx separate=%#llx fetch_bindings=%#llx\n",s->key,s->h.stage,b->slot,b->sampler,(unsigned long long)handle,(unsigned long long)(b->sampler>=0?G.state.samp[s->h.stage][b->sampler]:0),(unsigned long long)s->fetch_bindings);die("unbound sampler descriptor",sid);}
                    if(!G.fetch_sampler){VkSamplerCreateInfo ci={.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,.magFilter=VK_FILTER_NEAREST,.minFilter=VK_FILTER_NEAREST,.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST,.addressModeU=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeV=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.maxLod=VK_LOD_CLAMP_NONE};CHECK(vkCreateSampler(G.device,&ci,NULL,&G.fetch_sampler));}
                    ii[i].sampler=G.fetch_sampler;
-               }else {ii[i].sampler=G.sslot[sid].sampler;
+               }else {ii[i].sampler=sampler_for_format(&G.sslot[sid],selected_format);
                    if(G.trace_frame&&s->h.stage==1&&!strcmp(s->key,"5c1ca4e7c3e4657c")){
                        samp_par *p=&G.sslot[sid].source;
                        fprintf(stderr,"[nvn-vulkan] TEXTURE_SAMPLER draw=%llu binding=%u slot=%d serial=%llu sampler=%u minf=%u magf=%u lod=%g,%g bias=%g compare=%u,%u view_levels=%d,%d set_levels=%u\n",(unsigned long long)G.draws,b->binding,b->slot,(unsigned long long)t->serial,sid,p->minf,p->magf,p->lod_min,p->lod_max,p->lod_bias,p->cmp_mode,p->cmp_func,slot->view.base_level,slot->view.nlevels,slot->has_view&&slot->view.set_levels);
@@ -2544,7 +2586,7 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     if(cached)pso=*cached;
     else{
         uint64_t pipeline_start=dm_android_nvn_clock_ns();CHECK(vkCreatePipelineLayout(G.device,&li,NULL,&pso.layout));gp.layout=pso.layout;
-        CHECK(vkCreateGraphicsPipelines(G.device,G.pipeline_cache,1,&gp,NULL,&pso.pipeline));G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-pipeline_start;
+        CHECK(vkCreateGraphicsPipelines(G.device,G.pipeline_cache,1,&gp,NULL,&pso.pipeline));PC.revision++;G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-pipeline_start;
         pso=pso_remember(&key,hash,pso);
     }
     int cache_commands=G.enable_command_cache&&!G.trace_frame;
@@ -2599,7 +2641,7 @@ static void dispatch(const p_dispatch *p) {
     if(cached)pso=*cached;
     else{
         uint64_t pipeline_start=dm_android_nvn_clock_ns();CHECK(vkCreatePipelineLayout(G.device,&li,NULL,&pso.layout));ci.layout=pso.layout;
-        CHECK(vkCreateComputePipelines(G.device,G.pipeline_cache,1,&ci,NULL,&pso.pipeline));G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-pipeline_start;
+        CHECK(vkCreateComputePipelines(G.device,G.pipeline_cache,1,&ci,NULL,&pso.pipeline));PC.revision++;G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-pipeline_start;
         pso=pso_remember(&key,hash,pso);
     }
     int cache_commands=G.enable_command_cache&&!G.trace_frame;
@@ -2812,7 +2854,7 @@ static void copy_t2t(const p_copy_t2t *p) {
         VkImageCopy c={.srcSubresource=sl,.srcOffset=so,.dstSubresource=dl,.dstOffset=doff,.extent={p->sr.width,p->sr.height,sv?p->sr.depth:1}};
         vkCmdCopyImage(S.command,s->image,s->layout,d->image,d->layout,1,&c);
     }else {
-        VkFormatProperties fp;vkGetPhysicalDeviceFormatProperties(G.physical,s->format,&fp);
+        VkFormatProperties fp=format_properties(s->format);
         if(aspect(s->format)!=VK_IMAGE_ASPECT_COLOR_BIT || !(p->flags&NVN_COPY_FLAGS_ENGINE_2D_BIT) || (!sv&&p->sr.depth!=p->dr.depth) ||
            !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT)||!(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT))die("texture scaled copy feature/flags",p->flags);
         VkFilter filter=p->flags&NVN_COPY_FLAGS_LINEAR_FILTER_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST;
@@ -3113,8 +3155,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     if(x<0||y<0||w<=0||h<=0||(uint64_t)x+w>t->width||(uint64_t)y+h>t->height)die("present crop bounds",w);
     VkImageBlit blit={.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.srcOffsets={{x,y,0},{x+w,y+h,1}},
       .dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.dstOffsets={{0,0,0},{(int)G.swap_extent.width,(int)G.swap_extent.height,1}}};
-    VkFormatProperties src_format,dst_format;vkGetPhysicalDeviceFormatProperties(G.physical,t->format,&src_format);
-    vkGetPhysicalDeviceFormatProperties(G.physical,G.swap_format,&dst_format);
+    VkFormatProperties src_format=format_properties(t->format),dst_format=format_properties(G.swap_format);
     if(!(src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT)||!(dst_format.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT))die("present blit formats",t->format);
     vkCmdBlitImage(S.command,t->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,G.swap_images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,
        src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST);
@@ -3232,6 +3273,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
                 memcpy(G.trace_shader,key,16);G.trace_shader[16]=0;
             }
             fprintf(stderr,"[nvn-vulkan] TRACE_NEXT_FRAME frame=%llu\n",(unsigned long long)G.present_count+2);}}
+    pipeline_cache_checkpoint(0);
     attachment_ab_frame(G.present_count+1);
     if(async_present){G.active=0;async_enqueue_locked(&S,1);uint64_t pticket=++G.present_count;pthread_mutex_unlock(&G.lock);return pticket;}
     if(S.nwrites || S.nevents || S.ncounter)die("present has unpublished guest effects",S.epoch);

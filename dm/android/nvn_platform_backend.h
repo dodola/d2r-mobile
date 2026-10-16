@@ -7,3 +7,5 @@ void *dm_vk_native_window(void);
 void dm_vk_graphics_begin(void *transfer_memory, size_t size);
 void dm_vk_graphics_end(void);
 int dm_vk_graphics_live(void);
+/* Snapshot under the backend lock; filesystem persistence runs in a worker. */
+void dm_vk_pipeline_cache_save(void);

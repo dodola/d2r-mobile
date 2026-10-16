@@ -37,6 +37,7 @@ static pthread_t replay_thread,hint_thread;
 static unsigned begins,execs,presents,hint_begins,hint_ends;
 static _Atomic uint64_t backend_fence,completed,wait_budget;
 static _Atomic int paused,drains;
+static _Atomic unsigned cache_saves;
 static _Atomic uint64_t notified_frame;
 static _Atomic unsigned idle_begins,idle_ends;
 static int expected_crop[4];
@@ -75,6 +76,11 @@ int mtl_wait(uint64_t fence,uint64_t timeout) {
 }
 void mtl_finish(void) {atomic_store(&completed,atomic_load(&backend_fence));atomic_fetch_add(&drains,1);}
 void mtl_drain(void) {mtl_finish();}
+void dm_vk_pipeline_cache_save(void) {
+    assert(atomic_load(&paused));
+    assert(atomic_load(&completed)==atomic_load(&backend_fence));
+    atomic_fetch_add(&cache_saves,1);
+}
 uint64_t mtl_present(const tex_t *t,double period,const int crop[4]) {
     (void)period;stall();assert(t->serial==42);assert(!memcmp(crop,expected_crop,sizeof expected_crop));
     atomic_fetch_add(&backend_fence,3);return ++presents;
@@ -174,9 +180,11 @@ int main(int argc,char **argv) {
     assert(!pthread_create(&producer,NULL,submit,NULL));await_start();
     pthread_t lifecycle;assert(!pthread_create(&lifecycle,NULL,suspend_gfx,NULL));delay(5000000);assert(!atomic_load(&paused));
     release();assert(!pthread_join(producer,NULL));assert(!pthread_join(lifecycle,NULL));assert(atomic_load(&paused));
+    assert(atomic_load(&cache_saves)==1);
     uint64_t tail=dm_nvn_translation_tail(&android_xqueue);
     assert(!pthread_create(&producer,NULL,submit,NULL));delay(5000000);assert(dm_nvn_translation_tail(&android_xqueue)==tail);
     dm_gfx_suspend(0);assert(!pthread_join(producer,NULL));x_drain();assert(!atomic_load(&paused));
+    assert(atomic_load(&cache_saves)==1);
     dm_nvn_translation_destroy(&android_xqueue);
     assert(atomic_load(&idle_begins)==atomic_load(&idle_ends));
     assert(synchronous || atomic_load(&idle_begins)>0);
