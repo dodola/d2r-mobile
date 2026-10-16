@@ -151,6 +151,19 @@ pack; an incomplete import requires selecting the pack again. No network or
 storage permission is requested. Installation success is independent of game
 playability or compatibility on other GPUs.
 
+The prepared launcher stays open with a native “启动游戏” button so users can
+recover from a driver failure on their next launch. First-time import still
+starts the game automatically after verification. A native vertical RadioGroup
+exposes “自动推荐（推荐）”, “系统驱动” and “内置兼容驱动（Turnip）” without a popup.
+InstallerActivity owns those native radio controls and its existing ScrollView;
+GraphicsDriverSettings owns the saved choice and applies it before Vulkan starts.
+GraphicsDriverPolicy owns hardware recommendations. Native 48dp radio targets
+reuse parchment TEXT and opaque RIM, Android focus/checked semantics and the
+existing system CJK font. A stable three-line description names the recommendation
+or recovery action. Selection is saved immediately; startup consumes the saved
+choice. The source of this behavior is the user's request for driver selection
+at the entry point; no extra confirmation or network permission is involved.
+
 The launcher icon is a separate original raster emblem: obsidian iron, antique
 bronze and molten red identify the dark-fantasy game at small sizes. The preserved
 master and generation prompt live in `dm/android/artwork/`; the icon packer owns

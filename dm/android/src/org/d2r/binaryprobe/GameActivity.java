@@ -104,7 +104,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         status.setPadding(dp(28),dp(18),dp(28),dp(18));status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         status.setText("正在准备游戏文件");root.addView(status,new FrameLayout.LayoutParams(-1,-1));setContentView(root);
         new Thread(() -> {
-            try { prepareModules();ui.post(() -> {prepared=true;configureAndStart();}); }
+            try { prepareModules();GraphicsDriverSettings.configure(this);ui.post(() -> {prepared=true;configureAndStart();}); }
             catch(Exception e){ui.post(() -> fail("游戏文件准备失败",e));}
         },"game-files").start();
     }

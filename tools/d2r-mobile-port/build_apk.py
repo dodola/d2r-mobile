@@ -45,6 +45,10 @@ def main(use_render_resolution=False,offline_manifest=None,output=None,package='
         driver_selection=json.loads((ART/'android-build-config.json').read_text(encoding='utf-8'))['private_driver']
         driver=(ROOT/driver_selection['path']).resolve()
         if not driver.is_relative_to(ROOT) or sha(driver)!=driver_selection['sha256']: raise RuntimeError('Selected private driver provenance mismatch')
+    # GraphicsDriverPolicy's SM7325 recommendation was verified with this
+    # exact driver. Do not silently apply that recommendation to a new binary.
+    tested_turnip='c2dc3ff00a1016bfc96e1513a7b0e21b92ea79d33fc8076b34e5fa70b0af8e9e'
+    if sha(driver)!=tested_turnip: raise RuntimeError('Automatic SM7325 policy requires the verified bundled Turnip build')
     native=ROOT/'build/d2r-mobile-android/libd2r_mobile_android.so'
     if sha(native)!=manifest['outputs'][native.name]['sha256']: raise RuntimeError('Native build provenance mismatch')
     build=ROOT/'build'/('d2r-mobile-apk-'+uuid.uuid4().hex[:12])
@@ -125,6 +129,8 @@ def main(use_render_resolution=False,offline_manifest=None,output=None,package='
         'native_sha256':sha(native),'package':package,'requested_permissions':[],
         'private_driver_libraries':{p.name:sha(p) for p in private_libraries},
         'private_turnip_sha256':sha(driver),'private_driver_selection':driver_selection,
+        'runtime_driver_policy':{'default':'auto','choices':['auto','system','turnip'],
+            'auto_turnip_soc':['SM7325'],'auto_turnip_min_api':31,'tested_turnip_sha256':tested_turnip},
         'module_assets':files,'java_sources':{str(p.relative_to(REPO)):sha(p) for p in sources},
         'manifest_sha256':sha(REPO/'dm/android/AndroidManifest.xml'),
         'launcher_resources':{str(p.relative_to(REPO)):sha(p) for p in sorted((REPO/'dm/android/res').rglob('*')) if p.is_file()},

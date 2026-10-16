@@ -54,8 +54,26 @@ import with `-Xmx64m`, actual system document selection, and first-launch eviden
 These checks establish installation behavior, not compatibility with every GPU
 or complete-game playability. Source/build provenance is recorded beside the APK.
 
-The optional `make_install_guide.py` creates the seven-page illustrated Chinese
-PDF using the retained real QA screenshots in `build/offline-installer-tests`.
+Version 0.4 automatically selects the APK's bundled Turnip driver before native
+Vulkan initialization on Android 12+ with `Build.SOC_MODEL == SM7325`. On the
+tested TNA-AN00 / Adreno 642L / Android 14, the stock Qualcomm driver returned
+`-13` from `vkCreateComputePipelines` and aborted before the first frame. The
+bundled Mesa 26.2.3 driver passed that startup and rendered the game. Other SoCs
+retain their existing driver behavior. The existing native loader and native
+binary are reused; automatic selection needs no persistent diagnostic marker.
+The prepared launcher now stays open to offer three remembered driver choices:
+automatic recommendation, system driver, and bundled Turnip. The user taps
+Start game after choosing; first-time resource import still launches on success.
+Explicit choices supersede old private-driver diagnostic markers. The choice
+is applied before the native renderer initializes and can be changed after a
+crash by reopening the launcher.
+This APK update retains the package ID, signing key, resources and saves, and
+uses the same offline resource pack. Host policy checks cover the API guard and
+ensure that unknown SoCs do not opt in.
+
+The optional `make_install_guide.py` creates the eight-page illustrated Chinese
+PDF using the retained real QA screenshots in `build/offline-installer-tests`
+and the TNA-AN00 driver-entry screenshot in `analysis/d2r-mobile-port`.
 It needs ReportLab, Pillow, pypdf and the Windows Microsoft YaHei fonts. The PDF
 is written under `output/pdf` and copied into the offline release directory.
 System installation and file-navigation diagrams are labelled as illustrations.

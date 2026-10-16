@@ -37,8 +37,10 @@ def main():
     core = REPO / 'dm/android/src/org/d2r/binaryprobe/OfflinePackageInstaller.java'
     tests = REPO / 'dm/android/tests'
     run(JAVA/'bin/javac.exe', '--release', '8', '-encoding', 'UTF-8', '-d', BUILD, core,
-        tests/'OfflinePackageInstallerTest.java', tests/'OfflinePackageFullTest.java')
+        tests/'OfflinePackageInstallerTest.java', tests/'OfflinePackageFullTest.java',
+        core.with_name('GraphicsDriverPolicy.java'), tests/'GraphicsDriverPolicyTest.java')
     report = {'host': run(JAVA/'bin/java.exe', '-Xmx64m', '-cp', BUILD, 'org.d2r.binaryprobe.OfflinePackageInstallerTest').strip()}
+    report['graphics_driver'] = run(JAVA/'bin/java.exe', '-cp', BUILD, 'org.d2r.binaryprobe.GraphicsDriverPolicyTest').strip()
     if args.full:
         manifest = RELEASE/'offline-manifest.json'
         tsv = BUILD/'manifest-files.tsv'

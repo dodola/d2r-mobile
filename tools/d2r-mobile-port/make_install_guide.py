@@ -39,7 +39,7 @@ DARK=colors.HexColor('#0d0d0f')
 PARCHMENT=colors.HexColor('#e9d9ba')
 GOLD=colors.HexColor('#b59a69')
 WHITE=colors.white
-TOTAL=7
+TOTAL=8
 PAGE=0
 BOXES=[]
 
@@ -61,6 +61,7 @@ def main():
     locate()
     importing()
     finished()
+    driver_selection()
     problems()
     C.save()
     assert PAGE==TOTAL
@@ -205,7 +206,7 @@ def choose():
     p('点击红框中的“选择离线资源包”。',M,604,CW,16,leading=24,bold=True)
     p('接下来会打开手机系统的文件选择器。在里面找到已经下载好的 .d2rpack 文件。下一页给出查找路径。',M,640,CW,12,leading=19,maxh=58)
     note('还显示“正在检查游戏文件”？',
-         '等检查完成、按钮可用后再点。已经正确安装过资源的用户，通常会直接启动游戏，不需要重复导入。',M,716,CW,84)
+         '等检查完成、按钮可用后再点。已安装过资源的用户会看到启动入口，选择驱动后点击“启动游戏”，不需要重复导入。',M,716,CW,84)
     end_page()
 
 
@@ -259,7 +260,7 @@ def finished():
     new_page('finish','05  自动进入游戏','看到原游戏主菜单，说明本次安装和资源准备流程已经完成。')
     top=182;height=image(SHOTS/'automatic-game-start.png',M,top,CW,crop=(0,80,2560,1520))
     p('实机截图：完整导入后，自动进入原游戏主菜单。',M,top+height+12,CW,9.2,color=MUTED)
-    rows=[('以后直接点桌面图标','正常情况下，不再弹出资源包选择页。'),
+    rows=[('以后从入口启动游戏','打开桌面图标，选择驱动并点击“启动游戏”。无需重复导入资源。'),
           ('资源包可以删除','确认安装成功后，可以删除下载目录中的 .d2rpack，释放约 9.18 GB。'),
           ('更新请覆盖安装','保留应用本身再安装新版 APK；卸载应用会删除游戏数据和存档。')]
     for i,(title,body) in enumerate(rows):
@@ -267,6 +268,24 @@ def finished():
         p(title,M+36,top,CW-36,13.4,bold=True)
         p(body,M+36,top+30,CW-36,11.6,leading=18,maxh=41)
         if i<2:line(M,top+70,W-M,top+70)
+    end_page()
+
+
+def driver_selection():
+    new_page('driver','06  选择图形驱动','启动失败时可从入口更换，默认保留“自动推荐”。')
+    shot=ROOT/'analysis/d2r-mobile-port/TNA_AN00/startup-driver-fix/cold-1-entry.png'
+    height=image(shot,M,180,200)
+    p('实机截图：TNA-AN00 启动入口。',M,180+height+12,210,9,color=MUTED)
+    x=M+228;width=CW-228
+    rows=[('自动推荐（推荐）','按已验证的机型选择驱动。本次设备会使用内置兼容驱动。'),
+          ('系统驱动','使用手机自带的驱动。若出现闪退或黑屏，重新打开入口切回自动推荐。'),
+          ('内置兼容驱动（Turnip）','手动使用安装包内的驱动，适用于部分骁龙设备。其他设备建议使用自动推荐。')]
+    for i,(title,body) in enumerate(rows):
+        top=196+i*139
+        p(title,x,top,width,13,bold=True,leading=20,maxh=44)
+        p(body,x,top+49,width,11.5,leading=19,maxh=78)
+    note('选择会自动记住',
+         '选择驱动后点击“启动游戏”。更换驱动在重新启动游戏时生效；首次导入完成后仍会自动启动，无需重新选择资源包。',M,694,CW,104)
     end_page()
 
 
@@ -279,7 +298,7 @@ def problems():
           ('资源包版本不匹配','重新取得同一份发布资料中的 APK 与资源包，成套使用。'),
           ('文件不完整/校验失败','重新下载完整资源包。保留 .d2rpack 扩展名，无需解压。'),
           ('取消/切到后台后停止','重新打开应用，再选原资源包。已校验完成的文件会复用。'),
-          ('导入后游戏启动失败','记录提示并保留错误截图。这与资源包导入失败不同，需要检查具体机型兼容性。')]
+          ('导入后游戏启动失败','重新打开入口，切回自动推荐或尝试其他驱动。仍失败时保留机型和错误截图。')]
     for i,(title,body) in enumerate(rows):
         top=355+i*60
         if i%2==0:box(M,top,CW,60,WHITE)

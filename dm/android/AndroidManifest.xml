@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.d2r.binaryprobe"
-    android:versionCode="3" android:versionName="0.3-offline-installer">
+    android:versionCode="4" android:versionName="0.4-offline-installer">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
     <application android:label="D2R Mobile" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
         android:debuggable="true" android:allowBackup="false"
