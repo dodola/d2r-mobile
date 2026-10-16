@@ -108,3 +108,52 @@ and owns its create action. The game surface remains behind the modal.
 Keep engine paths, shader numbers and compatibility terminology in diagnostics.
 Never claim game completion from a frame counter: real 3D scene evidence is a
 separate device verification gate. Preserve original game resources and saves.
+
+## Offline installation
+
+`InstallerActivity` owns the launcher and the one-time resource preparation flow.
+The Chinese-language audience is a phone/tablet user with a downloaded APK and
+one matching `.d2rpack`, with no desktop tools or file-management knowledge.
+Native Android Buttons and ACTION_OPEN_DOCUMENT own keyboard, touch, file-picker
+geometry and accessibility; no browser controls or broad storage permission are
+introduced. The existing GameActivity preparation overlay is the sibling flow.
+
+The visual signature is the real three-stage sequence: choose resources, import
+and verify, start the game. The quiet single-column screen reuses the existing
+parchment/ink palette and system CJK font, with a 28sp bold heading, 17sp body,
+14sp help/utility text, 24dp outer spacing, 640dp maximum content width, and 52dp
+minimum native button height. It scrolls on short/narrow screens, respects system
+insets and font scaling, and reserves status, progress and action geometry across
+idle, progress, error and retry. No new artwork or palette is needed.
+
+Runtime tokens remain canonical (ownership model B): TouchControlsView.TEXT maps
+to body/button text; RIM maps to progress and disabled text; opaque RIM maps to
+the small brand label; opaque INK maps to button backgrounds; PRESSED maps to
+pressed and focused button states. The existing #0d0d0f shell background is
+reused. Native buttons retain focus/ripple feedback and disabled semantics;
+status changes use the existing polite accessibility-live-region pattern.
+
+`OfflineInstallSession` owns one process-wide worker and no Activity reference.
+It serializes file preparation, cancels import when leaving the foreground,
+ignores duplicate selections, and only opens GameActivity after verified commit.
+Byte progress is determinate during copy/hash, unknown checks are indeterminate,
+and commit is named separately. Cancellation, format/version errors, truncated
+or corrupt content, and insufficient space each retain a visible recovery path.
+The screen promises reuse of completed verified files, not byte-level resume of
+an interrupted file. Initial installation asks for one system document selection;
+normal subsequent launches use the private receipt plus file size/mtime checks.
+Changed or legacy resources receive a full hash check before adoption.
+
+`OfflinePackageInstaller` owns pinned manifests, bounded streaming, disk planning,
+staging, full-content SHA-256 checks and restart recovery. Game saves are outside
+its path allowlist. A matching pending commit can complete without the source
+pack; an incomplete import requires selecting the pack again. No network or
+storage permission is requested. Installation success is independent of game
+playability or compatibility on other GPUs.
+
+The launcher icon is a separate original raster emblem: obsidian iron, antique
+bronze and molten red identify the dark-fantasy game at small sizes. The preserved
+master and generation prompt live in `dm/android/artwork/`; the icon packer owns
+resampling. Adaptive art stays inside the central 60% safe region and uses the
+existing shell background; five legacy density assets keep older launchers
+readable. This branding does not change the original in-game visual identity.
