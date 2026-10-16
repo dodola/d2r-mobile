@@ -208,6 +208,11 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-storage-bias");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_STORAGE_BIAS","1",1);
     unsetenv("DM_DIAG_IMG_USAGE");
+    unsetenv("DM_VK_IMAGE_USAGE_FLAGS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/declared-image-usage");
+    if(access(driver_option,F_OK)==0)setenv("DM_VK_IMAGE_USAGE_FLAGS","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/conservative-image-usage");
+    if(access(driver_option,F_OK)==0)setenv("DM_VK_IMAGE_USAGE_FLAGS","0",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-img-usage-1");
     if(access(driver_option,F_OK)==0)setenv("DM_DIAG_IMG_USAGE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-img-usage-2");

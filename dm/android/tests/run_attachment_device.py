@@ -38,9 +38,12 @@ def main():
     parser.add_argument('--vertex-checks', action='store_true', help='Read back 79 vertex formats, four shader widths and four layouts with native/forced split and command caching off/on')
     parser.add_argument('--index-checks', action='store_true', help='Compare CPU/GPU-authored 16/32-bit indices, high raw indices and negative base vertices across chunk thresholds')
     parser.add_argument('--resource-checks', action='store_true', help='Verify cross-submit view/framebuffer reuse, texture reincarnation and bounded retention with GPU pixels')
+    parser.add_argument('--image-usage-checks', action='store_true', help='Compare image usage policies and late storage promotion across mip/layer GPU contents')
     parser.add_argument('--chunk-checks', action='store_true', help='Compare live submission thresholds with GPU-produced vertex data and alternating attachments')
     parser.add_argument('--pass-stats-checks', action='store_true', help='With --chunk-checks, compare disabled/enabled pipeline statistics, query overflow and both reset paths')
     args = parser.parse_args()
+    if args.image_usage_checks and any((args.resource_checks,args.index_checks,args.chunk_checks,args.vertex_checks,args.depth_copy_checks,args.command_state_checks,args.cache_roundtrip,args.sampler_checks)):
+        parser.error('Run image usage checks separately from other optional suites')
     if args.resource_checks and any((args.index_checks,args.chunk_checks,args.vertex_checks,args.depth_copy_checks,args.command_state_checks,args.cache_roundtrip,args.sampler_checks)):
         parser.error('Run resource-retention checks separately from other optional suites')
     if args.run_device and not args.serial:
@@ -83,6 +86,13 @@ def main():
     anchor = 'p_TextureFinalize(&target);'
     assert source.count(anchor) == 1
     extra_cases = cases.read_text(encoding='utf-8')
+    if args.image_usage_checks:
+        import image_usage_device_assets
+        source=source.replace('void dm_vk_attachment_config(int);','void dm_vk_image_usage_stats(uint64_t [5]);\nvoid dm_vk_attachment_config(int);')
+        copied_cache=out/'image-cache';shutil.copytree(args.cache,copied_cache,dirs_exist_ok=True);args.cache=copied_cache
+        image_cases,report['image_shaders']=image_usage_device_assets.prepare(args.cache,out,ndk,run)
+        extra_cases+='\n'+image_cases
+        report['image_fixture_sha256']={p.name:sha(p) for p in (Path(__file__).with_name('image_usage_device_assets.py'),Path(__file__).with_name('image_usage_device_cases.inc'))}
     if args.resource_checks:
         source = source.replace('void dm_vk_attachment_config(int);',
             'void dm_vk_resource_config(int);\nint dm_vk_resource_applied(void);\nvoid dm_vk_resource_stats(uint64_t [8]);\nvoid dm_vk_attachment_config(int);')
@@ -193,6 +203,8 @@ def main():
         flags += ['-DDM_VK_COPY_TEST']
     if args.index_checks:
         flags += ['-DDM_VK_INDEX_TEST']
+    if args.image_usage_checks:
+        flags += ['-DDM_VK_IMAGE_USAGE_TEST']
     for include in ('gfx/nvn/include', 'gfx/nvn', 'android', 'host'):
         flags += ['-I', dm / include]
     flags += sources + objects + ['-lvulkan', '-landroid', '-llog', '-ldl', '-lz', '-lm', '-laaudio',
@@ -228,6 +240,8 @@ def main():
                      'DM_VERTEX_SHADER_DIR=' + remote + '/adapted']
     if args.chunk_checks or args.index_checks or args.resource_checks:
         cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=0']
+    if args.image_usage_checks:
+        cache_env=['env','DM_RESOURCE_STATS=1','DM_COMMAND_STATE_CACHE=0','DM_VK_IMAGE_USAGE_FLAGS=0']
     if args.cache_roundtrip:
         run([*adb, 'shell', 'mkdir', remote + '/pipeline'], 'mkdir-pipeline.log')
         cache_env = ['env', 'DM_VK_PIPELINE_CACHE_DIR=' + remote + '/pipeline']
@@ -248,6 +262,27 @@ def main():
         raise RuntimeError('Sampler GPU/fallback proof missing')
     report['sampler_checks'] = args.sampler_checks
     run([*adb, 'pull', remote + '/color.rgba', out / 'color.rgba'], 'pull-color.log')
+    if args.image_usage_checks:
+        records=[]
+        for mode in range(4):
+            declared=mode in (1,2);command_cache=mode>=2;text=output
+            if mode:
+                checked=run([*adb,'shell','env','DM_RESOURCE_STATS=1','DM_COMMAND_STATE_CACHE='+str(int(command_cache)),
+                    'DM_VK_IMAGE_USAGE_FLAGS='+str(int(declared)),'timeout','90',remote+'/probe',remote+'/cache',remote+'/color.rgba','run'],f'image-mode-{mode}.log',100)
+                text=(checked.stdout+checked.stderr).decode('utf-8',errors='replace')
+                runtime_mode=json.loads(checked.stdout.decode().strip().splitlines()[-1])
+                if not all(runtime_mode[k] for k in ('compute_passed','draw_passed','real_write_fault_hook_passed','compact_records_passed')):raise RuntimeError('Image usage base fixture failed')
+            rows=[dict(re.findall(r'(\w+)=([^\s]+)',line)) for line in text.splitlines() if 'IMAGE_USAGE_PHASE ' in line]
+            expected=[dict(variant=str(i),declared=str(int(declared)),image_flag=str(i&1),promotions=str(int(declared and not (i&1))),freed_old_images='1',passed='1') for i in range(4)]
+            if rows!=expected or 'IMAGE_USAGE_DEVICE variants=4 levels=3 layers=3 compute=8 compared_bytes=516096 same_submit_producer=1 passed=1' not in text:
+                raise RuntimeError('Image promotion/content/lifetime evidence missing: '+repr(rows))
+            driver=re.search(r'\[nvn-vulkan\] driver id=(\d+)',text)
+            if not driver:raise RuntimeError('Image usage driver identity missing')
+            pixels_file=out/f'images-{mode}.bin';run([*adb,'pull',remote+'/color.rgba.images',pixels_file],f'images-{mode}-pull.log')
+            if pixels_file.stat().st_size!=516096:raise RuntimeError('Image usage readback size mismatch')
+            records.append(dict(declared=declared,command_cache=command_cache,driver_id=int(driver[1]),phases=rows,compute=8,readback_bytes=pixels_file.stat().st_size,sha256=sha(pixels_file)))
+        if len({r['sha256'] for r in records})!=1 or len({r['driver_id'] for r in records})!=1:raise RuntimeError('Image usage policies changed pixels or driver')
+        report['image_usage_modes']=records
     if args.resource_checks:
         records=[]
         for mode in range(2):

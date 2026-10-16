@@ -118,7 +118,10 @@ typedef struct {
     uint8_t *vertex_spv;size_t vertex_bytes;NvnVkVertexInput vertex_inputs[16];VertexModule *vertex_modules;
 } VShader;
 typedef struct { uint64_t serial,incarnation; tex_t source; VkImage image; VkDeviceMemory memory;
-    VkImageView view; VkFormat format; VkImageLayout layout; uint32_t width,height,depth,bpp; int cpu_owned; uint64_t upload_stamp,version;
+    VkImageView view; VkFormat format; VkImageLayout layout; VkImageUsageFlags usage; uint32_t width,height,depth,bpp; int cpu_owned; uint64_t upload_stamp,version;
+    /* At most one lazy STORAGE promotion. Prior commands and slot caches keep
+     * the old allocation alive until texture finalization drains both slots. */
+    VkImage before_storage;VkDeviceMemory before_storage_memory;VkImageView before_storage_view;
     uint8_t *cpu_snapshot;
     VkImage sample_copy;VkDeviceMemory sample_memory;VkImageView sample_view;VkImageLayout sample_layout;
     VkImage shadow;VkDeviceMemory shadow_memory;VkImageView shadow_view;VkFormat shadow_format;VkImageLayout shadow_layout;uint64_t shadow_version;uint64_t other_version,sample_other;uint32_t dirty_levels,sc_valid,sc_level,sc_levels,sc_layer,sc_layers;
@@ -225,7 +228,8 @@ static struct {
     uint32_t last_pso_slot;int enable_pso_last;
     int disable_pso_reuse;
 
-    int disable_resource_cache,retain_resources;
+    int disable_resource_cache,retain_resources,image_usage_by_flags;
+    uint64_t image_usage_omitted,image_usage_storage,image_promotions,image_retired_live;
     uint64_t resource_flushes,resource_kept,resource_views,resource_passes,resource_hits;
     uint64_t profile_view_hits,profile_view_misses,profile_framebuffer_hits,profile_framebuffer_misses;
     int active,feedback_layout,shader_draw_parameters;
@@ -552,6 +556,7 @@ static void backend_init(void) {
     G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL||G.pass_stats;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
     G.disable_resource_cache=getenv("DM_DISABLE_RESOURCE_CACHE")!=NULL;
     {const char *retain=getenv("DM_VK_RETAIN_RESOURCES");G.retain_resources=!retain||atoi(retain)!=0;}
+    {const char *usage=getenv("DM_VK_IMAGE_USAGE_FLAGS");G.image_usage_by_flags=!usage||atoi(usage)!=0;}
     G.disable_binding_plans=getenv("DM_DISABLE_BINDING_PLANS")!=NULL;
     {const char *cache=getenv("DM_COMMAND_STATE_CACHE");G.enable_command_cache=cache&&atoi(cache)!=0;}
     G.disable_dirty_uploads=getenv("DM_DISABLE_DIRTY_UPLOADS")!=NULL;
@@ -1439,6 +1444,7 @@ static VTexture *texture_reference_get(TextureRef ref) {
     if(!ref.incarnation||ref.slot>=G.texture_used)return NULL;
     VTexture *t=&G.textures[ref.slot];return t->serial&&t->incarnation==ref.incarnation?t:NULL;
 }
+#include "nvn_vk_image_usage.inc"
 static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) {
     if(!source || !source->serial) die("texture serial",0);
     VTexture *t=texture_reference_get(ref);int found=0;uint32_t registry_slot=0;
@@ -1479,19 +1485,15 @@ static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) 
     if(aspect(t->format)&VK_IMAGE_ASPECT_DEPTH_BIT) usage|=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     else if(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     int attachment_image=(usage&(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))!=0;
-    if((fp.optimalTilingFeatures&VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)&&!(G.diag_img_usage>=1&&attachment_image)) usage|=VK_IMAGE_USAGE_STORAGE_BIT;
+    /* Retain STORAGE for guest IMAGE textures. A first late storage binding
+     * otherwise upgrades the allocation, preserving all subresources. */
+    if((fp.optimalTilingFeatures&VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)&&
+       (!(G.image_usage_by_flags||(G.diag_img_usage>=1&&attachment_image))||(source->d.flags&NVN_TEXTURE_FLAGS_IMAGE)))usage|=VK_IMAGE_USAGE_STORAGE_BIT;
     if(G.feedback_layout && attachment_image && G.diag_img_usage<2)usage|=VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
-    VkImageCreateInfo ii={.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,.imageType=volume?VK_IMAGE_TYPE_3D:one?VK_IMAGE_TYPE_1D:VK_IMAGE_TYPE_2D,.format=t->format,
-      .flags=cube?VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0,
-      .extent={t->width,t->height,t->depth},.mipLevels=source->d.levels,.arrayLayers=source->L.layers,.samples=VK_SAMPLE_COUNT_1_BIT,
-      .tiling=VK_IMAGE_TILING_OPTIMAL,.usage=usage,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
-    CHECK(vkCreateImage(G.device,&ii,NULL,&t->image)); VkMemoryRequirements r; vkGetImageMemoryRequirements(G.device,t->image,&r);
-    VkMemoryAllocateInfo a={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=r.size,
-      .memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
-    CHECK(vkAllocateMemory(G.device,&a,NULL,&t->memory)); CHECK(vkBindImageMemory(G.device,t->image,t->memory,0));
-    VkImageViewType view_type=volume?VK_IMAGE_VIEW_TYPE_3D:one?(layered?VK_IMAGE_VIEW_TYPE_1D_ARRAY:VK_IMAGE_VIEW_TYPE_1D):cube?(source->L.layers==6?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY):layered?VK_IMAGE_VIEW_TYPE_2D_ARRAY:VK_IMAGE_VIEW_TYPE_2D;
-    VkImageViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=t->image,.viewType=view_type,
-       .format=t->format,.subresourceRange={aspect(t->format)&VK_IMAGE_ASPECT_DEPTH_BIT?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,0,source->d.levels,0,source->L.layers}}; CHECK(vkCreateImageView(G.device,&vi,NULL,&t->view));
+    t->usage=usage;
+    if(usage&VK_IMAGE_USAGE_STORAGE_BIT)G.image_usage_storage++;
+    else if(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)G.image_usage_omitted++;
+    texture_image_allocate(t,usage,&t->image,&t->memory,&t->view);
 upload_existing:
     if(upload) {
         uint32_t decoded_format=0;int decoded_bpp=0;
@@ -1539,6 +1541,7 @@ void mtl_tex_release(tex_t *source) {
         * Clear dependent framebuffers/views before destroying any image. */
        resource_cache_clear(&G.submission_slot);resource_cache_clear(&G.submission_slot2);
        free(t->cpu_snapshot);
+       if(t->before_storage){vkDestroyImageView(G.device,t->before_storage_view,NULL);vkDestroyImage(G.device,t->before_storage,NULL);vkFreeMemory(G.device,t->before_storage_memory,NULL);G.image_retired_live--;}
        if(t->shadow){vkDestroyImageView(G.device,t->shadow_view,NULL);vkDestroyImage(G.device,t->shadow,NULL);vkFreeMemory(G.device,t->shadow_memory,NULL);}
        if(t->sample_copy){vkDestroyImageView(G.device,t->sample_view,NULL);vkDestroyImage(G.device,t->sample_copy,NULL);vkFreeMemory(G.device,t->sample_memory,NULL);}
        vkDestroyImageView(G.device,t->view,NULL); vkDestroyImage(G.device,t->image,NULL); vkFreeMemory(G.device,t->memory,NULL);
@@ -1859,6 +1862,7 @@ static void collect_image_uses(VShader *s) {
         uint64_t serial=G.tslot[tid].texture.serial;unsigned j=0;while(j<S.nimage_uses&&S.image_uses[j].serial!=serial)j++;
         if(j==S.nimage_uses){if(j==2*LIMIT_BINDINGS)die("image-use capacity",j);S.image_uses[S.nimage_uses++]=(ImageUse){serial,0};}
         S.image_uses[j].roles|=b->kind==6?2u:1u;
+        if(b->kind==6)texture_require_storage(slot_texture(&G.tslot[tid],1));
     }
 }
 static int storage_image_use(uint64_t serial) {
@@ -2257,6 +2261,11 @@ static VkDescriptorSet bind_shader(VShader *s) {
            unsigned tid=(unsigned)handle&0xfffff;if(tid>=(unsigned)G.texture_pool_n || tid>=G.texture_slots || !G.tslot[tid].live)die("unbound texture descriptor",tid);
            TSlot *slot=&G.tslot[tid];
            VTexture *t=slot_texture(slot,1);
+           if(b->kind==6&&!(t->usage&VK_IMAGE_USAGE_STORAGE_BIT)){
+               fprintf(stderr,"[nvn-vulkan] STORAGE_USAGE_REQUIRED shader=%s binding=%u serial=%llu flags=%#x usage=%#x\n",
+                   s->key,b->binding,(unsigned long long)t->serial,t->source.d.flags,t->usage);
+               die("storage image without declared Vulkan usage",t->serial);
+           }
            trace_texture(t,s,b);
            int alias=b->kind==4&&(s->dref_bindings&(1ull<<i))&&aspect(t->format)==VK_IMAGE_ASPECT_COLOR_BIT;
            int sampled_copy=b->kind==4&&!alias&&disjoint_sampling(t,slot,s->h.stage),ranged=0;
@@ -3442,6 +3451,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         fprintf(stderr,"[nvn-vulkan] RENDER_BINDING_PLAN_PROFILE frame=%llu hits=%llu misses=%llu fallbacks=%llu prepared_buffers=%llu prepared_images=%llu enabled=%u\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_plan_hits,(unsigned long long)G.profile_plan_misses,(unsigned long long)G.profile_plan_fallbacks,(unsigned long long)G.profile_plan_buffers,(unsigned long long)G.profile_plan_images,!G.disable_binding_plans);
         G.profile_plan_hits=G.profile_plan_misses=G.profile_plan_fallbacks=G.profile_plan_buffers=G.profile_plan_images=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_RESOURCE_CACHE_PROFILE frame=%llu enabled=%d sequence=%llu views_created=%llu framebuffers_created=%llu framebuffer_hits=%llu flushes=%llu kept_submissions=%llu retained_passes=%d retained_views=%d\n",(unsigned long long)G.present_count+1,atomic_load(&resource_applied),(unsigned long long)resource_control_sequence,(unsigned long long)G.resource_views,(unsigned long long)G.resource_passes,(unsigned long long)G.resource_hits,(unsigned long long)G.resource_flushes,(unsigned long long)G.resource_kept,G.submission_slot.npass+G.submission_slot2.npass,G.submission_slot.nview+G.submission_slot2.nview);
+        fprintf(stderr,"[nvn-vulkan] RENDER_IMAGE_USAGE_PROFILE frame=%llu declared_policy=%d diagnostic=%d storage_images=%llu omitted_storage=%llu promotions=%llu retained_old_images=%llu\n",(unsigned long long)G.present_count+1,G.image_usage_by_flags,G.diag_img_usage,(unsigned long long)G.image_usage_storage,(unsigned long long)G.image_usage_omitted,(unsigned long long)G.image_promotions,(unsigned long long)G.image_retired_live);
         fprintf(stderr,"[nvn-vulkan] RENDER_VIEW_CACHE_PROFILE frame=%llu view_hits=%llu view_misses=%llu framebuffer_hits=%llu framebuffer_misses=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_view_hits,(unsigned long long)G.profile_view_misses,(unsigned long long)G.profile_framebuffer_hits,(unsigned long long)G.profile_framebuffer_misses);
         G.profile_view_hits=G.profile_view_misses=G.profile_framebuffer_hits=G.profile_framebuffer_misses=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_POOL_UPLOAD_PROFILE frame=%llu uploaded_bytes=%llu reused_ranges=%llu reused_bytes=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_pool_uploaded_bytes,(unsigned long long)G.profile_pool_reused_ranges,(unsigned long long)G.profile_pool_reused_bytes);
