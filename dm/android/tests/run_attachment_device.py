@@ -35,6 +35,7 @@ def main():
     parser.add_argument('--sampler-checks', action='store_true', help='Also read back integer, float and depth comparison sampling')
     parser.add_argument('--command-state-checks', action='store_true', help='Compare all four command-state/PSO-last cache modes with GPU readback')
     parser.add_argument('--depth-copy-checks', action='store_true', help='Compare native/forced drawn depth+stencil copies with independent expected pixels and command caching off/on')
+    parser.add_argument('--vertex-checks', action='store_true', help='Read back 79 vertex formats, four shader widths and four layouts with native/forced split and command caching off/on')
     args = parser.parse_args()
     if args.run_device and not args.serial:
         parser.error('--serial is required with --run-device')
@@ -42,6 +43,8 @@ def main():
         parser.error('Run command-state and persistent-cache comparisons separately')
     if args.depth_copy_checks and (args.command_state_checks or args.cache_roundtrip or args.sampler_checks):
         parser.error('Run depth-copy comparisons separately from other optional suites')
+    if args.vertex_checks and (args.depth_copy_checks or args.command_state_checks or args.cache_roundtrip or args.sampler_checks):
+        parser.error('Run vertex comparisons separately from other optional suites')
     repo = Path(__file__).resolve().parents[3]
     out = args.output.resolve(); out.mkdir(parents=True, exist_ok=True)
     report = {'passed': False, 'device_executed': False, 'original_game_frame': False,
@@ -68,6 +71,15 @@ def main():
     anchor = 'p_TextureFinalize(&target);'
     assert source.count(anchor) == 1
     extra_cases = cases.read_text(encoding='utf-8')
+    if args.vertex_checks:
+        import vertex_device_assets
+        source = source.replace('#include "nvn_obj.h"', '#include "nvn_obj.h"\n#include <math.h>')
+        copied_cache = out / 'vertex-cache'
+        shutil.copytree(args.cache, copied_cache, dirs_exist_ok=True); args.cache = copied_cache
+        vertex_cases, report['vertex_shaders'] = vertex_device_assets.prepare(args.cache, out, ndk, run)
+        extra_cases += '\n' + vertex_cases
+        report['vertex_fixture_sha256'] = {p.name: sha(p) for p in
+            (Path(__file__).with_name('vertex_device_assets.py'), Path(__file__).with_name('vertex_device_cases.inc'))}
     if args.depth_copy_checks:
         source = source.replace('#include "nvn_obj.h"', '#include "nvn_obj.h"\n#include <math.h>')
         source = source.replace('void dm_vk_attachment_config(int);',
@@ -170,6 +182,10 @@ def main():
         cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_COMMAND_STATE_CACHE=0', 'DM_PSO_LAST_CACHE=0']
     if args.depth_copy_checks:
         cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_VK_DEPTH_COPY_DRAW=0', 'DM_COMMAND_STATE_CACHE=0']
+    if args.vertex_checks:
+        run([*adb, 'shell', 'mkdir', remote + '/adapted'], 'mkdir-adapted.log')
+        cache_env = ['env', 'DM_RESOURCE_STATS=1', 'DM_VK_VERTEX_SPLIT=0', 'DM_COMMAND_STATE_CACHE=0',
+                     'DM_VERTEX_SHADER_DIR=' + remote + '/adapted']
     if args.cache_roundtrip:
         run([*adb, 'shell', 'mkdir', remote + '/pipeline'], 'mkdir-pipeline.log')
         cache_env = ['env', 'DM_VK_PIPELINE_CACHE_DIR=' + remote + '/pipeline']
@@ -190,6 +206,54 @@ def main():
         raise RuntimeError('Sampler GPU/fallback proof missing')
     report['sampler_checks'] = args.sampler_checks
     run([*adb, 'pull', remote + '/color.rgba', out / 'color.rgba'], 'pull-color.log')
+    if args.vertex_checks:
+        records = []
+        for mode in range(4):
+            text = output
+            if mode:
+                checked = run([*adb, 'shell', 'env', 'DM_RESOURCE_STATS=1',
+                    'DM_VK_VERTEX_SPLIT=' + str(mode & 1), 'DM_COMMAND_STATE_CACHE=' + str(int(bool(mode & 2))),
+                    'DM_VERTEX_SHADER_DIR=' + remote + '/adapted',
+                    'timeout', '90', remote + '/probe', remote + '/cache', remote + '/color.rgba', 'run'],
+                    f'vertex-{mode}-device.log', 100)
+                text = (checked.stdout + checked.stderr).decode('utf-8', errors='replace')
+            if ('VERTEX_DEVICE formats=79 input_widths=4 layouts=4 cases=1264 read_bytes=5177344 passed=1' not in text or
+                'mismatches=0 same_process=1 passed=1' not in text):
+                raise RuntimeError('Vertex format/layout readback proof missing')
+            runtime_mode = runtime if not mode else json.loads(checked.stdout.decode('utf-8').strip().splitlines()[-1])
+            if not all(runtime_mode[k] for k in ('compute_passed', 'draw_passed', 'real_write_fault_hook_passed', 'compact_records_passed')):
+                raise RuntimeError('Vertex base fixture failed')
+            driver = re.search(r'\[nvn-vulkan\] driver id=(\d+)', text)
+            variants = re.findall(r'VERTEX_INPUT_ADAPT shader=([0-9a-f]+) split=(0x[0-9a-f]+|0) unsigned=(0x[0-9a-f]+|0) signed=(0x[0-9a-f]+|0)', text)
+            if (not driver or (mode & 1 and not any(int(v[1], 0) for v in variants)) or
+                not any(int(v[2], 0) for v in variants) or not any(int(v[3], 0) for v in variants)):
+                raise RuntimeError('Vertex split/unsigned/signed adaptation was not exercised')
+            readback = out / f'vertex-{mode}.bin'
+            run([*adb, 'pull', remote + '/color.rgba.vertex', readback], f'vertex-{mode}-pull.log')
+            if readback.stat().st_size != 5177344:
+                raise RuntimeError('Vertex readback size mismatch')
+            records.append(dict(mode=mode, driver_id=int(driver[1]), force_split=bool(mode & 1),
+                command_cache=bool(mode & 2), variants=variants, sha256=sha(readback)))
+        if len({r['sha256'] for r in records}) != 1 or len({r['driver_id'] for r in records}) != 1:
+            raise RuntimeError('Vertex modes changed pixels or driver')
+        run([*adb, 'pull', remote + '/adapted', out / 'adapted'], 'pull-adapted.log')
+        adapted = sorted((out / 'adapted').glob('*.spv'))
+        if not adapted:
+            raise RuntimeError('Missing actual adapted shader modules')
+        for p in adapted:
+            run([ndk / 'shader-tools/windows-x86_64/spirv-val.exe', '--target-env', 'vulkan1.1', p], p.stem + '-adapted-validate.log')
+        negatives = []
+        for layout in (0, 1, 3):
+            checked = subprocess.run([str(x) for x in [*adb, 'shell', 'env', 'DM_VERTEX_BAD_RANGE=' + str(layout+1),
+                'timeout', '90', remote + '/probe', remote + '/cache', remote + '/negative.rgba', 'run']],
+                cwd=repo, capture_output=True, timeout=100)
+            text = (checked.stdout + checked.stderr).decode('utf-8', errors='replace')
+            (out / f'vertex-negative-{layout}.log').write_text(text, encoding='utf-8')
+            if not checked.returncode or 'STOP vertex fetch outside bound range (2)' not in text:
+                raise RuntimeError('Short vertex range was not rejected before GPU draw')
+            negatives.append(dict(layout=layout, rejected=True, returncode=checked.returncode))
+        report.update(vertex_modes=records, vertex_negative_ranges=negatives,
+            adapted_vertex_spirv_sha256={p.name: sha(p) for p in adapted})
     if args.depth_copy_checks:
         records = []
         for mode in range(4):

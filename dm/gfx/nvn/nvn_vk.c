@@ -97,6 +97,8 @@ static void hz_note(int kind);
 #include "nvn_vk_profile.h"
 #include "nvn_vk_pipeline_cache_key.h"
 #include "nvn_vk_sampler_policy.h"
+#include "nvn_vk_vertex.h"
+#include "nvn_vk_vertex_spv.h"
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *map; uint64_t size,allocation_size;VkBufferUsageFlags usage;int cached;uint64_t dirty; } VBuffer;
 enum { TEMP_OTHER,TEMP_DRIVER,TEMP_ALIGNED,TEMP_COMPARISON,TEMP_ROLES };
 typedef struct { const uint8_t *guest; uint64_t size,serial; VBuffer v; } VPool;
@@ -107,11 +109,13 @@ typedef struct { uint64_t epoch,ssbo,tex;VBuffer *table; } DriverCacheEntry;
 typedef struct { uint32_t set,binding,type,kind; int32_t slot,sampler; uint32_t count,flags; } RBinding;
 typedef struct { uint32_t magic,version,stage,nb,na,c1n,ncap,local[3],fout,reserved; } RHeader;
 #include "nvn_vk_binding_plan.h"
+typedef struct VertexModule { NvnVkVertexAdapt plan; VkShaderModule module; struct VertexModule *next; } VertexModule;
 typedef struct {
     char key[17]; RHeader h; RBinding b[LIMIT_BINDINGS]; uint32_t attr[32][2],caps[32];
     VBuffer c1; VkShaderModule module; VkDescriptorSetLayout layout; uint64_t fetch_bindings,dref_bindings,large_bindings_seen;
     SBInfo storage_bias;
     BindingPlan *plan;
+    uint8_t *vertex_spv;size_t vertex_bytes;NvnVkVertexInput vertex_inputs[16];VertexModule *vertex_modules;
 } VShader;
 typedef struct { uint64_t serial,incarnation; tex_t source; VkImage image; VkDeviceMemory memory;
     VkImageView view; VkFormat format; VkImageLayout layout; uint32_t width,height,depth,bpp; int cpu_owned; uint64_t upload_stamp,version;
@@ -159,6 +163,7 @@ typedef struct { PassKey pass;VkImageView views[9];uint32_t width,height; } Fram
 typedef struct {
     uint32_t compute,shader[2],flags,topology,cull,front;
     uint32_t attribute_count,binding_count,color_count;
+    uint32_t vertex_split,vertex_unsigned,vertex_signed;
     VkVertexInputAttributeDescription attributes[32];
     VkVertexInputBindingDescription bindings[16];
     uint32_t depth_test,depth_write,depth_compare,stencil_test;
@@ -196,6 +201,7 @@ static struct {
     uint32_t texture_used,texture_free_count,texture_free[LIMIT_OBJECTS],texture_table[2*LIMIT_OBJECTS];
     uint64_t texture_incarnation,registry_revision,pool_revision,binding_revision[6],ssbo_revision[6],texbind_revision[6],driver_revision[6][2];DriverCacheEntry driver_cache[6][2];
     int disable_binding_plans,enable_command_cache;
+    int force_vertex_split;
     uint64_t profile_cmd_issued[NVN_VK_CMD_STATE_COUNT],profile_cmd_skipped[NVN_VK_CMD_STATE_COUNT];
     NvnDirtyQueryStats profile_dirty_base;
     uint64_t profile_plan_hits,profile_plan_misses,profile_plan_fallbacks,profile_plan_buffers,profile_plan_images,profile_driver_revision_hits;
@@ -521,6 +527,7 @@ static void backend_init(void) {
     {const char *last=getenv("DM_PSO_LAST_CACHE");G.enable_pso_last=last&&atoi(last)!=0;G.last_pso_slot=UINT32_MAX;}
     G.disable_driver_table_reuse=getenv("DM_DISABLE_DRIVER_TABLE_REUSE")!=NULL;
     G.disable_temp_pool=getenv("DM_DISABLE_TEMP_POOL")!=NULL;
+    {const char *force=getenv("DM_VK_VERTEX_SPLIT");G.force_vertex_split=force&&!strcmp(force,"1");}
     G.disable_query_batch=getenv("DM_DISABLE_QUERY_BATCH")!=NULL;G.diag_no_occlusion=getenv("DM_DIAG_NO_OCCLUSION")!=NULL;G.barrier_pass_elide=getenv("DM_BARRIER_PASS_ELIDE")!=NULL;G.diag_no_pass_deps=getenv("DM_DIAG_NO_PASS_DEPS")!=NULL;G.precise_sync=getenv("DM_DISABLE_PRECISE_SYNC")==NULL;{const char *hd=getenv("DM_HZ_DIAG");G.hz_diag=hd?atoi(hd):0;}{const char *cd=getenv("DM_CHUNK_DRAWS");G.chunk_draws=cd?atoi(cd):48;G.chunk_log=getenv("DM_RESOURCE_STATS")!=NULL;G.profile_detail=getenv("DM_PROFILE_DETAIL")!=NULL;G.diag_skip_draws=getenv("DM_DIAG_SKIP_DRAWS")!=NULL;{const char *sh=getenv("DM_DIAG_SHAPE");G.diag_shape=sh?atoi(sh):0;}G.disable_setrt_skip=getenv("DM_DISABLE_SETRT_SKIP")!=NULL;G.disable_subres=getenv("DM_DISABLE_SUBRES")!=NULL;G.enable_narrow_access=getenv("DM_NARROW_ACCESS")!=NULL;G.diag_fixed_desc=getenv("DM_DIAG_FIXED_DESC")!=NULL;G.disable_wait_elision=getenv("DM_DISABLE_WAIT_ELISION")!=NULL;G.async_enabled=getenv("DM_DISABLE_ASYNC_COMMIT")==NULL;G.async_drain_after_submit=getenv("DM_ASYNC_DRAIN")!=NULL;{const char *sc=getenv("DM_DIAG_SKIP_CLASS");G.diag_skip_class=sc?atoi(sc):0;}G.wb_stage_enabled=getenv("DM_DISABLE_WB_STAGE")==NULL;G.disable_pass_reuse=getenv("DM_DISABLE_PASS_REUSE")!=NULL;G.disable_cpu_uniform_snapshot=getenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT")!=NULL;{const char *sx=getenv("DM_DIAG_SKIP_XFER");G.diag_skip_xfer=sx?atoi(sx):0;}}fprintf(stderr,"[nvn-vulkan] PRECISE_SYNC=%d hz_diag=%d\n",G.precise_sync,G.hz_diag);{const char *iu=getenv("DM_DIAG_IMG_USAGE");G.diag_img_usage=iu?atoi(iu):0;}
     {const char *range=getenv("DM_QUERY_RESET_RANGE");G.enable_query_reset_range=range&&atoi(range)!=0;}
     G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
@@ -1721,13 +1728,36 @@ static VShader *shader_get(const void *control,uint32_t stage) {
     if(dump&&s->storage_bias.mask){char path[1200];if(snprintf(path,sizeof(path),"%s/%s.spv",dump,s->key)>=(int)sizeof path)die("adapted shader dump path",0);
         FILE *out=fopen(path,"wb");if(!out||fwrite(bytes,1,size,out)!=size)die("adapted shader dump",size);fclose(out);}
     VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=size,.pCode=(uint32_t *)bytes};
-    CHECK(vkCreateShaderModule(G.device,&mi,NULL,&s->module));free(bytes);
+    CHECK(vkCreateShaderModule(G.device,&mi,NULL,&s->module));
+    if(stage==0){
+        if(!nvn_vk_vertex_inputs((uint32_t *)bytes,size/4,s->vertex_inputs))die("vertex input SPIR-V ABI",0);
+        uint32_t locations=0;
+        for(unsigned i=0;i<s->h.na;i++){unsigned l=s->attr[i][0];if(l>=16||!s->vertex_inputs[l].type||(locations&(1u<<l)))die("vertex input metadata/IR mismatch",l);locations|=1u<<l;}
+        for(unsigned l=0;l<16;l++)if(s->vertex_inputs[l].type&&!(locations&(1u<<l)))die("vertex input missing metadata",l);
+        s->vertex_spv=bytes;s->vertex_bytes=size;
+    }else free(bytes);
     fprintf(stderr,"[nvn-vulkan] original shader key=%s stage=%u loaded\n",s->key,stage);
     VkDescriptorSetLayoutBinding bindings[LIMIT_BINDINGS];for(uint32_t i=0;i<s->h.nb;i++){
        if(s->b[i].count!=1 || s->b[i].set!=(stage==1?1u:0u))die("shader descriptor set/count",s->b[i].set);
        bindings[i]=(VkDescriptorSetLayoutBinding){s->b[i].binding,(VkDescriptorType)s->b[i].type,1,stage==0?VK_SHADER_STAGE_VERTEX_BIT:stage==1?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_COMPUTE_BIT,NULL}; }
     VkDescriptorSetLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=s->h.nb,.pBindings=bindings};
     CHECK(vkCreateDescriptorSetLayout(G.device,&li,NULL,&s->layout));s->plan=binding_plan_compile(s);return s;
+}
+static VkShaderModule vertex_module(VShader *s,const NvnVkVertexAdapt *plan) {
+    unsigned active=plan->split;for(unsigned l=0;l<16;l++)active|=plan->convert[l];
+    if(!active)return s->module;
+    for(VertexModule *v=s->vertex_modules;v;v=v->next)if(!memcmp(&v->plan,plan,sizeof *plan))return v->module;
+    size_t bytes=s->vertex_bytes;uint8_t *adapted=nvn_vk_vertex_adapt(s->vertex_spv,&bytes,plan);
+    if(!adapted)die("vertex input adaptation unsupported SPIR-V pointer/interface",plan->split);
+    VertexModule *v=calloc(1,sizeof *v);if(!v)die("vertex shader variant allocation",0);v->plan=*plan;
+    VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=bytes,.pCode=(uint32_t *)adapted};
+    CHECK(vkCreateShaderModule(G.device,&mi,NULL,&v->module));
+    uint32_t u=0,i=0;for(unsigned l=0;l<16;l++){if(plan->convert[l]==1)u|=1u<<l;if(plan->convert[l]==2)i|=1u<<l;}
+    const char *dump=getenv("DM_VERTEX_SHADER_DIR");
+    if(dump){char path[1400];int n=snprintf(path,sizeof path,"%s/%s-%x-%x-%x.spv",dump,s->key,plan->split,u,i);if(n<0||n>=(int)sizeof path)die("vertex shader dump path",0);FILE *f=fopen(path,"wb");if(!f||fwrite(adapted,1,bytes,f)!=bytes)die("vertex shader dump",bytes);fclose(f);}
+    free(adapted);v->next=s->vertex_modules;s->vertex_modules=v;
+    fprintf(stderr,"[nvn-vulkan] VERTEX_INPUT_ADAPT shader=%s split=%#x unsigned=%#x signed=%#x bytes=%zu\n",s->key,plan->split,u,i,bytes);
+    return v->module;
 }
 void mtl_prog_release(prog_t *p) { (void)p; /* Programs own only immutable shared shader-cache entries; no per-program GPU allocation. */ }
 static void aligned_writeback(void) {
@@ -2541,17 +2571,57 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     if(S.active_occlusion==UINT32_MAX)query_reserve(S.occlusion,&S.occlusion_reset_count,S.nocc,1,LIMIT_WRITES);
     uint64_t render_started=prof_now();VkRenderPass renderpass=render_begin();G.profile_render_ns+=prof_now()-render_started;
     VkPipelineLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,.setLayoutCount=ps?2u:1u,.pSetLayouts=set_layouts};
-    VkVertexInputAttributeDescription attributes[32];VkVertexInputBindingDescription bindings[16];uint32_t nbindings=0;uint8_t used[16]={0};
+    VkVertexInputAttributeDescription attributes[32];VkVertexInputBindingDescription bindings[16];uint32_t nbindings=0,nattributes=0,locations=0;uint8_t used[16]={0};
+    NvnVkVertexAdapt vertex_plan={0};
+    for(unsigned l=0;l<16;l++)if(vs->vertex_inputs[l].type)locations|=1u<<l;
     for(uint32_t i=0;i<vs->h.na;i++) { unsigned location=vs->attr[i][0];if(location>=16)die("vertex attribute count",location);
         va_st v=G.state.attributes[location];if(v.stream>=16)die("vertex stream",v.stream);
         if(G.trace_frame)fprintf(stderr,"[nvn-vulkan] VERTEX_INPUT draw=%llu location=%u shader_type=%u stream=%u format=%u offset=%u stride=%u divisor=%u address=%#llx size=%llu\n",(unsigned long long)G.draws,location,vs->attr[i][1],v.stream,v.fmt,v.offset,G.state.streams[v.stream].stride,G.state.streams[v.stream].divisor,(unsigned long long)G.state.vbuf[v.stream].address,(unsigned long long)G.state.vbuf[v.stream].size);
-        attributes[i]=(VkVertexInputAttributeDescription){location,v.stream,format(v.fmt),v.offset};used[v.stream]=1; }
+        NvnVkVertexFormat f=nvn_vk_vertex_format(v.fmt);if(!f.native)die("unsupported NVN vertex format",v.fmt);
+        NvnVkVertexInput input=vs->vertex_inputs[location];
+        if(input.kind!=f.kind)die("vertex format/shader numeric type mismatch",location);
+        if(f.convert){
+            unsigned components=(v.fmt>=0x51&&v.fmt<=0x68)?(v.fmt-0x51)/6+1:0;
+            VkFormat native=nvn_vk_vertex_scaled_native(v.fmt,components);
+            VkFormat head=nvn_vk_vertex_scaled_native(v.fmt,2),tail=nvn_vk_vertex_scaled_native(v.fmt,1);
+            int native_ok=native&&(format_properties(native).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
+            int split_ok=components==3&&head&&tail&&
+                (format_properties(head).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)&&
+                (format_properties(tail).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
+            if((native_ok&&(!G.force_vertex_split||!f.tail))||split_ok){f.native=native;f.head=head;f.tail=components==3?tail:VK_FORMAT_UNDEFINED;f.convert=0;}
+        }
+        int split=f.tail&&(G.force_vertex_split||!(format_properties(f.native).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT));
+        VkFormat head=split?f.head:f.native;
+        if(!(format_properties(head).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)||
+           (split&&!(format_properties(f.tail).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)))die("vertex format has no supported fetch",v.fmt);
+        if(v.offset>G.properties.limits.maxVertexInputAttributeOffset||G.state.streams[v.stream].stride>G.properties.limits.maxVertexInputBindingStride)die("vertex input device limits",location);
+        NVNbufferRange range=G.state.vbuf[v.stream];uint32_t stride=G.state.streams[v.stream].stride,divisor=G.state.streams[v.stream].divisor;
+        if((range.address+v.offset)%f.alignment||(stride&&stride%f.alignment))die("vertex fetch component alignment",location);
+        uint64_t last=0;int reads=0;
+        if(a){if(a->count<0||a->first<0)die("draw arrays bounds",a->count);reads=a->count!=0;if(!divisor&&reads)last=(uint64_t)a->first+(uint64_t)a->count-1;}
+        else {if(idx->count<0||idx->instances<0)die("indexed draw counts",idx->count);reads=idx->count&&idx->instances;if(divisor&&reads)last=(uint64_t)idx->base_instance+(uint64_t)idx->instances-1;}
+        /* Indexed per-vertex extents may be GPU-authored. Never scan stale CPU
+         * indices to guess their bounds; only array and instance extents here. */
+        if(reads&&!nvn_vk_vertex_extent(range.size,v.offset,f.bytes,stride,last))die("vertex fetch outside bound range",location);
+        if(nattributes>=32)die("vertex attribute limit",nattributes);
+        attributes[nattributes++]=(VkVertexInputAttributeDescription){location,v.stream,head,v.offset};used[v.stream]=1;
+        vertex_plan.convert[location]=f.convert;
+        if(split&&input.components>=3){
+            unsigned tail=0;while(tail<32&&(locations&(1u<<tail)))tail++;
+            if(tail>=32||tail>=G.properties.limits.maxVertexInputAttributes||nattributes>=32)die("RGB vertex fallback attribute limit",tail);
+            uint64_t offset=(uint64_t)v.offset+f.tail_offset;if(offset>G.properties.limits.maxVertexInputAttributeOffset)die("RGB vertex tail offset limit",offset);
+            locations|=1u<<tail;vertex_plan.split|=1u<<location;vertex_plan.tail[location]=tail;
+            attributes[nattributes++]=(VkVertexInputAttributeDescription){tail,v.stream,f.tail,(uint32_t)offset};
+        }
+    }
+    if(nattributes>G.properties.limits.maxVertexInputAttributes)die("vertex attribute count device limit",nattributes);
+    VkShaderModule vertex_shader=vertex_module(vs,&vertex_plan);
     for(unsigned i=0;i<16;i++)if(used[i]) { vs_st v=G.state.streams[i];if(v.divisor>1)die("vertex divisor",v.divisor);
         bindings[nbindings++]=(VkVertexInputBindingDescription){i,v.stride,v.divisor?VK_VERTEX_INPUT_RATE_INSTANCE:VK_VERTEX_INPUT_RATE_VERTEX};
         NVNbufferRange r=G.state.vbuf[i];if(!r.address || !r.size)die("unbound vertex stream",i);uint64_t offset=0;VPool *p=pool_read(r.address,r.size,&offset);
         command_bind_profile(NVN_VK_CMD_VERTEX,nvn_vk_cmd_vertex(&S.command_state,G.enable_command_cache&&!G.trace_frame,S.command,i,p->v.b,offset)); }
     VkPipelineVertexInputStateCreateInfo vi={.sType=VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,.vertexBindingDescriptionCount=nbindings,
-        .pVertexBindingDescriptions=bindings,.vertexAttributeDescriptionCount=vs->h.na,.pVertexAttributeDescriptions=attributes};
+        .pVertexBindingDescriptions=bindings,.vertexAttributeDescriptionCount=nattributes,.pVertexAttributeDescriptions=attributes};
     VkPipelineInputAssemblyStateCreateInfo ai={.sType=VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology=topology(a?a->prim:idx->prim)};
     VkPipelineViewportStateCreateInfo vp={.sType=VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,.viewportCount=1,.scissorCount=1};
@@ -2581,7 +2651,7 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     VkDynamicState dynamic[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS};
     VkPipelineDynamicStateCreateInfo dy={.sType=VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,.dynamicStateCount=3,.pDynamicStates=dynamic};
     VkPipelineShaderStageCreateInfo stages[2]={
-       {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_VERTEX_BIT,.module=vs->module,.pName="main"},
+       {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_VERTEX_BIT,.module=vertex_shader,.pName="main"},
        {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_FRAGMENT_BIT,.module=ps?ps->module:VK_NULL_HANDLE,.pName="main"}};
     VkSpecializationMapEntry bias_maps[2][LIMIT_BINDINGS];VkSpecializationInfo bias[2];
     bias[0]=storage_specialization(vs,bias_maps[0]);if(bias[0].mapEntryCount)stages[0].pSpecializationInfo=&bias[0];
@@ -2593,8 +2663,10 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     key.shader[0]=(uint32_t)(vs-G.shaders)+1;key.shader[1]=ps?(uint32_t)(ps-G.shaders)+1:0;
     memcpy(key.storage_bias[0],S.storage_bias[0],sizeof key.storage_bias[0]);if(ps)memcpy(key.storage_bias[1],S.storage_bias[1],sizeof key.storage_bias[1]);
     key.flags=gp.flags;key.topology=ai.topology;key.cull=raster.cullMode;key.front=raster.frontFace;
-    key.attribute_count=vs->h.na;key.binding_count=nbindings;key.color_count=cb.attachmentCount;
-    memcpy(key.attributes,attributes,vs->h.na*sizeof(*attributes));memcpy(key.bindings,bindings,nbindings*sizeof(*bindings));
+    key.vertex_split=vertex_plan.split;
+    for(unsigned l=0;l<16;l++){if(vertex_plan.convert[l]==1)key.vertex_unsigned|=1u<<l;if(vertex_plan.convert[l]==2)key.vertex_signed|=1u<<l;}
+    key.attribute_count=nattributes;key.binding_count=nbindings;key.color_count=cb.attachmentCount;
+    memcpy(key.attributes,attributes,nattributes*sizeof(*attributes));memcpy(key.bindings,bindings,nbindings*sizeof(*bindings));
     key.depth_test=ds.depthTestEnable;key.depth_write=ds.depthWriteEnable;key.depth_compare=ds.depthCompareOp;key.stencil_test=ds.stencilTestEnable;
     key.stencil[0]=ds.front;key.stencil[1]=ds.back;memcpy(key.blend,blends,cb.attachmentCount*sizeof(*blends));key.pass=S.pass_key;
     /* Load/store actions do not affect Vulkan render-pass compatibility.
