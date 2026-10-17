@@ -130,7 +130,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         status.setPadding(dp(28),dp(18),dp(28),dp(18));status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         status.setText("正在准备游戏文件");root.addView(status,new FrameLayout.LayoutParams(-1,-1));setContentView(root);
         new Thread(() -> {
-            try { prepareModules();applyLauncherDriverSelection();ui.post(() -> {prepared=true;configureAndStart();}); }
+            try { prepareModules();GraphicsDriverSettings.configure(this);ui.post(() -> {prepared=true;configureAndStart();}); }
             catch(Exception e){ui.post(() -> fail("游戏文件准备失败",e));}
         },"game-files").start();
     }
@@ -208,20 +208,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
                 nativeLaunched=true;ui.post(() -> {if(!destroyed&&!launched){launched=true;ui.post(poll);}});
             }
         });
-    }
-    private void applyLauncherDriverSelection()throws Exception {
-        // The optional offline shell owns this preference. Honor explicit
-        // choices; auto keeps main's system-driver/diagnostic-marker behavior.
-        String selection=GraphicsDriverPolicy.normalize(getSharedPreferences("graphics-driver",MODE_PRIVATE).getString("selection","auto"));
-        if(!"system".equals(selection)&&!"turnip".equals(selection))return;
-        File diagnostics=new File(getFilesDir(),"d2r-mobile/diagnostics");
-        for(String name:new String[]{"private-vulkan","private-vulkan-sysmem"}){
-            File marker=new File(diagnostics,name);
-            if(marker.exists()&&!marker.delete())throw new java.io.IOException("无法应用驱动选择，请重新启动应用后重试");
-        }
-        if("turnip".equals(selection))android.system.Os.setenv("DM_PRIVATE_VULKAN","turnip",true);
-        else android.system.Os.unsetenv("DM_PRIVATE_VULKAN");
-        android.util.Log.i("D2RDriver","selection="+selection+" resolved="+selection);
     }
     private void closeRendererSettings(){if(rendererSettings!=null){rendererSettings.dismiss();rendererSettings=null;}}
     static void installDialogBack(android.app.Dialog dialog){

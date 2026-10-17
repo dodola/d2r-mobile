@@ -8,6 +8,7 @@
 #include "services_platform.h"
 #include "services_sdk.h"
 #include "services_fs.h"
+#include "title_probe_profile.h"
 
 struct dm_flags g_flag;
 uint64_t g_t0_ns;
@@ -17,6 +18,8 @@ uint32_t svc_thread_main_init(void);
 uint64_t dm_android_svc_count(int);
 void thr_counts(int *, int *, int *);
 void dm_android_loader_keys_init(void);
+void dm_android_loader_probe_allow_unused_force(void);
+void dm_android_svc_set_program_id(uint64_t);
 void gate_register(uint64_t, const char *, int, uint64_t);
 uint64_t dm_android_gate_check(void);
 extern char dm_android_gate_check_return;
@@ -27,7 +30,7 @@ static void fixture_platform_context(const char *base) {
     if (!base || base[0]!='/' || strlen(base)>PATH_MAX-64) die("Invalid Android service fixture directory");
     snprintf(profile,sizeof profile,"%s/profile",base); snprintf(rom,sizeof rom,"%s/romfs-fixture",base);
     snprintf(save,sizeof save,"%s/save-fixture",base); snprintf(temporary,sizeof temporary,"%s/temp-fixture",base);
-    if (dm_android_fs_ensure_directory(profile) || dm_android_fs_ensure_directory(rom) ||
+    if (dm_android_fs_ensure_directory(base) || dm_android_fs_ensure_directory(profile) || dm_android_fs_ensure_directory(rom) ||
         dm_android_fs_ensure_directory(save) || dm_android_fs_ensure_directory(temporary)) die("Android service fixture setup");
     setenv("DM_ROMFS",rom,1); setenv("DM_SAVE",save,1); setenv("DM_TEMP",temporary,1);
     dm_android_platform_config config = {.mode=DM_ANDROID_HOST_SHELL, .profile_directory=profile,
@@ -143,7 +146,34 @@ static void original_os_services_check(void) {
         if (h0!=h1 || l0!=l1 || o0!=o1) die("Original SDK thread/event resources leaked");
     }
 }
+static void title_probe_check_tables(const char *dir, const char *name, const char *build) {
+    // Reject an accidentally mixed D2R/version-specific rewrite directory.
+    // These labels do not replace the product SHA-256 checks on the host/ADB.
+    static const char *tables[] = {"cuts", "obs", "params"};
+    for (unsigned i=0;i<sizeof tables/sizeof *tables;i++) {
+        char path[PATH_MAX], line[1024], expected[64];
+        if (snprintf(path,sizeof path,"%s/%s.%s.tsv",dir,name,tables[i]) >= (int)sizeof path)
+            die("Android title probe path too long");
+        FILE *f=fopen(path,"r"); if(!f)die("Android title probe missing %s",path);
+        snprintf(expected,sizeof expected,"# BUILD_ID\t%s",build);
+        if(!fgets(line,sizeof line,f))die("Android title probe empty %s",path);
+        line[strcspn(line,"\r\n")]=0;
+        if(strcmp(line,expected))die("Android title probe build mismatch %s",path);
+        while(fgets(line,sizeof line,f)) {
+            line[strcspn(line,"\r\n")]=0;
+            if(line[0] && line[0]!='#')die("Android title probe unexpected game-specific rules %s",path);
+        }
+        if(ferror(f) || fclose(f))die("Android title probe table read %s",path);
+    }
+}
 int main(int argc, char **argv) {
+    int echoes = 0;
+    if (argc>2 && !strcmp(argv[1],"--title-profile")) {
+        if(strcmp(argv[2],"echoes-of-wisdom-1.1.0")) {
+            fprintf(stderr,"Unsupported Android probe title profile\n"); return 2;
+        }
+        echoes=1;argc-=2;argv+=2;
+    }
     if (argc == 4 && !strcmp(argv[1], "--platform-services-check")) {
         g_t0_ns=now_ns(); crash_thread_init(); fixture_platform_context(argv[2]);
         return dm_android_platform_verify(argv[3]);
@@ -154,12 +184,25 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--platform-check")) {
         g_t0_ns = now_ns(); crash_thread_init(); return platform_check(argv[2]);
     }
-    if (argc != 4 && argc != 5) { fprintf(stderr, "usage: dm_android_host_probe PATCH_DIR RESULT_JSON load|os-init|os-services|sdk-startup [FIXTURE_BASE]\n"); return 2; }
+    if (argc != 4 && argc != 5) { fprintf(stderr, "usage: dm_android_host_probe [--title-profile echoes-of-wisdom-1.1.0] PATCH_DIR RESULT_JSON load|os-init|os-services|sdk-startup [FIXTURE_BASE]\n"); return 2; }
     if (strcmp(argv[3], "load") && strcmp(argv[3], "os-init") && strcmp(argv[3], "os-services") && strcmp(argv[3],"sdk-startup")) return 2;
     if (!strcmp(argv[3],"sdk-startup") && argc!=5) return 2;
-    g_flag.imports = getenv("DM_IMPORTS")!=NULL; g_t0_ns = now_ns(); crash_thread_init();
+    g_flag.imports = getenv("DM_IMPORTS")!=NULL;
+    g_flag.dbg = getenv("DM_DBG")!=NULL; g_flag.svc = getenv("DM_SVC")!=NULL;
+    g_t0_ns = now_ns(); crash_thread_init();
     const char *names[] = {"main", "sdk", "subsdk0"};
-    load_modules(argv[1], names, 3);
+    if (echoes) {
+        enum { count=sizeof echoes_probe_modules/sizeof *echoes_probe_modules };
+        const char *title_names[count];
+        for(unsigned i=0;i<count;i++) {
+            title_names[i]=echoes_probe_modules[i].name;
+            title_probe_check_tables(argv[1],title_names[i],echoes_probe_modules[i].build);
+        }
+        dm_android_loader_probe_allow_unused_force();
+        dm_android_svc_set_program_id(echoes_probe_program_id);
+        LOG("ANDROID_TITLE_PROBE title=echoes-of-wisdom version=196608 full_game_verified=false");
+        load_modules(argv[1],title_names,count);
+    } else load_modules(argv[1], names, 3);
     guest_thread_init();
     if (!strcmp(argv[3],"sdk-startup")) fixture_platform_context(argv[4]);
     uint64_t tick0, tick1; native_clock_check(&tick0, &tick1);
@@ -186,7 +229,7 @@ int main(int argc, char **argv) {
         native_clock_check(&tick0,&tick1);
     }
     FILE *out = fopen(argv[2], "w"); if (!out) die("Android result open");
-    fprintf(out,"{\"passed\":true,\"mode\":\"%s\",\"modules\":%d,\"original_cpu_execution\":true,\"original_sdk_tls_checked\":true,\"tick0\":%" PRIu64 ",\"tick1\":%" PRIu64 ",\"nnos_initialized\":%s,\"get_info_calls\":%" PRIu64 ",\"original_thread_event_cycles\":%u,\"sdk_startup_stages\":%u,\"fixture_context\":%s,\"full_game_verified\":false}\n",argv[3],g_nmod,tick0,tick1,initialized?"true":"false",dm_android_svc_count(0x29),service_cycles,startup_stages,startup_stages?"true":"false");
+    fprintf(out,"{\"passed\":true,\"title_profile\":\"%s\",\"mode\":\"%s\",\"modules\":%d,\"original_cpu_execution\":true,\"original_sdk_tls_checked\":true,\"tick0\":%" PRIu64 ",\"tick1\":%" PRIu64 ",\"nnos_initialized\":%s,\"get_info_calls\":%" PRIu64 ",\"original_thread_event_cycles\":%u,\"sdk_startup_stages\":%u,\"fixture_context\":%s,\"full_game_verified\":false}\n",echoes?"echoes-of-wisdom-1.1.0":"d2r-legacy",argv[3],g_nmod,tick0,tick1,initialized?"true":"false",dm_android_svc_count(0x29),service_cycles,startup_stages,startup_stages?"true":"false");
     if (fclose(out)) die("Android result close");
     LOG("ANDROID_HOST_PROBE passed mode=%s", argv[3]);
     return 0;
