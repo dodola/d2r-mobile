@@ -35,6 +35,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static native int nativeSurface(Surface surface,int width,int height,float density,float hz,int focus);
     private static native int nativeStart();
     private static native String nativeStatus();
+    private static native int nativeRenderScale(float scale);
     private static native String nativeKeyboardRequest();
     private static native void nativeKeyboardResult(long id,boolean accepted,String text);
     private static native void nativeKeyboardReady(boolean ready);
@@ -52,6 +53,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private double displayedFps=Double.NaN;
     private RendererSettingsDialog rendererSettings;
     private int appliedRendererFlags=RendererOptions.DEFAULT_FLAGS;
+    private float appliedRenderScale=RenderQuality.ORIGINAL;
     private TouchControlsView touchControls;
     private final java.util.ArrayList<View> menuControls=new java.util.ArrayList<>();
     private boolean prepared, configured, surfaceReady, launched, resumed, failed;
@@ -103,7 +105,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         systemParams.leftMargin=dp(134);systemParams.topMargin=dp(18);
         system.setOnClickListener(v->{if(!configured||failed||rendererSettings!=null||keyboardDialog!=null)return;
             actionButtons=0;if(inputReady)nativeActions(0,0,0,0,0);touchControls.cancel();
-            rendererSettings=RendererSettingsDialog.show(this,appliedRendererFlags,system,()->rendererSettings=null);});
+            rendererSettings=RendererSettingsDialog.show(this,appliedRendererFlags,appliedRenderScale,GameActivity::nativeRenderScale,system,()->rendererSettings=null);});
         viewport.addView(system,systemParams);
         fps=new TextView(this);fps.setText("FPS —");fps.setTextColor(TouchControlsView.TEXT);
         fps.setTextSize(12);fps.setTypeface(Typeface.MONOSPACE);fps.setGravity(Gravity.CENTER);
@@ -164,7 +166,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     }
     private void configureAndStart(){
         if(!prepared||failed||destroyed)return;
-        if(!configured){int rc=nativeConfigure(getFilesDir().getAbsolutePath(),getResources().getConfiguration().getLocales().get(0).toLanguageTag(),
+        if(!configured){
+            // Recover an interrupted AtomicFile write before native startup reads it.
+            try{new RenderQualityStore(this).read();}catch(java.io.IOException e){fail("无法读取画质设置",e);return;}
+            int rc=nativeConfigure(getFilesDir().getAbsolutePath(),getResources().getConfiguration().getLocales().get(0).toLanguageTag(),
             getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_TOUCHSCREEN));
             if(rc!=0){fail("游戏初始化失败",new Exception("错误 "+rc));return;}configured=true;}
         if(surfaceReady)publishSurface();
@@ -198,7 +203,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if(!launched||failed)return;
         try{String raw=nativeStatus();JSONObject s=new JSONObject(raw);
             appliedRendererFlags=s.optInt("renderer_flags",RendererOptions.DEFAULT_FLAGS);
-            if(rendererSettings!=null)rendererSettings.updateApplied(appliedRendererFlags);
+            appliedRenderScale=(float)s.optDouble("render_scale",RenderQuality.ORIGINAL);
+            if(rendererSettings!=null)rendererSettings.updateApplied(appliedRendererFlags,appliedRenderScale);
             long frame=s.getLong("presented_frames");
             if(frame>0)status.setVisibility(View.GONE);else status.setText(s.getString("phase"));
             if(resumed){double current=fpsSampler.sample(frame,SystemClock.elapsedRealtime());

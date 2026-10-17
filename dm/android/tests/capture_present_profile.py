@@ -8,10 +8,12 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import statistics
+import struct
 import subprocess
 import time
 
@@ -24,6 +26,22 @@ def percentile(values, fraction):
     return ordered[min(len(ordered) - 1, int((len(ordered) - 1) * fraction))]
 
 
+def verify_render_scale(snapshot, requested):
+    renderer = snapshot.get('renderer', {})
+    scale = renderer.get('scale', float('nan'))
+    if not renderer.get('readable') or not renderer.get('version_verified') or not math.isfinite(scale):
+        raise RuntimeError('Renderer scale/dimension sources could not be verified')
+    if abs(scale - requested) > 1e-6:
+        raise RuntimeError('Unexpected active 3D scale: ' + str(scale))
+    def f32(value):
+        return struct.unpack('<f', struct.pack('<f', value))[0]
+    expected = [math.floor(f32(n * f32(requested)) + .5) for n in (1280, 720)]
+    if (renderer.get('internal') != expected or renderer.get('duplicate_internal') != expected
+            or renderer.get('output') != [1280, 720]):
+        raise RuntimeError('Unexpected 3D/UI dimensions: ' + json.dumps(renderer))
+    return renderer
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial', required=True)
@@ -33,11 +51,14 @@ def main():
     parser.add_argument('--scene-probe', help='Installed app-relative read-only scene_91738_probe executable')
     parser.add_argument('--level', type=int, help='Require exactly one player in this game area; needs --scene-probe')
     parser.add_argument('--stationary', action='store_true', help='Also require unchanged player coordinates at every scene sample')
+    parser.add_argument('--render-scale', type=float, help='Require this active 3D scale, scaled internal targets and unchanged 1280x720 UI/output; needs --scene-probe')
     args = parser.parse_args()
     if args.seconds < 30:
         parser.error('Capture at least 30 seconds')
     if bool(args.scene_probe) != (args.level is not None) or (args.stationary and not args.scene_probe):
         parser.error('--scene-probe and --level must be supplied together; --stationary needs both')
+    if args.render_scale is not None and (not args.scene_probe or not math.isfinite(args.render_scale) or not .70 <= args.render_scale <= 1.0):
+        parser.error('--render-scale requires --scene-probe and a finite scale in 0.70..1.0')
     if args.scene_probe and not re.fullmatch(r'files/[A-Za-z0-9_./-]+', args.scene_probe):
         parser.error('--scene-probe must be an app-relative path under files/')
     out = args.output.resolve()
@@ -56,6 +77,7 @@ def main():
 
     report = dict(completed=False, serial=args.serial, scene_label=args.scene,
                   scene_identity_verified=False, input_sent=False, settings_changed=False,
+                  expected_render_scale=args.render_scale, render_scale_verified=False,
                   tool_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   started_utc=datetime.now(timezone.utc).isoformat())
     receipt = out / 'result.json'
@@ -130,6 +152,8 @@ def main():
                 raise RuntimeError('Player/scene identity changed during capture')
             if snapshot.get('mono_ns', 0) <= scene_clock:
                 raise RuntimeError('Scene probe monotonic timestamp did not advance')
+            if args.render_scale is not None:
+                verify_render_scale(snapshot, args.render_scale)
             scene_identity, scene_clock = identity, snapshot['mono_ns']
             scene_samples.append(snapshot)
             return snapshot
@@ -205,6 +229,7 @@ def main():
                 groups.setdefault(match[1], []).append(dict(re.findall(r'(\w+)=([^\s]+)', line)))
         (out / 'profile-groups.json').write_text(json.dumps(groups, indent=2) + '\n', encoding='utf-8')
         report.update(completed=True, actual_present_frames=len(timestamps),
+                      render_scale_verified=args.render_scale is not None,
                       scene_identity_verified=bool(args.scene_probe), scene_identity=scene_identity,
                       scene_sample_count=len(scene_samples), scene_verification='sampled, not continuous' if args.scene_probe else 'operator label only',
                       actual_present_span_s=(timestamps[-1] - timestamps[0]) / 1e9,

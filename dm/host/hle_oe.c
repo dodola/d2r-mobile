@@ -8,6 +8,7 @@
 #include "hle.h"
 #ifdef __ANDROID__
 #include "../android/services_platform.h"
+#include "../android/render_scale.h"
 #include <errno.h>
 #include <math.h>
 #else
@@ -308,15 +309,25 @@ static void scale3d_tick(void) {
  * 2c7f979610e9911979982dc07bfc5702. These text anchors also match the verified
  * offline rewritten main SHA2894c9b0...: no NSO header exists in that flat image.
  * Full evidence: analysis/d2r-mobile-port/render-scale-map-20261014/evidence.json.
- * Keep this Android experiment separate from the build94012 Apple addresses. */
+ * Keep this Android path separate from the build94012 Apple addresses. */
 /* Core-only host/input probes omit the graphics layer. Its real presented-frame
  * counter is mandatory only when the explicit scaling experiment is enabled. */
 extern uint64_t dm_nvn_frame_count(void) __attribute__((weak));
 static module_t *g_android_scale_main;
-static float g_android_scale_want=1.0f;
+static _Atomic float g_android_scale_request;
 static _Atomic float g_android_scale_cur=1.0f;
-static _Atomic int g_android_scale_applied;
 static pthread_once_t g_android_scale_once=PTHREAD_ONCE_INIT;
+static int g_android_scale_verified; /* guest notification thread only */
+
+int dm_android_render_scale_request(float scale) {
+    if (!isfinite(scale) || scale<0.70f || scale>1.0f) return EINVAL;
+    atomic_store(&g_android_scale_request,scale);
+    return 0;
+}
+float dm_android_render_scale_requested(void) {
+    float scale=atomic_load(&g_android_scale_request);
+    return scale?scale:1.0f;
+}
 
 static void android_scale_build_guard(module_t *main) {
     if (!main || main->text_end!=0x1b4f5d0 || main->ro_off!=0x1b50000 || main->data_off!=0x2028000 || main->size<0x31b2538)
@@ -349,11 +360,9 @@ static void android_scale_configure(void) {
     char *end; errno=0; float want=strtof(e,&end);
     if (end==e || *end || errno==ERANGE || !isfinite(want) || want<0.70f || want>1.0f)
         die("ANDROID_3D_SCALE invalid value %s; expected finite 0.70..1.0",e);
-    if (!dm_nvn_frame_count)
-        die("ANDROID_3D_SCALE requires graphics presented-frame counter; unavailable in core-only probes");
-    for (int i=0;i<g_nmod;i++) if (!strcmp(g_mod[i].name,"main")) g_android_scale_main=&g_mod[i];
-    android_scale_build_guard(g_android_scale_main);
-    g_android_scale_want=want;
+    /* A runtime request wins over the legacy shell-probe environment value. */
+    float unset=0.0f;
+    atomic_compare_exchange_strong(&g_android_scale_request,&unset,want);
     LOG("ANDROID_3D_SCALE_CONFIG build=91738 fixed_scale=%.3f output=1280x720",(double)want);
 }
 static int android_scale_readable(uintptr_t address,size_t length) {
@@ -367,7 +376,16 @@ static int android_scale_readable(uintptr_t address,size_t length) {
 static void android_scale3d_tick(void *return_address) {
     static _Thread_local int rebuilding;
     pthread_once(&g_android_scale_once,android_scale_configure);
-    if (g_android_scale_want==1.0f || atomic_load(&g_android_scale_applied) || rebuilding || dm_nvn_frame_count()<30) return;
+    float want=dm_android_render_scale_requested();
+    if (want==atomic_load(&g_android_scale_cur) || rebuilding) return;
+    if (!dm_nvn_frame_count)
+        die("ANDROID_3D_SCALE requires graphics presented-frame counter; unavailable in core-only probes");
+    if (dm_nvn_frame_count()<30) return;
+    if (!g_android_scale_verified) {
+        for (int i=0;i<g_nmod;i++) if (!strcmp(g_mod[i].name,"main")) g_android_scale_main=&g_mod[i];
+        android_scale_build_guard(g_android_scale_main);
+        g_android_scale_verified=1;
+    }
     module_t *main=g_android_scale_main;
     if (return_address!=main->base+0xdf7bb8 && return_address!=main->base+0xdf7c10)
         die("ANDROID_3D_SCALE unexpected notification caller %p",return_address);
@@ -376,7 +394,7 @@ static void android_scale3d_tick(void *return_address) {
         die("ANDROID_3D_SCALE invalid renderer pointer %p",(void *)renderer);
     uint32_t *sizes=(uint32_t *)(renderer+0xee78);
     uint32_t ow=sizes[4],oh=sizes[5]; if (ow!=1280 || oh!=720) return;
-    float *scale=(float *)(renderer+0x66a4),before=*scale,want=g_android_scale_want;
+    float *scale=(float *)(renderer+0x66a4),before=*scale;
     if (!isfinite(before) || before<0.70f || before>1.0f)
         die("ANDROID_3D_SCALE unexpected current scale %.9g",(double)before);
     uint32_t expected_w=(uint32_t)lroundf((float)ow*want),expected_h=(uint32_t)lroundf((float)oh*want);
@@ -389,7 +407,7 @@ static void android_scale3d_tick(void *return_address) {
     LOG("ANDROID_3D_SCALE_END before=%.3f after=%.3f internal=%ux%u duplicate=%ux%u output=%ux%u rebuild_ms=%.3f frame=%llu",(double)before,(double)*scale,sizes[0],sizes[1],sizes[2],sizes[3],sizes[4],sizes[5],(double)elapsed/1e6,(unsigned long long)dm_nvn_frame_count());
     if (*(uintptr_t *)(main->base+0x31b2528)!=renderer || *scale!=want || sizes[0]!=expected_w || sizes[1]!=expected_h || sizes[2]!=expected_w || sizes[3]!=expected_h || sizes[4]!=ow || sizes[5]!=oh)
         die("ANDROID_3D_SCALE resize verification failed: expected internal=%ux%u output=%ux%u",expected_w,expected_h,ow,oh);
-    atomic_store(&g_android_scale_cur,want); atomic_store(&g_android_scale_applied,1); rebuilding=0;
+    atomic_store(&g_android_scale_cur,want); rebuilding=0;
 }
 float dm_3d_scale_cur(void) { return atomic_load(&g_android_scale_cur); }
 void dm_3d_scale_feed(double interval_ms) { (void)interval_ms; }

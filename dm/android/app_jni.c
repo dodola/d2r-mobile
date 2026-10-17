@@ -4,6 +4,7 @@
 #include "services_fs.h"
 #include "romfs_image.h"
 #include "input_backend.h"
+#include "render_scale.h"
 #include <jni.h>
 #include <android/native_window_jni.h>
 #include <stdatomic.h>
@@ -43,14 +44,14 @@ static char report_file[PATH_MAX], report_temp[PATH_MAX];
 static void path(char *out, size_t cap, const char *base, const char *leaf) {
     if (snprintf(out, cap, "%s/%s", base, leaf) >= (int)cap) die("Android private path too long");
 }
-/* A fixed scale is an explicit diagnostic experiment. An absent marker keeps
+/* Shared with the quality-mode menu. An absent file keeps
  * the original 1.0 scale; reject truncated values, NaN/Inf, and extra tokens. */
 static int configure_render_scale(void) {
     char marker[PATH_MAX], text[64], value[32];
     path(marker,sizeof marker,port_root,"diagnostics/render-scale.txt");
     unsetenv("DM_3D_SCALE");
     FILE *f=fopen(marker,"r");
-    if (!f) return errno==ENOENT?0:errno;
+    if (!f) return errno==ENOENT?dm_android_render_scale_request(1.0f):errno;
     size_t n=fread(text,1,sizeof text-1,f);
     int error=ferror(f)?EIO:0;
     int trailing=fgetc(f);
@@ -59,6 +60,11 @@ static int configure_render_scale(void) {
     if (error) return error;
     if (trailing!=EOF || memchr(text,'\0',n)) return EINVAL;
     text[n]='\0';
+    /* Match the menu's decimal format; do not accept C hex floats or suffixes. */
+    for (size_t i=0;i<n;i++) {
+        unsigned char c=(unsigned char)text[i];
+        if (!isspace(c) && !isdigit(c) && c!='.' && c!='+' && c!='-' && c!='e' && c!='E') return EINVAL;
+    }
     char *start=text, *end;
     while (isspace((unsigned char)*start)) start++;
     errno=0; float scale=strtof(start,&end);
@@ -66,12 +72,14 @@ static int configure_render_scale(void) {
     while (isspace((unsigned char)*end)) end++;
     if (*end) return EINVAL;
     snprintf(value,sizeof value,"%.9g",(double)scale);
-    return setenv("DM_3D_SCALE",value,1)?errno:0;
+    if (setenv("DM_3D_SCALE",value,1)) return errno;
+    return dm_android_render_scale_request(scale);
 }
 static void status_text(char *text,size_t capacity) {
-    snprintf(text,capacity,"{\"phase\":\"%s\",\"sdk_ready\":%s,\"nnMain_entered\":%s,\"presented_frames\":%llu,\"returned\":%s,\"renderer_flags\":%d}",phase,
+    snprintf(text,capacity,"{\"phase\":\"%s\",\"sdk_ready\":%s,\"nnMain_entered\":%s,\"presented_frames\":%llu,\"returned\":%s,\"renderer_flags\":%d,\"render_scale\":%.4f,\"requested_render_scale\":%.4f}",phase,
         atomic_load(&sdk_ready)?"true":"false",atomic_load(&main_entered)?"true":"false",
-        (unsigned long long)atomic_load(&presented_frames),atomic_load(&returned)?"true":"false",dm_vk_attachment_applied_flags());
+        (unsigned long long)atomic_load(&presented_frames),atomic_load(&returned)?"true":"false",dm_vk_attachment_applied_flags(),
+        (double)dm_3d_scale_cur(),(double)dm_android_render_scale_requested());
 }
 static void persist_status(void) {
     if (!report_file[0]) return;
@@ -415,4 +423,8 @@ JNIEXPORT jstring JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeStatus(JNI
     pthread_mutex_lock(&state_lock);
     status_text(text,sizeof text);
     pthread_mutex_unlock(&state_lock);persist_status();return (*env)->NewStringUTF(env,text);
+}
+JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeRenderScale(JNIEnv *env,jclass cls,jfloat scale) {
+    (void)env;(void)cls;
+    return atomic_load(&configured)?dm_android_render_scale_request(scale):EAGAIN;
 }

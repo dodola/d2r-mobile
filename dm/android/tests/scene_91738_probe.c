@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,26 @@ static int read_at(uint64_t address,void *out,size_t size){
     return address>=4096&&address<UINT64_C(0x10000000000)&&pread(fd,out,size,(off_t)address)==(ssize_t)size;
 }
 static uint64_t pointer(uint64_t address){uint64_t p=0;return read_at(address,&p,8)?p:0;}
+static void renderer_snapshot(uint64_t base){
+    /* Independently pin scale arithmetic and the UI/final target dimension
+     * sources before interpreting this build-specific renderer layout. */
+    static const uint32_t arithmetic[]={0x1e230021,0x528cd488,0xbc686800,0x1e210801,0x529dcf0a,0x1e250028};
+    static const uint32_t ui[]={0x529f9808,0x8b080260,0xf9569268,0xf9400901,0xf9400b42,0x90000018};
+    static const uint32_t final[]={0x529fae08,0x8b080260,0xf9569268,0xf9400901,0xf9400b42};
+    uint32_t code[6];
+    if(!read_at(base+0x160d210,code,sizeof arithmetic)||memcmp(code,arithmetic,sizeof arithmetic)||
+       !read_at(base+0x160f188,code,sizeof ui)||memcmp(code,ui,sizeof ui)||
+       !read_at(base+0x160f250,code,sizeof final)||memcmp(code,final,sizeof final)){
+        printf("{\"readable\":false,\"version_verified\":false}");return;
+    }
+    uint64_t renderer=pointer(base+0x31b2528);float scale;uint32_t sizes[6];
+    if(!renderer||!read_at(renderer+0x66a4,&scale,sizeof scale)||!isfinite(scale)||
+       !read_at(renderer+0xee78,sizes,sizeof sizes)||renderer!=pointer(base+0x31b2528)){
+        printf("{\"readable\":false,\"version_verified\":true}");return;
+    }
+    printf("{\"readable\":true,\"version_verified\":true,\"pointer\":\"0x%" PRIx64 "\",\"scale\":%.9g,\"internal\":[%u,%u],\"duplicate_internal\":[%u,%u],\"output\":[%u,%u]}",
+           renderer,(double)scale,sizes[0],sizes[1],sizes[2],sizes[3],sizes[4],sizes[5]);
+}
 int main(int argc,char **argv){
     if(argc!=3)return 2;char *end;long pid=strtol(argv[1],&end,10);if(*end||pid<=0)return 2;
     uint64_t base=strtoull(argv[2],&end,0);if(*end||!base)return 2;
@@ -48,5 +69,5 @@ int main(int argc,char **argv){
             uint64_t next=pointer(unit+0x158);if(next==unit)break;unit=next;
         }
     }
-    printf("]}\n");close(fd);return 0;
+    printf("],\"renderer\":");renderer_snapshot(base);printf("}\n");close(fd);return 0;
 }
