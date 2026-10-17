@@ -1,5 +1,7 @@
 # 手柄 B / Android 返回键修复候选
 
+后续更正：本页原候选 APK 虽通过签名和对齐检查，但 DEX 漏了 manifest 的 InstallerActivity，不能用于普通桌面启动。已在 Issue #1 排查中修正打包流程；请改用 `ANDROID_ISSUE_1_HOUSE_CRASH_2026-10-17.zh-CN.md` 记录的新候选包。B/Back 源码修复仍保留。
+
 在 `main` 合入上游 `6edec84` 后处理用户反馈的“按手柄 B 闪退”。当前没有反馈现场的 logcat/tombstone，因此不能确认所有反馈都是同一根因，也尚未完成真机修复验证。
 
 代码检查确认：原 GameActivity 未接管 Android Back，默认处理会结束 Activity；nativeConfigure/nativeStart 是进程内单例，Activity 再次打开可能遇到 EALREADY。若设备/手柄将 B 映射或回退为 Android Back，这条路径会表现为退出游戏、随后无法重新打开。它与 native SIGSEGV 等真正进程崩溃需要现场日志区分。
