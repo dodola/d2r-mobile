@@ -357,6 +357,10 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     }
     if (dm_android_fs_ensure_directory(logs)) return errno?errno:EIO;
     path(log,sizeof log,logs,"game-startup.log");
+    char previous_log[PATH_MAX];path(previous_log,sizeof previous_log,logs,"game-startup.previous.log");
+    /* Preserve the failed session when a player relaunches after a crash.
+     * rename replaces the prior generation atomically, without copying a live log. */
+    if(rename(log,previous_log)&&errno!=ENOENT)return errno;
     char status_path[PATH_MAX]; path(status_path,sizeof status_path,logs,"status.json");
     if (unlink(status_path) && errno!=ENOENT) return errno;
     strcpy(report_file,status_path);path(report_temp,sizeof report_temp,logs,"status.native.new");

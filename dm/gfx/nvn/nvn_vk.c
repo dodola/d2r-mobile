@@ -98,6 +98,7 @@ static void hz_note(int kind);
 #include "nvn_vk_profile.h"
 #include "nvn_vk_pipeline_cache_key.h"
 #include "nvn_vk_sampler_policy.h"
+#include "nvn_vk_depth_bias.h"
 #include "nvn_vk_vertex.h"
 #include "nvn_vk_vertex_spv.h"
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *map; uint64_t size,allocation_size;VkBufferUsageFlags usage;int cached;uint64_t dirty; } VBuffer;
@@ -176,6 +177,7 @@ typedef struct {
     VkVertexInputAttributeDescription attributes[32];
     VkVertexInputBindingDescription bindings[16];
     uint32_t depth_test,depth_write,depth_compare,stencil_test;
+    NvnVkDepthBias depth_bias;
     VkStencilOpState stencil[2];
     VkPipelineColorBlendAttachmentState blend[8];
     uint32_t storage_bias[2][LIMIT_BINDINGS];
@@ -186,7 +188,7 @@ typedef struct { PsoKey key;Pso pso;uint64_t hash; } CachedPso;
 typedef struct {
     const prog_t *program; p_set_rt rt; va_st attributes[16]; vs_st streams[16]; NVNbufferRange vbuf[16];
     Range uniform[6][16],storage[6][16]; uint64_t tex[6][128],samp[6][128],img[6][32];
-    color_st color; chmask_st mask; blend_st blend[8]; poly_st polygon; ds_st ds; ms_st ms;
+    color_st color; chmask_st mask; blend_st blend[8]; poly_st polygon; p_poly_offset polygon_offset; ds_st ds; ms_st ms;
     VkViewport viewport; VkRect2D scissor; int scissor_set; float blend_color[4]; int64_t copy_stride,copy_image_stride;
     const dpool_t *texture_pool,*sampler_pool; Range scratch; uint32_t stencil_compare[2],stencil_write[2],stencil_ref[2];
 } ReplayState;
@@ -515,6 +517,8 @@ static void backend_init(void) {
     enabled.samplerAnisotropy=available.samplerAnisotropy;
     enabled.imageCubeArray=available.imageCubeArray;
     enabled.occlusionQueryPrecise=available.occlusionQueryPrecise;
+    enabled.depthBiasClamp=available.depthBiasClamp;
+    fprintf(stderr,"[nvn-vulkan] DEPTH_BIAS_CAPS clamp_supported=%u clamp_enabled=%u\n",available.depthBiasClamp,enabled.depthBiasClamp);
     if(!available.independentBlend)die("NVN independent attachment blending unavailable",0);
     enabled.independentBlend=VK_TRUE;
     enabled.fragmentStoresAndAtomics=available.fragmentStoresAndAtomics;
@@ -536,7 +540,7 @@ static void backend_init(void) {
         enabled.shaderImageGatherExtended,enabled.samplerAnisotropy,enabled.imageCubeArray,enabled.occlusionQueryPrecise,
         enabled.independentBlend,enabled.fragmentStoresAndAtomics,enabled.vertexPipelineStoresAndAtomics,
         enabled.shaderClipDistance,enabled.shaderCullDistance,draw_parameters.shaderDrawParameters,G.feedback_layout,
-        enabled.pipelineStatisticsQuery,enabled.fullDrawIndexUint32};
+        enabled.pipelineStatisticsQuery,enabled.fullDrawIndexUint32,enabled.depthBiasClamp};
     for(unsigned i=0;i<sizeof cache_features/sizeof cache_features[0];i++)
         if(cache_features[i])G.pipeline_cache_key.enabled_features|=1u<<i;
     G.precise_occlusion=enabled.occlusionQueryPrecise;
@@ -2619,7 +2623,15 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     int upper_left=atomic_load(&G.window_origin)==NVN_WINDOW_ORIGIN_MODE_UPPER_LEFT;
     if(G.state.ms.samples>1 || G.state.ms.a2c || G.state.ms.cov_mod || G.state.ms.sl_en)die("multisample semantics",G.state.ms.samples);
     if(G.state.color.logic_op!=NVN_LOGIC_OP_COPY || G.state.color.alpha_func!=NVN_ALPHA_FUNC_ALWAYS)die("logic/alpha test adaptation",G.state.color.logic_op);
-    if(G.state.polygon.mode!=NVN_POLYGON_MODE_FILL || G.state.polygon.offset_en)die("polygon mode/offset",G.state.polygon.mode);
+    if(G.state.polygon.mode!=NVN_POLYGON_MODE_FILL)die("polygon mode",G.state.polygon.mode);
+    NvnVkDepthBias depth_bias;
+    int bias_result=nvn_vk_depth_bias(G.state.polygon.offset_en,G.state.polygon_offset.factor,
+        G.state.polygon_offset.units,G.state.polygon_offset.clamp,G.enabled_features.depthBiasClamp,&depth_bias);
+    if(bias_result!=NVN_VK_DEPTH_BIAS_OK){
+        fprintf(stderr,"[nvn-vulkan] DEPTH_BIAS_REJECT enables=%u factor=%g units=%g clamp=%g clamp_enabled=%u\n",
+            G.state.polygon.offset_en,G.state.polygon_offset.factor,G.state.polygon_offset.units,G.state.polygon_offset.clamp,G.enabled_features.depthBiasClamp);
+        die("polygon offset depth bias capability/parameters",bias_result);
+    }
     /* A zero-color pass may still run fragment discard, depth export or
      * storage side effects. Only a program with no fragment stage omits it. */
     VShader *vs=program_stage(0),*ps=program_stage_optional(1);
@@ -2739,7 +2751,9 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
           G.state.polygon.cull==NVN_FACE_FRONT_AND_BACK?VK_CULL_MODE_FRONT_AND_BACK:VK_CULL_MODE_NONE,
        // An upper-left NVN window retains NDC y upwards; a negative Vulkan
        // viewport restores that mapping. Facing follows the same inversion.
-       .frontFace=(G.state.polygon.front==NVN_FRONT_FACE_CCW)==upper_left?VK_FRONT_FACE_COUNTER_CLOCKWISE:VK_FRONT_FACE_CLOCKWISE,.lineWidth=1};
+        .frontFace=(G.state.polygon.front==NVN_FRONT_FACE_CCW)==upper_left?VK_FRONT_FACE_COUNTER_CLOCKWISE:VK_FRONT_FACE_CLOCKWISE,.lineWidth=1,
+        .depthBiasEnable=depth_bias.enabled,.depthBiasConstantFactor=depth_bias.constant,
+        .depthBiasSlopeFactor=depth_bias.slope,.depthBiasClamp=depth_bias.clamp};
     VkPipelineMultisampleStateCreateInfo ms={.sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT};
     VkPipelineDepthStencilStateCreateInfo ds={.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,.depthTestEnable=G.state.ds.dt,
         .depthWriteEnable=G.state.ds.dw,.depthCompareOp=(VkCompareOp)(G.state.ds.df-1),.stencilTestEnable=G.state.ds.st};
@@ -2772,6 +2786,7 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     key.shader[0]=(uint32_t)(vs-G.shaders)+1;key.shader[1]=ps?(uint32_t)(ps-G.shaders)+1:0;
     memcpy(key.storage_bias[0],S.storage_bias[0],sizeof key.storage_bias[0]);if(ps)memcpy(key.storage_bias[1],S.storage_bias[1],sizeof key.storage_bias[1]);
     key.flags=gp.flags;key.topology=ai.topology;key.cull=raster.cullMode;key.front=raster.frontFace;
+    key.depth_bias=depth_bias;
     key.vertex_split=vertex_plan.split;
     for(unsigned l=0;l<16;l++){if(vertex_plan.convert[l]==1)key.vertex_unsigned|=1u<<l;if(vertex_plan.convert[l]==2)key.vertex_signed|=1u<<l;}
     key.attribute_count=nattributes;key.binding_count=nbindings;key.color_count=cb.attachmentCount;
@@ -3199,9 +3214,7 @@ static void execute(const uint8_t *p,unsigned depth) {
             if(G.barrier_pass_elide&&S.in_pass&&!G.pass_side_effects){G.barrier_kept[bits&255]++;break;}
             if(!S.in_pass)G.barrier_nopass++;else G.barrier_sidefx++;
             all_barrier_soft();break;} /* Full barrier is stronger than every supported NVN barrier bit. */
-        case OP_POLY_OFFSET:{payload_check(&h,sizeof(p_poly_offset));const p_poly_offset *v=(const void *)a;
-            if(v->factor || v->units || v->clamp)die("nonzero polygon offset requires Vulkan pipeline bias",0);
-            break;}
+        case OP_POLY_OFFSET:payload_check(&h,sizeof(p_poly_offset));memcpy(&G.state.polygon_offset,a,sizeof(p_poly_offset));break;
         case OP_WAIT_EVENT:{uint64_t address;uint32_t mode,value;payload_check(&h,16);
             memcpy(&address,a,8);memcpy(&mode,a+8,4);memcpy(&value,a+12,4);
             if(!pool_find(address,4,NULL) || address%4 || mode>1)die("event wait storage/mode",address);
