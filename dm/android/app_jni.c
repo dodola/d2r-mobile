@@ -397,7 +397,7 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeSurface(JNIEn
 JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeTouch(JNIEnv *env,jclass cls,jintArray ids,jfloatArray xs,jfloatArray ys,jboolean cancelled) {
     (void)cls;
     if (!atomic_load(&input_bound)) return ENODEV;
-    if (cancelled) {dm_android_input_cancel();return 0;}
+    if (cancelled) {dm_android_input_cancel_touch();return 0;}
     if (!ids || !xs || !ys) return EINVAL;
     jsize n=(*env)->GetArrayLength(env,ids);
     if(n>16 || (*env)->GetArrayLength(env,xs)!=n || (*env)->GetArrayLength(env,ys)!=n)return EINVAL;
@@ -423,6 +423,12 @@ JNIEXPORT jstring JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeStatus(JNI
     pthread_mutex_lock(&state_lock);
     status_text(text,sizeof text);
     pthread_mutex_unlock(&state_lock);persist_status();return (*env)->NewStringUTF(env,text);
+}
+JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeControllerButtons(JNIEnv *env,jclass cls,jlong buttons) {
+    (void)env;(void)cls;return dm_android_input_publish_controller_buttons((uint64_t)buttons);
+}
+JNIEXPORT void JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeControllerCancel(JNIEnv *env,jclass cls,jlong remaining_buttons) {
+    (void)env;(void)cls;dm_android_input_cancel_controller((uint64_t)remaining_buttons);
 }
 JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeRenderScale(JNIEnv *env,jclass cls,jfloat scale) {
     (void)env;(void)cls;

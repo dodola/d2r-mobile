@@ -15,6 +15,7 @@ static char input_source[128];
 static dm_android_input_status status;
 static struct { int active; uint32_t id; } pointer_slots[16];
 static struct { uint64_t buttons, pressed; int32_t lx, ly, rx, ry; } actions;
+static uint64_t controller_buttons,controller_pressed;
 static int32_t sampled_rx, sampled_ry;
 static uint64_t last_stick_activity;
 int touch_fill(void *out, uint64_t time_ns);
@@ -75,10 +76,15 @@ int dm_android_input_publish_touch(const dm_android_pointer *points, size_t coun
     dm_touch_set(touches, (int)count); status.touch_publications++;
     pthread_mutex_unlock(&input_lock); return 0;
 }
-void dm_android_input_cancel(void) {
-    pthread_mutex_lock(&input_lock);
+static void cancel_touch_locked(void) {
     memset(pointer_slots, 0, sizeof pointer_slots); memset(&actions, 0, sizeof actions);
     dm_touch_cancel();
+}
+void dm_android_input_cancel_touch(void) {
+    pthread_mutex_lock(&input_lock);cancel_touch_locked();pthread_mutex_unlock(&input_lock);
+}
+void dm_android_input_cancel(void) {
+    pthread_mutex_lock(&input_lock);cancel_touch_locked();controller_buttons=controller_pressed=0;
     pthread_mutex_unlock(&input_lock);
 }
 int dm_android_input_initialize_touch(void) {
@@ -129,13 +135,31 @@ int dm_android_input_publish_actions(uint64_t buttons, int32_t lx, int32_t ly, i
     actions.lx = lx; actions.ly = ly; actions.rx = rx; actions.ry = ry; status.action_publications++;
     pthread_mutex_unlock(&input_lock); return 0;
 }
+int dm_android_input_cancel_controller(uint64_t remaining_buttons) {
+    if(remaining_buttons&~0xffffULL)return EINVAL;
+    pthread_mutex_lock(&input_lock);
+    controller_buttons=remaining_buttons;controller_pressed&=controller_buttons;
+    pthread_mutex_unlock(&input_lock);
+    return 0;
+}
+int dm_android_input_publish_controller_buttons(uint64_t buttons) {
+    if(buttons&~0xffffULL)return EINVAL;
+    pthread_mutex_lock(&input_lock);
+    if(!status.bound || !configuration.logical_npad_style || (buttons && !ready_locked())) {
+        pthread_mutex_unlock(&input_lock);return ENODEV;
+    }
+    controller_pressed|=buttons&~controller_buttons;
+    controller_buttons=buttons;status.action_publications++;
+    pthread_mutex_unlock(&input_lock);return 0;
+}
 int dm_android_input_read_npad(dm_android_npad_state *out, uint32_t id, uint32_t style) {
     if (!out || !valid_id(id) || (style != 1 && style != 2)) return EINVAL;
     pthread_mutex_lock(&input_lock);
     if (!status.npad_initialized) { pthread_mutex_unlock(&input_lock); return ENODEV; }
     memset(out, 0, sizeof *out); out->sampling = (int64_t)++status.npad_samples;
     if (style_locked(id) & style) {
-        out->buttons = actions.buttons | actions.pressed; actions.pressed = 0;
+        out->buttons = actions.buttons | actions.pressed | controller_buttons | controller_pressed;
+        actions.pressed = controller_pressed = 0;
         out->lx = actions.lx; out->ly = actions.ly; out->rx = actions.rx; out->ry = actions.ry;
         out->attributes = 1; sampled_rx = out->rx; sampled_ry = out->ry;
         if (out->lx || out->ly) last_stick_activity = now_ns();

@@ -31,7 +31,12 @@ typedef struct {
 int dm_android_input_bind(const dm_android_input_config *config);
 int dm_android_input_publish_touch(const dm_android_pointer *points, size_t count);
 void dm_android_input_cancel(void);
+void dm_android_input_cancel_touch(void);
 int dm_android_input_publish_actions(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
+// Independent controller/Back channel; touch releases do not erase held keys.
+int dm_android_input_publish_controller_buttons(uint64_t buttons);
+// Atomically cancel removed sources, retaining remaining held keys without a new edge.
+int dm_android_input_cancel_controller(uint64_t remaining_buttons);
 int dm_android_input_initialize_touch(void);
 int dm_android_input_initialize_npad(void);
 int dm_android_input_set_ids(const uint32_t *ids, size_t count);

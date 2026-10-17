@@ -33,6 +33,6 @@ final class ShellTextInputDialog {
             input.requestFocus();dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE|WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);});
         input.setOnEditorActionListener((v,action,event)->{if(action==EditorInfo.IME_ACTION_DONE){accept.run();return true;}return false;});
         dialog.setOnDismissListener(d->{if(!completed[0]){completed[0]=true;result.finish(false,"");}});
-        dialog.show();dialog.getWindow().setBackgroundDrawable(new ColorDrawable(0xff000000|TouchControlsView.INK));return dialog;
+        GameActivity.installDialogBack(dialog);dialog.show();dialog.getWindow().setBackgroundDrawable(new ColorDrawable(0xff000000|TouchControlsView.INK));return dialog;
     }
 }

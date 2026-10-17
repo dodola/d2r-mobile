@@ -8,6 +8,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.graphics.Typeface;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -32,6 +33,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static native int nativeConfigure(String files, String locale,boolean touchRoute);
     private static native int nativeTouch(int[] ids,float[] xs,float[] ys,boolean cancelled);
     private static native int nativeActions(long buttons,int lx,int ly,int rx,int ry);
+    private static native int nativeControllerButtons(long buttons);
+    private static native void nativeControllerCancel(long remainingButtons);
     private static native int nativeSurface(Surface surface,int width,int height,float density,float hz,int focus);
     private static native int nativeStart();
     private static native String nativeStatus();
@@ -59,8 +62,17 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private boolean prepared, configured, surfaceReady, launched, resumed, failed;
     private int width,height;
     private long actionButtons;
+    private final BackButtonState backButtons=new BackButtonState();
+    private android.hardware.input.InputManager inputManager;
+    private final android.hardware.input.InputManager.InputDeviceListener deviceListener=new android.hardware.input.InputManager.InputDeviceListener(){
+        @Override public void onInputDeviceAdded(int id){}
+        @Override public void onInputDeviceChanged(int id){}
+        @Override public void onInputDeviceRemoved(int id){if(backButtons.removeDevice(id)&&configured)nativeControllerCancel(canSendBack()?backButtons.buttons():0);}
+    };
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        inputManager=(android.hardware.input.InputManager)getSystemService(INPUT_SERVICE);
+        if(inputManager!=null)inputManager.registerInputDeviceListener(deviceListener,ui);
         surfaceThread.start();surfaceWorker=new Handler(surfaceThread.getLooper());
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|
@@ -198,6 +210,52 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         });
     }
     private void closeRendererSettings(){if(rendererSettings!=null){rendererSettings.dismiss();rendererSettings=null;}}
+    static void installDialogBack(android.app.Dialog dialog){
+        dialog.setOnKeyListener((d,key,event)->{
+            if(key!=KeyEvent.KEYCODE_BUTTON_B)return false;
+            if(event.getAction()==KeyEvent.ACTION_UP&&!event.isCanceled())dialog.dismiss();
+            return true;
+        });
+    }
+    private boolean canSendBack(){return configured&&resumed&&inputReady&&!failed&&!destroyed;}
+    private void clearBackButtons(){backButtons.clear();if(configured)nativeControllerCancel(0);}
+    private void publishBackButtons(){
+        if(configured){int rc=nativeControllerButtons(canSendBack()?backButtons.buttons():0);
+            if(rc!=0)android.util.Log.w("D2RInput","Back button publication unavailable: "+rc);}
+    }
+    @Override public boolean dispatchKeyEvent(KeyEvent event){
+        int key=event.getKeyCode();
+        if(!BackButtonState.handles(key))return super.dispatchKeyEvent(event);
+        if(rendererSettings!=null||keyboardDialog!=null){
+            if(event.getAction()==KeyEvent.ACTION_UP&&!event.isCanceled())requestGameBack();
+            return true;
+        }
+        if(event.getAction()==KeyEvent.ACTION_DOWN||event.getAction()==KeyEvent.ACTION_UP){
+            if(event.isCanceled()){
+                if(backButtons.cancel(event.getDeviceId(),key)&&configured)nativeControllerCancel(canSendBack()?backButtons.buttons():0);
+                return true;
+            }
+            boolean down=event.getAction()==KeyEvent.ACTION_DOWN&&canSendBack();
+            backButtons.update(event.getDeviceId(),key,down);
+            publishBackButtons();
+        }
+        return true;
+    }
+    private void requestGameBack(){
+        if(rendererSettings!=null){closeRendererSettings();return;}
+        if(keyboardDialog!=null){keyboardDialog.dismiss();return;}
+        if(canSendBack()){
+            // Native latches a gesture shorter than one guest input sample;
+            // releasing the gesture preserves a physically held B button.
+            nativeControllerButtons(2);nativeControllerButtons(backButtons.buttons());
+        }
+    }
+    // The target-33 shell uses legacy Back dispatch (including system gestures).
+    @Override public void onBackPressed(){requestGameBack();}
+    @Override public void onWindowFocusChanged(boolean focused){
+        super.onWindowFocusChanged(focused);
+        if(!focused)clearBackButtons();
+    }
     private void fail(String title,Exception error){closeRendererSettings();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}failed=true;status.setVisibility(View.VISIBLE);status.setText(title+"\n"+error.getMessage());}
     private final Runnable poll=new Runnable(){public void run(){
         if(!launched||failed)return;
@@ -218,9 +276,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         }catch(Exception e){fail("无法读取游戏状态",e);}ui.postDelayed(this,500);
     }};
     @Override public void onResume(){super.onResume();resumed=true;fpsSampler.reset();nativeKeyboardReady(true);configureAndStart();}
-    @Override public void onPause(){closeRendererSettings();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}resumed=false;fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;if(touchControls!=null)touchControls.cancel();if(configured)nativeActions(0,0,0,0,0);if(configured&&surfaceReady)publishSurface();super.onPause();}
+    @Override public void onPause(){clearBackButtons();closeRendererSettings();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}resumed=false;fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;if(touchControls!=null)touchControls.cancel();if(configured)nativeActions(0,0,0,0,0);if(configured&&surfaceReady)publishSurface();super.onPause();}
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}
-    @Override public void onDestroy(){closeRendererSettings();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);surfaceThread.quitSafely();super.onDestroy();}
+    @Override public void onDestroy(){if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearBackButtons();closeRendererSettings();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);surfaceThread.quitSafely();super.onDestroy();}
 }

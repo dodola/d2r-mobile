@@ -43,7 +43,7 @@ static void cancel(void) {
     if(ready)dm_tc_cancel_all(&controls);
     memset(slots,0,sizeof slots);pulse_epoch=0;published=0;
     access_slot=-1;
-    dm_android_input_cancel();
+    dm_android_input_cancel_touch();
 }
 static void tick(void) {
     if(!ready || !enabled)return;
