@@ -837,6 +837,7 @@ NVN(nvnCommandBufferWaitEvent, void, NVNcommandBuffer *c, const NVNevent *e, NVN
     if(nvn_event_trace_enabled())fprintf(stderr,"[nvn-event] WAIT_RECORD record=%p address=%p mode=%u value=%u\n",(void *)((uint8_t *)r-sizeof(op_hdr)),(void *)v->val,(unsigned)mode,value);
 }
 #endif
+NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) { REC(c, OP_COPY_IMAGE_STRIDE, p_copy_stride)->stride = st; }
 NVN(nvnCommandBufferSetBlendColor, void, NVNcommandBuffer *c, const float *v) { memcpy(REC(c, OP_BLEND_COLOR, p_blend_color)->rgba, v, 16); }
 
 // ---------- 状态对象：就地打包（nvn_obj.h） ----------

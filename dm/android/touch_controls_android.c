@@ -62,7 +62,7 @@ static void tick(void) {
 }
 JNIEXPORT void JNICALL Java_org_d2r_binaryprobe_TouchControlsView_nativeResize(JNIEnv *env,jclass cls,jfloat w,jfloat h,jfloat left,jfloat right) {
     (void)env;(void)cls;if(!isfinite(w)||!isfinite(h)||w<=0||h<=0)return;
-    pthread_mutex_lock(&lock);dm_tc_set_tall_scale(1);dm_tc_set_safe_insets(left,right);
+    pthread_mutex_lock(&lock);dm_tc_set_tall_scale(fminf(w,h)>=600.0f);dm_tc_set_safe_insets(left,right);
     if(ready){cancel();dm_tc_resize(&controls,w,h);}else{dm_tc_init(&controls,w,h);ready=1;}
     restrict_layout();pthread_mutex_unlock(&lock);
 }
