@@ -795,6 +795,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_STATS","1",1);
     /* Diagnostic only: shader dump and texture LOD bias A/B. Absent markers leave both off. */
     /* Render submission slots in flight (1 = previous behaviour). */
+    unsetenv("DM_DIAG_DUMP_FRAME");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/dump-frame.txt");
+    {FILE *df=fopen(driver_option,"r");if(df){char dv[24]={0};size_t dn=fread(dv,1,23,df);fclose(df);if(dn)setenv("DM_DIAG_DUMP_FRAME",dv,1);}}
     unsetenv("DM_RENDER_SLOTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/render-slots.txt");
     {FILE *rf=fopen(driver_option,"r");if(rf){char rv[8]={0};size_t rn=fread(rv,1,7,rf);fclose(rf);if(rn)setenv("DM_RENDER_SLOTS",rv,1);}}

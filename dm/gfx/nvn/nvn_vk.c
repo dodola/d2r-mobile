@@ -229,7 +229,7 @@ static struct {
     VkFormatProperties format_properties[256];uint8_t format_known[256];
     int depth_order,depth_input_experiment,depth_input_profile,depth_input_calibrated_ties,fragment_stores;
     VkPipelineCache pipeline_cache;
-    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
+    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts,dump_frame;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
     uint64_t profile_slot_wait_ns,profile_drain_wait_ns,profile_completion_wait_ns,profile_completion_waits;
     VBuffer support,zero,default_vertex; VPool pools[LIMIT_POOLS]; int npool;
     PoolUpload pool_uploads[UPLOAD_BUCKETS][UPLOAD_WAYS];uint64_t upload_age;
@@ -697,6 +697,7 @@ static void backend_init(void) {
     G.event_trace=getenv("DM_EVENT_TRACE")!=NULL;
     G.current_submission=&G.submission_slot;
     {const char *rs=getenv("DM_RENDER_SLOTS");int n=rs?atoi(rs):1;G.render_slots_n=n<1?1:n>4?4:n;G.render_ring_next=0;
+     {const char *df=getenv("DM_DIAG_DUMP_FRAME");G.dump_frame=df?(uint64_t)strtoull(df,NULL,10):0;}
      G.submission_slot.slot_index=0;for(int i=1;i<4;i++)G.extra_render_slots[i-1].slot_index=i;G.submission_slot2.slot_index=-1;
      fprintf(stderr,"[nvn-vulkan] RENDER_SLOTS n=%d\n",G.render_slots_n);}
     S.desc_entries=calloc(DESC_ENTRIES,sizeof(*S.desc_entries));S.desc_arena=malloc(DESC_ARENA);G.control_cache=calloc(CONTROL_CACHE,sizeof(*G.control_cache));
@@ -980,9 +981,32 @@ static void dsmix_note(void){uint8_t dt=G.state.ds.dt,dw=G.state.ds.dw,df=G.stat
     if(ndsmix<6){dsmix[ndsmix].dt=dt;dsmix[ndsmix].dw=dw;dsmix[ndsmix].df=df;dsmix[ndsmix].st=st;dsmix[ndsmix].sf=sf;dsmix[ndsmix].fo=fo;dsmix[ndsmix].po=po;dsmix[ndsmix].zo=zo;dsmix[ndsmix].wm=wm;dsmix[ndsmix].ref=ref;dsmix[ndsmix].n=1;ndsmix++;}}
 static void dsmix_print_reset(void){fprintf(stderr," dload=%d dstore=%d ds=",dbg_dload,dbg_dstore);
     for(int i=0;i<ndsmix;i++)fprintf(stderr,"[t%u w%u f%u s%u cmp%u ops%u/%u/%u wm%02x ref%u x%u]",dsmix[i].dt,dsmix[i].dw,dsmix[i].df,dsmix[i].st,dsmix[i].sf,dsmix[i].fo,dsmix[i].po,dsmix[i].zo,dsmix[i].wm,dsmix[i].ref,dsmix[i].n);ndsmix=0;}
+/* Diagnostic: DM_DIAG_DUMP_FRAME=N copies the first colour attachment of every pass in presented frame N to
+ * DM_FRAME_DIR/pass-<index>-<w>x<h>-fmt<vk>-bpp<n>-s<serial>.bin so two drivers can be diffed pass by pass. */
+static VTexture *texture_get(const tex_t *source,int upload);
+static VkImageAspectFlags aspect(VkFormat f);
+static const tex_t *dbg_dump_src;static uint32_t dbg_dump_level,dbg_dump_w,dbg_dump_h,dbg_dump_idx;static uint64_t dbg_dump_frame_seen;
+static void dump_pass_color(void){
+    const tex_t *src=dbg_dump_src;dbg_dump_src=NULL;if(!src||S.ntrace_captures>=500)return;
+    VTexture *t=texture_get(src,0);uint32_t w=dbg_dump_w,h=dbg_dump_h,lvl=dbg_dump_level;
+    VkImageAspectFlags all=aspect(t->format),plane=(all&VK_IMAGE_ASPECT_COLOR_BIT)?VK_IMAGE_ASPECT_COLOR_BIT:VK_IMAGE_ASPECT_DEPTH_BIT;
+    uint32_t texel=(plane==VK_IMAGE_ASPECT_COLOR_BIT)?(uint32_t)t->bpp:4;uint64_t bytes=(uint64_t)w*h*texel;
+    VBuffer *b=temporary(bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT);VkImageLayout lay=t->layout;
+    VkImageSubresourceRange rg={all,lvl,1,0,1};
+    VkImageMemoryBarrier br={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT,.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT,
+        .oldLayout=lay,.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.image=t->image,.subresourceRange=rg};
+    vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,NULL,0,NULL,1,&br);
+    VkBufferImageCopy cp={.imageSubresource={plane,lvl,0,1},.imageExtent={w,h,1}};
+    vkCmdCopyImageToBuffer(S.command,t->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,b->b,1,&cp);
+    br.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;br.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+    br.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;br.newLayout=lay;
+    vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,NULL,0,NULL,1,&br);
+    char name[128];snprintf(name,sizeof name,"pass-%03u-%ux%u-fmt%d-bpp%d-s%llu",dbg_dump_idx++,w,h,(int)t->format,(int)texel,(unsigned long long)src->serial);
+    trace_capture_queue(b,bytes,name);
+}
 static void pass_end_at(int line) { if(S.in_pass) { ghost_flush();G.pass_end_sites[line&4095]++;if(G.profile_detail&&G.profile_frames==30){fprintf(stderr,"[nvn-vulkan] PASSLOG seg=%u rt=%s ps=%.6s n=%d bb=%#x uses=%s draws=%llu end_line=%d",G.seg_index,G.pass_desc,G.last_ps,G.last_count,G.last_barrier_bits,G.last_uses,(unsigned long long)(G.draws-G.pass_draws0),line);dsmix_print_reset();fputc(10,stderr);}else ndsmix=0;occlusion_end();
     if(S.pt_open&&S.pass_stats)vkCmdEndQuery(S.command,S.pass_stats,S.npt);
-    vkCmdEndRenderPass(S.command); S.in_pass=0;
+    vkCmdEndRenderPass(S.command); S.in_pass=0;if(dbg_dump_src)dump_pass_color();
     if(S.pt_open){S.pt_open=0;vkCmdWriteTimestamp(S.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,S.pass_ts,S.pt[S.npt].q0+1);S.pt[S.npt].q1=S.pt[S.npt].q0+1;S.pt[S.npt].draws=G.draws-S.pt_draws0;S.npt++;} } }
 #define pass_end() pass_end_at(__LINE__)
 static void query_reset(VkQueryPool pool,uint32_t first,uint32_t count) {
@@ -3262,6 +3286,8 @@ static VkRenderPass render_begin(void) {
            .pAttachments=views,.width=width,.height=height,.layers=1};CHECK(vkCreateFramebuffer(G.device,&fi,NULL,&S.framebuffers[index]));
         S.framebuffer_keys[index]=key;G.profile_framebuffer_misses++;G.resource_passes++;
     }else {G.profile_framebuffer_hits++;G.resource_hits++;}
+    if(G.dump_frame&&G.present_count+1==G.dump_frame&&(rt->color[0]||rt->depth)){if(dbg_dump_frame_seen!=G.dump_frame){dbg_dump_frame_seen=G.dump_frame;dbg_dump_idx=0;}
+        const tex_t *dsrc=rt->color[0]?rt->color[0]:rt->depth;VkImageSubresourceRange dr=rt->color[0]?attachment_range(rt->color[0],rt->has_cview[0]?&rt->cview[0]:NULL):attachment_range(rt->depth,rt->has_dview?&rt->dview:NULL);dbg_dump_src=dsrc;dbg_dump_level=dr.baseMipLevel;dbg_dump_w=width;dbg_dump_h=height;}
     S.active_pass=index;G.pass_draws0=G.draws;{const tex_t *f0=rt->n>0?rt->color[0]:rt->depth;snprintf(G.pass_desc,sizeof G.pass_desc,"%ux%u c%d d%d s%llu",f0?f0->d.width:0,f0?f0->d.height:0,rt->n,rt->depth!=NULL,(unsigned long long)(f0?f0->serial:0));}
     VkRenderPassBeginInfo begin={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,.renderPass=S.passes[index],.framebuffer=S.framebuffers[index],
        .renderArea={{0,0},{(G.diag_shape&4)&&width>16?16:width,(G.diag_shape&4)&&height>16?16:height}},.clearValueCount=n,.pClearValues=clears};

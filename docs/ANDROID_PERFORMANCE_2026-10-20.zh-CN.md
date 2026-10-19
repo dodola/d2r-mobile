@@ -88,6 +88,18 @@ Eden 的着色器路径同样没有快速数学开关，最终优化交给驱动
 - 启用方式（需先在游戏内验证）：`adb shell run-as org.d2r.newprobe sh -c "printf 2 > files/d2r-mobile/diagnostics/render-slots.txt"`，退回删除该文件。
 - 如果游戏内出现闪烁、贴图错乱或闪退，先写入 `render-slots.txt` 内容 `1` 退回原行为，再对比。
 
+## 渲染正确性：系统驱动的雾气伪影（未解决，已定位到 pass 008）
+
+角色选择场景里，系统 Adreno 驱动会画出块状白色马赛克（雾气区域），Turnip 上没有。量化指标：裁剪区内亮度大于 120 的像素占比，系统驱动 5–13%，Turnip 约 0.55%。
+
+**排除项**（开关打开后伪影仍在）：存储省略、清除合并、`subres`、采样拷贝缓存、资源缓存、描述符缓存、屏障省略、`storage-bias`、`temp-pool`、`wait-elision`、`wb-stage`、`async-commit`、`dirty-uploads`、`cpu-uniform-snapshot`、`command-state-cache`、`driver-table-reuse`、`control-cache`；跳过 12 个热点像素着色器；`precise-sync` 关闭时变成随机彩色噪点（说明读到未定义数据）。深度比较采样器对 D16 阴影图改用最近邻也没有效果（该改动已撤回）。
+
+**定位方法**：`diagnostics/dump-frame.txt` 写入帧号 N，每个颜色/深度 pass 结束后把第一个附件拷贝到诊断目录 `pass-<序号>-<宽>x<高>-fmt<格式>-bpp<n>-s<serial>.bin`。两种驱动各抓同一帧，用 `dm/tools/pass_dump_diff.py` 逐 pass 对比。
+
+**结果**：54 个 pass 里，所有深度 pass（包括主深度缓冲 serial 29）两边完全一致；**第一个分歧的是 pass 008（640×360，R16F，serial 58，像素着色器 `60f3906f2280721c`）**，输入的主深度相同，输出在角色区域不同（系统驱动上角色轮廓是纯白，Turnip 上有明暗层次）。该着色器采样 4 张纹理：serial 29（主深度）、46（256×256 D16，4 层，级联阴影图，带比较）、56 和 57（3D），另外有 46 次 texel buffer fetch（常量数据，经过“无采样器 buffer 适配”和 `STORAGE_BIAS_MODULE` 改写）。下游的 pass 024、033、035（RGBA16F，serial 28）把差异放大，最终形成雾气伪影。
+
+**下一步**：对 pass 008 的输入逐个替换/检查（texel buffer 的视图范围与对齐、3D 纹理的格式与视图、4 层阴影图的数组视图），并用 `shader-override` 逐段裁剪该着色器确认是编译器缺陷还是我们的适配问题。
+
 ## 后续
 
 - 剩余 GPU 空闲约 6 ms/帧，下一个瓶颈是彩色 pass 本身（片元受限）。
