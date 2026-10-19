@@ -694,7 +694,7 @@ static void backend_init(void) {
     {const char *coalesce=getenv("DM_WRITEBACK_COALESCE");G.enable_writeback_coalesce=coalesce&&atoi(coalesce)!=0;}
     G.event_trace=getenv("DM_EVENT_TRACE")!=NULL;
     G.current_submission=&G.submission_slot;
-    {const char *rs=getenv("DM_RENDER_SLOTS");int n=rs?atoi(rs):2;G.render_slots_n=n<1?1:n>4?4:n;G.render_ring_next=0;
+    {const char *rs=getenv("DM_RENDER_SLOTS");int n=rs?atoi(rs):1;G.render_slots_n=n<1?1:n>4?4:n;G.render_ring_next=0;
      fprintf(stderr,"[nvn-vulkan] RENDER_SLOTS n=%d\n",G.render_slots_n);}
     S.desc_entries=calloc(DESC_ENTRIES,sizeof(*S.desc_entries));S.desc_arena=malloc(DESC_ARENA);G.control_cache=calloc(CONTROL_CACHE,sizeof(*G.control_cache));
     if(!S.desc_entries||!S.desc_arena||!G.control_cache)die("descriptor/control cache allocation",0);
