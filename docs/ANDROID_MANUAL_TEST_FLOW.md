@@ -7,21 +7,21 @@
 当前候选包：
 
 ```text
-D:\AndroidSwitch\analysis\parity-20261019\d2r-new\test-apk-strict-v8\d2r-94012-test.apk
+D:\AndroidSwitch\analysis\parity-20261019\d2r-new\test-apk-driver-v10\d2r-94012-driver-v10.apk
 ```
 
 ```text
 APK SHA-256:
-bd8865b1d90baa0c2919c3cfcfc075e1d63f71613c433e3f1d85934ce94b802b
+c9482296691bd25528d3f1bf94390e4273bd492fbb2ff03e49ef38e7d51566ec
 
 native SHA-256:
-6c412572ff57c60ad212d76b3a984d45396a61d72386a7367b7fc68a2297f12c
+90d44db654fb519830b5c66dd46516c7e62be7188eaffbe5db879a8b10d93322
 
 游戏模块 Build ID:
 db0507f36b84200ac05f75d76ed5026f
 ```
 
-该包使用 `GameActivity` 直接启动游戏，不包含离线安装器。设备上已有的 `files/game.romfs`、模块和存档会继续使用。
+该包使用 `GameActivity` 直接启动游戏，并包含 Turnip sysmem 驱动、命令状态缓存和 Turnip 管线缓存种子。设备上已有的 `files/game.romfs`、模块和存档会继续使用。需要系统 Adreno 驱动时，使用 `test-apk-strict-v10\d2r-94012-test.apk`。
 
 ## 准备
 
@@ -35,11 +35,12 @@ $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 确认目标设备显示为 `device`。安装候选包时要保留应用数据：
 
 ```powershell
-& $adb install -r "D:\AndroidSwitch\analysis\parity-20261019\d2r-new\test-apk-strict-v8\d2r-94012-test.apk"
+& $adb install -r "D:\AndroidSwitch\analysis\parity-20261019\d2r-new\test-apk-driver-v10\d2r-94012-driver-v10.apk"
 & $adb shell dumpsys package org.d2r.newprobe | Select-String "versionCode|versionName|lastUpdateTime"
+& $adb shell run-as org.d2r.newprobe touch files/d2r-mobile/diagnostics/private-vulkan-sysmem
 ```
 
-预期版本为 `versionCode=4`、`versionName=0.4-94012-parity`。测试前建议接上充电器；如果测试实体手柄，先把手柄连接到设备。
+预期版本为 `versionCode=4`。测试前建议接上充电器；如果测试实体手柄，先把手柄连接到设备。Turnip 启动日志应出现 `driver id=18`、`Mesa 26.2.3` 和 `PIPELINE_WARM_START entries=125`；如果出现系统驱动则是 `driver id=8`。
 
 ## 1. 冷启动与 TACT 关卡
 
@@ -145,7 +146,7 @@ Select-String -Path "$env:TEMP\game-startup.log" -Pattern "ANDROID_INPUT_BIND|ph
 
 ## 6. 更新器
 
-当前 v8 候选包没有写入更新清单地址，因此不会请求更新。要验证更新器，使用打包工具的 `--update-url` 重新生成一个测试包，并把地址指向可返回 JSON 的 HTTPS 端点：
+当前 v10 候选包没有写入更新清单地址，因此不会请求更新。要验证更新器，使用打包工具的 `--update-url` 重新生成一个测试包，并把地址指向可返回 JSON 的 HTTPS 端点：
 
 ```json
 {
