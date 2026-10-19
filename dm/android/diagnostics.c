@@ -13,6 +13,7 @@ static pthread_once_t alt_key_once = PTHREAD_ONCE_INIT;
 static pthread_key_t alt_key;
 static _Atomic int signals_ready;
 static _Atomic uint64_t frames, svc_calls[256], prof_ns[PROF_N], prof_bytes[PROF_N];
+static _Atomic uint64_t profile_ribbon_ns;
 static void (*ui_subscribers[16])(const char *, const char *, const char *);
 static size_t ui_count;
 static pthread_mutex_t ui_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -181,6 +182,12 @@ void dm_prof_add(int id, uint64_t ns, uint64_t bytes) {
     atomic_fetch_add(&prof_ns[id], ns); atomic_fetch_add(&prof_bytes[id], bytes);
 }
 void dm_prof_mark(const char *name) { LOG("ANDROID_PROFILE %s time_ns=%llu", name, now_ns()); }
+uint64_t dm_prof_ribbon_ns(void) { return atomic_load(&profile_ribbon_ns); }
+void dm_android_prof_ribbon_seen(void) {
+    if (!g_flag.bootprof) return;
+    uint64_t unset=0;
+    atomic_compare_exchange_strong(&profile_ribbon_ns,&unset,now_ns());
+}
 void uimsg_subscribe(void (*fn)(const char *, const char *, const char *)) {
     pthread_mutex_lock(&ui_lock);
     if (ui_count >= sizeof ui_subscribers / sizeof *ui_subscribers) die("Android UI subscriber capacity");
@@ -188,11 +195,15 @@ void uimsg_subscribe(void (*fn)(const char *, const char *, const char *)) {
     pthread_mutex_unlock(&ui_lock);
 }
 void dm_android_uimsg(const char *category, const char *action, const char *argument) {
+    if (argument && !strcmp(argument,"MainMenuButtonRibbon")) dm_android_prof_ribbon_seen();
     void (*copy[16])(const char *, const char *, const char *);
     pthread_mutex_lock(&ui_lock);
     size_t n = ui_count; memcpy(copy, ui_subscribers, n * sizeof *copy);
     pthread_mutex_unlock(&ui_lock);
     for (size_t i = 0; i < n; ++i) copy[i](category, action, argument);
+}
+void uimsg_emit(const char *category,const char *action,const char *argument) {
+    dm_android_uimsg(category,action,argument);
 }
 void *hlecount_wrap(const char *kind, const char *name, void *fn) {
     (void)kind; (void)name;
@@ -203,7 +214,12 @@ void hlecount_seal(void) {}
 void hlecount_svc(int n) { if (n >= 0 && n < 256) atomic_fetch_add(&svc_calls[n], 1); }
 uint64_t dm_android_svc_count(int n) { return n >= 0 && n < 256 ? atomic_load(&svc_calls[n]) : 0; }
 uint64_t svc_host_call(int n, uint64_t *regs) {
-    (void)regs; die("Android build-specific host call %#x requires verified version mapping", n);
+    /* A title library may provide reviewed private calls; the shared core
+     * itself contains no title-private address table.  Unknown calls remain
+     * fatal rather than returning success from an unimplemented service. */
+    extern int dm_android_title_host_call(int, uint64_t *) __attribute__((weak));
+    if (dm_android_title_host_call && dm_android_title_host_call(n, regs)) return 1;
+    die("Android build-specific host call %#x requires verified version mapping", n);
 }
 void dm_backtrace(uint64_t fp) {
     /* dm_thread_enter switches to an SDK-owned alias stack, outside Bionic's
@@ -221,4 +237,4 @@ void dm_backtrace(uint64_t fp) {
     }
 }
 uint64_t front_game_res(int docked) { return ((uint64_t)(docked ? 900 : 720) << 32) | (docked ? 1600 : 1280); }
-uint64_t dm_game_res(int docked) { return front_game_res(docked); }
+__attribute__((weak)) uint64_t dm_game_res(int docked) { return front_game_res(docked); }

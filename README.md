@@ -8,14 +8,47 @@ Platforms: iPhone / iPad (iOS 26 and later); Android (experimental, arm64-v8a, A
 
 中文: [README.zh-CN.md](README.zh-CN.md)
 
-The `codex/zelda-echoes-of-wisdom-android` branch also starts Android bring-up for
-**The Legend of Zelda: Echoes of Wisdom**. Pinned title profiles, executable
-extraction/auditing, and Android instruction rewriting are available; validation
-of version 1.1.0 now covers four-module loading, SDK OS initialization,
-thread/event checks, and SDK startup with temporary fixtures on PPG-AN00.
-Resource and graphics adaptation remain in progress, with **no playable APK
-yet**. See the [Android title notes](dm/android/titles/README.md) for status,
-commands, and remaining work. Android gameplay measurements below refer to D2R.
+The `codex/zelda-echoes-of-wisdom-android` branch also brings up
+**The Legend of Zelda: Echoes of Wisdom 1.1.0** on Android. Its separate diagnostic
+APK now presents a **verified visible first scene** on ROD-W09 / Mali-G610 MC6:
+the castle scene with guards and torches. This follows fixes to Android's
+16-byte texture-view ABI and nearest-filtered depth/stencil blits. Normal input,
+gameplay and later scenes remain unverified. The user has confirmed correct
+orientation and brightness after the Android origin and presentation-encoding
+fixes. A default-off experiment for the measured Mali driver has passed five
+ordered depth-input draws after exact coordinate and boundary calibration.
+The diagnostic run then reaches a different unsupported depth-feedback shader.
+Independent replay of its captured geometry found sampled-depth differences;
+this pair remains outside the input-attachment experiment.
+An optional Turnip driver bundle is prepared for Adreno verification; it remains
+disabled by default and has not been tested with Zelda on Adreno.
+Continued gameplay remains unverified.
+The original SDK AudioRenderer feeds real AAudio output,
+with a standalone three-cycle, nonzero-PCM device regression passing. Game logs
+also show nonzero PCM, and the user has confirmed normal sound in the castle
+intro; later scenes and longer playback remain unverified. The offline
+Vulkan cache contains **9,567 programs**,
+and all **5,211 transformed vertex modules** pass SPIR-V validation. Guarded
+native near-plane clipping also passes a GPU fixture. The visible scene does
+**not** establish a playable port or Zelda performance: the current build still
+uses validation and diagnostics. See the [Android title notes](dm/android/titles/README.md) for
+status, commands and remaining work. Android gameplay measurements below refer
+to D2R.
+
+The Android controller path is wired for buttons, D-pad, triggers and both
+sticks. The Java Activity and the Echoes NativeActivity both route touch
+events into the guest HID layer; the portable iOS touch state machine is
+available through an Android game-thread bridge. Android save mounts now
+publish atomic transaction commits and durable directory syncs. An optional
+directory provider can reuse the portable cloud-sync policy, but Android has
+no iCloud provider in this repository. Echoes 1.1.0 still has no title adapter
+for in-game detection, an explicit save request, or UI/HUD state observation,
+so these capabilities are not yet end-to-end validated on Zelda.
+
+D2R's private Android adapters check the rewriter's NSO `BUILD_ID` metadata,
+module bounds and declared gates. This is a version-label check, not a runtime
+hash of the loaded image. See the [Android/iOS parity record](docs/ANDROID_IOS_PARITY.md)
+for implementation status, device-fixture evidence and remaining interface work.
 
 ## Android support — experimental
 
@@ -43,6 +76,8 @@ Work implemented in this fork:
 - Validation includes **16 GPU fixtures on both the Qualcomm system and pinned Turnip drivers (32 checks)**, plus six pass/chunk timing configurations and the gameplay smoke checks above. This does not establish full-game compatibility with both drivers. Dynamic-uniform descriptors were tested and reverted because their FPS benefit did not reproduce.
 
 **Remaining work:** broader GPU/device coverage, dungeon/act/waypoint transitions, larger fights and skill effects, controlled 30-minute thermal testing, and further performance optimization. iOS feature parity has not been established.
+
+The 2026-10-19 isolated D2R 3.3.94012 package was tested on ROD-W09 for touch movement, menu/options UI input, iOS-derived button art and HUD, and a paused background game save followed by a forced-stop cold load. Physical gamepad hardware and complete rift runs remain untested. This scene runs at about 12–15 fps; dynamic 3D scaling and other remaining differences are recorded in the parity document.
 
 **Build status:** Android source and its [CMake entry point](dm/android/CMakeLists.txt) are checked in. The current APK packaging, game-data preparation and device-regression scripts live in a separate development workspace and are not included here, so a fresh clone is **not yet a complete Android APK build/install workflow**. The iOS setup and IPA instructions below do not build an Android APK. You must supply your own game files; no game assets, shaders or saves are provided by this repository.
 

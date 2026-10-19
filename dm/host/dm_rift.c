@@ -46,6 +46,14 @@
 #include <string.h>
 #include <time.h>
 
+static int rift_same_mtime(const struct stat *a,const struct stat *b) {
+#ifdef __APPLE__
+    return a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec;
+#else
+    return a->st_mtim.tv_sec==b->st_mtim.tv_sec && a->st_mtim.tv_nsec==b->st_mtim.tv_nsec;
+#endif
+}
+
 enum { LV_TOWN = 109, RIFT_OBJ = 342, TOWN_OBJ = 298, RIFT_SECS = 900 };   // TOWN_OBJ：打倒守护者后的回城门（物件类同首领连战的门，名牌在秘境图里换成「回城」） | TOWN_OBJ: the town door after the guardian is defeated (same object class as the boss rush door; its nameplate is changed to 「回城」(Return to Town) on rift maps)
 // 地图池（设计稿第三节）：野外开阔图 + 短迷宫
 // Map pool (design doc section 3): open wilderness maps + short mazes
@@ -160,7 +168,7 @@ static void rec_pre_commit(const char *wd) {
     else if (RS.wrote) { RS.wrote = 0; RS.dirty = 1; }                 // 没成（被拒）：重新算待落盘 | did not succeed (refused): count it as pending write again
     if (RS.dirty && wd) { char d[1200], c[1200], p[1200], q[1220]; size_t L = strlen(wd); struct stat a, b;
         snprintf(d, sizeof d, "%s/%s/%s.d2s", wd, RS.who, RS.who); snprintf(c, sizeof c, "%.*s/%s/%s.d2s", (int)(L > 5 && !strcmp(wd + L - 5, ".work") ? L - 5 : L), wd, RS.who, RS.who);
-        int fresh = !stat(d, &a) && (stat(c, &b) || a.st_mtimespec.tv_sec != b.st_mtimespec.tv_sec || a.st_mtimespec.tv_nsec != b.st_mtimespec.tv_nsec || a.st_size != b.st_size);   // 已提交目录里还没有这个角色 = 新建的，也算 | this character is not yet in the committed directory = newly created, which also counts
+        int fresh = !stat(d, &a) && (stat(c, &b) || !rift_same_mtime(&a,&b) || a.st_size != b.st_size);   // 已提交目录里还没有这个角色 = 新建的，也算 | this character is not yet in the committed directory = newly created, which also counts
         if (fresh) { snprintf(p, sizeof p, "%s/%s/%s.sw_rift", wd, RS.who, RS.who); snprintf(q, sizeof q, "%s.tmp", p); FILE *f = fopen(q, "w");
             if (!f) LOG("【红】秘境：侧文件写不进 %s", q);
             else { fprintf(f, "tier %d\nunlock %d\nbest %d\nclears %d\ndeaths %d\nms %x\nsunder %x\ngift %d\npts %d\n", RS.snap.tier, RS.snap.unlock, RS.snap.best, RS.snap.clears, RS.snap.deaths, RS.snap.ms, RS.snap.sunder, RS.snap.gift, RS.snap.pts);
@@ -1481,8 +1489,8 @@ void dm_rift_tick(uint64_t G, uint64_t player, uint8_t *main_base) {
     // Test switch DM_RIFT_TEST_CLEAR=1 (automatic map-clearing playstyle, to verify "whether one run can fill the progress and settle"): while a Rift is in progress, every 1.5 s, find the nearest living hostile monster on this map from the server unit table,
     // and teleport next to it with the original teleport (with DM_RIFT_TEST_LOWHP=1 and the attack key held, it dies in passing); if this map has no living hostile monster right now (distant rooms not yet activated), jump to the next unvisited room in the room chain so the next area activates.
     // Difference from DM_RIFT_TEST_PULL: PULL only knows monsters the client has seen and stops once those are dead; this one uses the server table and, advancing room by room, can clear the whole map
-    { static int on = -1, nxt; static uint64_t done[2048]; static int nd, lvd; static uint32_t skip[256], last_id; static int nskip, same;   /* 同一只连着 4 次被选中还没死（在水里 / 够不着 / 打不死）就跳过它 | If the same monster is picked 4 times in a row and is still alive (in water / unreachable / unkillable), skip it */ if (on < 0) on = getenv("DM_RIFT_TEST_CLEAR") != NULL;
-      if (on && t % 38 == 0 && in_rift_map(lv) && atomic_load(&K.st) == ST_RUN) { if (lvd != lv) { lvd = lv; nd = 0; nxt = 0; nskip = 0; same = 0; }
+    { static int on = -1; static uint64_t done[2048]; static int nd, lvd; static uint32_t skip[256], last_id; static int nskip, same;   /* 同一只连着 4 次被选中还没死（在水里 / 够不着 / 打不死）就跳过它 | If the same monster is picked 4 times in a row and is still alive (in water / unreachable / unkillable), skip it */ if (on < 0) on = getenv("DM_RIFT_TEST_CLEAR") != NULL;
+      if (on && t % 38 == 0 && in_rift_map(lv) && atomic_load(&K.st) == ST_RUN) { if (lvd != lv) { lvd = lv; nd = 0; nskip = 0; same = 0; }
           int px, py; unit_xy(player, &px, &py); uint64_t best = 0; long bd = -1;
           for (int b = 0; b < 128; b++) for (uint64_t u = rd(G + 0x2230 + 1 * 0x400 + 8 * b); u; u = rd(u + 0x158)) { uint32_t m = *(uint32_t *)(uintptr_t)(u + 0xc); int x, y;
               if (m == 0 || m == 12 || unit_level(u) != lv || unit_align(u) || !unit_xy(u, &x, &y)) continue; { uint32_t id = *(uint32_t *)(uintptr_t)(u + 8); int sk = 0; for (int q = 0; q < nskip && !sk; q++) sk = skip[q] == id; if (sk) continue; } long d = (long)(x - px) * (x - px) + (long)(y - py) * (y - py); if (bd < 0 || d < bd) { bd = d; best = u; } }

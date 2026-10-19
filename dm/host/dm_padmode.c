@@ -43,8 +43,12 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef __APPLE__
 #include <CommonCrypto/CommonDigest.h>
 #include <TargetConditionals.h>
+#else
+#include "dm_sha1.h"
+#endif
 
 static const struct { uint32_t off; const char *pad, *touch; } k_pfx[] = {
     { 0x1d21db5, "Controller/Console/Switch/", "0touch_console_switch_lay/" },
@@ -56,9 +60,9 @@ static const struct { uint32_t off; const char *pad, *touch; } k_pfx[] = {
     { 0x1d4d5ea, "Controller/Cursor/Held", "Xtouch_cursor_lay/Held" },
 };
 enum { BOUNCE_FRAMES = 60 };   // 测试开关读串的等待帧数（切换本身不数帧，见 dm_modetx.h） | Number of frames to wait when the test switch reads its sequence (the switch itself does not count frames, see dm_modetx.h)
-static int g_have;                  // 有触屏覆盖层、前缀可改 | A touch overlay is present and the prefixes can be rewritten
+static _Atomic int g_have;          // 有触屏覆盖层、前缀可改 | A touch overlay is present and the prefixes can be rewritten
 static _Atomic int g_want = -1;     // 前端要的模式：0 触屏 1 手柄（-1 没要求） | Mode requested by the front end: 0 touch, 1 controller (-1 no request)
-static int g_cur;                   // 当前前缀所指：0 触屏 1 手柄 | What the prefixes currently point to: 0 touch, 1 controller
+static _Atomic int g_cur;           // 当前前缀所指：0 触屏 1 手柄 | What the prefixes currently point to: 0 touch, 1 controller
 static dm_modetx g_tx;              // 切换事务（dm_modetx.h）；游戏主线程 | Switch transaction (dm_modetx.h); game main thread
 static _Atomic int g_freeze;        // 输入冻结：请求一到就立（任意线程），事务完成才撤；取手柄处经 dm_padmode_input_gate 看 | Input freeze: set as soon as a request arrives (any thread), lifted only when the transaction completes; the place where the controller is read checks it through dm_padmode_input_gate
 static uint32_t g_sig;              // 回读信号计数：游戏来读了我们报的运行模式（hle_oe.c）+ 界面根下的面板换了一批（地址指纹变了）；事务看它「动过、又连续几帧不动」判重建完成 | Readback signal count: the game came to read the operation mode we report (hle_oe.c) + the set of panels under the UI root was replaced (address fingerprint changed); the transaction judges the rebuild complete by it having "moved, then stayed still for several consecutive frames"
@@ -126,7 +130,13 @@ static void str_apply(int pad) {   // 游戏主线程：串表里这些键的串
         uint64_t *v = (uint64_t *)(uintptr_t)(nd + 0x20);
         if (nd != g_str[i].node) {   // 新节点（开机首次 / 切语言后串表重装）：认原文 | New node (first time after boot / string table reloaded after a language switch): identify the original text
             uint64_t ov = v[0], ol = v[1]; if (ov == (uint64_t)(uintptr_t)g_str[i].val) continue;   // 不会发生：新节点不会指着我们的串 | Cannot happen: a new node never points at our string
-            unsigned char md[CC_SHA1_DIGEST_LENGTH]; char hx[9]; CC_SHA1((const void *)(uintptr_t)ov, (CC_LONG)ol, md); snprintf(hx, sizeof hx, "%02x%02x%02x%02x", md[0], md[1], md[2], md[3]);
+            unsigned char md[20]; char hx[9];
+#ifdef __APPLE__
+            CC_SHA1((const void *)(uintptr_t)ov, (CC_LONG)ol, md);
+#else
+            dm_sha1((const void *)(uintptr_t)ov, (size_t)ol, md);
+#endif
+            snprintf(hx, sizeof hx, "%02x%02x%02x%02x", md[0], md[1], md[2], md[3]);
             g_str[i].node = nd; g_str[i].orig = memcmp(hx, g_str[i].sha, 8) ? 0 : ov; g_str[i].olen = ol; if (!g_str[i].orig) { nbad++; continue; } }
         if (!g_str[i].orig) { nbad++; continue; }
         uint64_t want = pad ? g_str[i].orig : (uint64_t)(uintptr_t)g_str[i].val, wl = pad ? g_str[i].olen : strlen(g_str[i].val);
@@ -227,7 +237,7 @@ uint64_t dm_padmode_page_filter(uint64_t bt) {
 // original game rebuilds it every frame from the item under the cursor, so the string it fetches is swapped instead)
 enum { HINT_VAULT, HINT_IDENT, NHINT };
 static struct { const char *key, *ours_key; _Atomic int on; uint64_t node, orig, olen; char ours[48]; } g_hint[NHINT] = {
-    { "ControllerPromptItemMoveToPrivateStash", "dmPadHintDeposit" }, { "ControllerPromptItemPickUpFromInventory", "dmPadLegIdentify" } };   // [0]「按住 Y」那半句、[1]「捡起」 | [0] the "hold Y" half of the sentence, [1] "Pick Up"
+    { .key="ControllerPromptItemMoveToPrivateStash", .ours_key="dmPadHintDeposit" }, { .key="ControllerPromptItemPickUpFromInventory", .ours_key="dmPadLegIdentify" } };   // [0]「按住 Y」那半句、[1]「捡起」 | [0] the "hold Y" half of the sentence, [1] "Pick Up"
 void dm_padmode_vault_hint(int on) { atomic_store(&g_hint[HINT_VAULT].on, on ? 3 : 0); }   // 游戏主线程，页在屏上时每帧调（3 帧不调就算离开） | Game main thread; called every frame while the page is on screen (3 frames without a call counts as having left)
 void dm_padmode_ident_hint(int on) { atomic_store(&g_hint[HINT_IDENT].on, on ? 3 : 0); }   // 同上：光标停在未鉴定物品上时每帧调 | Same as above: called every frame while the cursor rests on an unidentified item
 // 切语言：原版把串表整张清空重装（SetLanguage，diag.c 的观测门在清空之前、游戏主线程调这里）。换串表与上面的提示小表都靠「节点地址变了」认重装，

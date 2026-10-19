@@ -13,7 +13,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#ifndef __ANDROID__
 #include <TargetConditionals.h>
+#endif
 #include <stdatomic.h>
 #include <math.h>
 
@@ -686,6 +688,21 @@ static int bd_skill_walk(uint64_t w, uint64_t xy, int dep) {
 // "Select first, then confirm": taps on skill icons and these four "+" only move the cursor (select, show the tooltip), and spending the point is triggered by the phone layer's confirm button. Bit 62 = the hit is an attribute "+".
 static _Atomic uint32_t g_bd_hit_id;   // 最近一次命中的加点类按钮是哪一个（g_bd_hit_ref = 它的控件，主线程写） | Which point-allocation button was hit most recently (g_bd_hit_ref = its widget, written by the main thread)
 uint32_t dm_ui_hit_id(void) { return atomic_load(&g_bd_hit_id); }
+int dm_ui_hit_selected_skill(uint32_t hit_id) {
+    if(!(hit_id&0x80000000u) || hit_id!=atomic_load(&g_bd_hit_id) || dm_ui_unstable())return -1;
+    if(g_bd_hit_ref.gen!=dm_ui_gen())return -1;
+    uint64_t hit=dm_wref_get(&g_bd_hit_ref);
+    if(!hit || ((uint32_t)hit|0x80000000u)!=hit_id)return -1;
+    module_t *m=main_module();uint64_t root=0;
+    if(!m)return -1;memcpy(&root,m->base+0x2f05458,8);
+    uint64_t fm=root?*(uint64_t *)(root+0xd0):0;
+    uint64_t focus=fm?*(uint64_t *)(fm+0x190):0;
+    /* The same message/data layout used by dm_actions_pump. Compare current
+     * focus with the generation-validated hit before dereferencing its data. */
+    if(focus!=hit || !*(uint8_t *)(hit+0x50) ||
+       *(uint64_t *)(hit+0x558)!=0xc50d69aa61850d12ull || !*(uint64_t *)(hit+0x568))return -1;
+    return **(int32_t **)(hit+0x568);
+}
 static int bd_stat_walk(uint64_t w, uint64_t xy, int dep) {
     if (!w || dep > 14 || !*(uint8_t *)(w + 0x50)) return 0;
     uint64_t nm = *(uint64_t *)(w + 8), ch = *(uint64_t *)(w + 0x58), n = *(uint64_t *)(w + 0x60); size_t L = nm ? strlen((const char *)nm) : 0;

@@ -6,9 +6,6 @@
 enum { APP_SLOT = 2, GUEST_SLOT_COUNT = 8 };
 typedef struct {
     uintptr_t slots[GUEST_SLOT_COUNT + 1];
-    void *owned_tls;
-    void *owned_tlr;
-    void *owned_thread;
     unsigned registry_index;
 } guest_slots;
 static pthread_key_t context_key;
@@ -29,9 +26,9 @@ static void destroy_context(void *p) {
     if (host_tcb()[APP_SLOT] != (uintptr_t)c->slots) die("Android app TLS slot changed while attached");
     host_tcb()[APP_SLOT] = 0;
     atomic_store_explicit(&active_contexts[c->registry_index], 0, memory_order_release);
-    free(c->owned_thread);
-    free(c->owned_tlr);
-    free(c->owned_tls);
+    /* thread.c owns the TLS allocation and the combined TLR/thread object.
+     * Slots are a view of that state: guest code can replace their values,
+     * and pthread key destructors may run in either order. */
     free(c);
 }
 static void create_context_key(void) {
@@ -68,12 +65,6 @@ int dm_android_thread_has_guest_context(void) {
 void dm_android_slots_sync(void) {
     uintptr_t *s = dm_android_slots();
     for (unsigned i = 0; i < GUEST_SLOT_COUNT; ++i) s[i + 1] = (uintptr_t)pthread_getspecific(slot_key(i));
-    guest_slots *c = pthread_getspecific(context_key);
-    if (!c->owned_tls && s[2]) c->owned_tls = (void *)s[2];
-    if (!c->owned_tlr && s[3]) {
-        c->owned_tlr = (void *)s[3];
-        c->owned_thread = *(void **)((uint8_t *)c->owned_tlr + 0x1f8);
-    }
 }
 void dm_android_slot_set(pthread_key_t key, void *value) {
     if (pthread_setspecific(key, value)) die("Android pthread slot write");

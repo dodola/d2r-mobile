@@ -202,7 +202,7 @@ static int eligible(uint64_t G, uint64_t player) {   // 当前难度已打过巴
     return q && (*(uint8_t *)(uintptr_t)(q + 0x50) & 1);
 }
 
-static void tz_live(void) { atomic_store(&g_dm_tz_live_ns, (uint64_t)clock_gettime_nsec_np(CLOCK_MONOTONIC) + 1000000000ull); }   // 每拍续 1 秒：本局停拍（退出 / 崩溃）后强制自动失效 | extended by 1 second every tick: the forcing expires automatically once this run stops ticking (exit / crash)
+static void tz_live(void) { atomic_store(&g_dm_tz_live_ns, now_ns() + 1000000000ull); }   // 每拍续 1 秒：本局停拍（退出 / 崩溃）后强制自动失效 | extended by 1 second every tick: the forcing expires automatically once this run stops ticking (exit / crash)
 static void tz_set(uint64_t G, int on) {
     uint64_t (*zone)(uint64_t) = (uint64_t (*)(uint64_t))(B + 0x58f1e0); void (*apply)(uint64_t, uint64_t, int) = (void (*)(uint64_t, uint64_t, int))(B + 0x636a60);
     if (on) { tz_live();

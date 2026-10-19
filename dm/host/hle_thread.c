@@ -802,3 +802,19 @@ void hle_signal_system_event(void *ev) {   // 未绑定的按手动清除即时�
     e->signaled = 1; wake_sync_waiters();
     pthread_mutex_unlock(&G);
 }
+#ifdef __ANDROID__
+/* A closed Android service no longer owns a signal route. The caller still
+ * owns/destroys the original SDK event and its kernel handles. Reusing its
+ * address must create a fresh binding rather than retaining a stale handle. */
+void dm_android_unbind_system_event(void *ev) {
+    pthread_mutex_lock(&g_se_lock);
+    for(int i=0;i<g_nse;i++)if(g_se[i].ev==ev){g_se[i]=g_se[--g_nse];break;}
+    pthread_mutex_unlock(&g_se_lock);
+}
+void dm_android_clear_system_event(void *ev) {
+    pthread_mutex_lock(&g_se_lock);uint32_t wh=se_find(ev);pthread_mutex_unlock(&g_se_lock);
+    pthread_mutex_lock(&G);event_t *e=h_get(wh,O_EVENT_W);
+    if(!e)die("Android clear unbound service event");
+    e->signaled=0;pthread_mutex_unlock(&G);
+}
+#endif

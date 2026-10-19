@@ -8,7 +8,15 @@ iOS 版已打磨到可以天天玩、从开荒一路玩到终局；Android 版�
 
 English: [README.md](README.md)
 
-当前 `codex/zelda-echoes-of-wisdom-android` 分支也开始了《塞尔达传说 智慧的再现》的 Android 适配：已加入独立版本档案、程序提取审计和指令改写流程，1.1.0 已在 PPG-AN00 上通过四模块装载、SDK OS 初始化、线程/事件测试，以及使用临时 fixture 的 SDK 启动检查。资源与图形适配仍在进行，**尚无可玩 APK**。进度、命令和后续工作见 [Android 游戏适配档案](dm/android/titles/README.md)。下方 Android 玩法和 FPS 数据仍然只对应 D2R。
+当前 `codex/zelda-echoes-of-wisdom-android` 分支正在适配《塞尔达传说 智慧的再现》Android 版。修复 Android 的 16 字节纹理视图 ABI 和最近邻深度/模板缩放复制后，1.1.0 的独立诊断 APK 已在 ROD-W09 / Mali-G610 MC6 上**验证可见首场景**：城堡卫兵与火把画面。Android 原点和呈现编码修复后，用户已确认方向和亮度正常；继续运行仍在不支持的可写深度反馈处停止，正常操作、玩法及后续场景尚未验证。原始 SDK AudioRenderer 已接入真实 AAudio 输出，独立真机回归通过三次开关周期和非零 PCM 检查；游戏日志已出现非零 PCM，用户也已确认城堡过场声音正常，后续场景和长时间播放尚未验证。离线 Vulkan 缓存已包含 **9,567 个程序**，全部 **5,211 个转换后的顶点模块**通过 SPIR-V 校验，带状态约束的原生近裁剪也通过 GPU fixture。**可见首场景不代表已验证可玩性或 Zelda 性能**；当前构建仍启用校验层与诊断，不作为性能基线。进度、命令和验证范围见 [Android 游戏适配档案](dm/android/titles/README.md)。下方 Android 玩法和 FPS 数据仍然只对应 D2R。
+
+深度反馈的 Mali 输入附件实验保持默认关闭，并限定已测设备与驱动。完成精确坐标和边界校准后，真机连续 5 次目标绘制通过 GPU 检查。后续另一组着色器已完成现场采集，独立 GPU 回放发现其深度采样与当前像素读取存在差异，因此仍在该处停止。用于 Adreno 验证的可选 Turnip 驱动包已准备好，默认关闭，尚未完成 Zelda 的 Adreno 真机验证；后续玩法仍未验证。
+
+这几个 Android 能力的完成度需要分开看：实体手柄的按键、十字键、扳机和双摇杆已经接入 Android Npad，并能在触摸与手柄模式之间切换；Java Activity 和 Echoes NativeActivity 都已把触摸事件送入 guest HID，触控桥复用了 iOS 状态机并提供动态命中与事件回调 ABI。D2R Activity 另外编译了 iOS 同源的技能绑定 observer，只在产物声明 `OBS_BINDING_GETTER` 且通过模块范围与元数据版本标签检查时安装；Echoes 没有可审计的 UI/HUD observer。Android 存档已经有工作目录、`nn::fs::Commit` 原子换入、`fsync` 和提交计数，但 Echoes 1.1.0 还没有标题专用的“局内检测 + 请求游戏存档 + 等待真实提交”，所以还不能说已达到 iOS 的后台存档语义。Android 没有 iCloud provider；代码提供了可选目录 provider，可复用同步核心。当前真机只验证到城堡首场景，以上三项在完整 Zelda 流程中仍未端到端验证。
+
+D2R 私有 adapter 检查的是改写器写入的 NSO `BUILD_ID` 元数据、模块范围和声明的门；这属于版本标签检查，不是运行时对已加载映像重新计算哈希。完整接入情况、设备 fixture 证据及尚未完成的前端见 [Android/iOS 功能对齐记录](docs/ANDROID_IOS_PARITY.md)。
+
+2026-10-19 的独立 D2R 3.3.94012 测试包已在 ROD-W09 验证触控移动、菜单/选项桥、iOS 同源按钮图标与底栏，以及暂停后台原版存档后强停冷读档。实体手柄硬件和完整秘境流程尚未实测；该场景约 12–15 fps，动态 3D 缩放等差异仍见上方对齐记录。
 
 ## Android 支持（实验性）
 

@@ -3,6 +3,9 @@
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/vm_map.h>
+#else
+#include <sys/uio.h>
+#include <unistd.h>
 #endif
 int dm_tg_vm_read(uint64_t address,void *out,size_t bytes) {
     if(!out || !bytes || !address || address>UINT64_MAX-bytes)return 0;
@@ -11,7 +14,13 @@ int dm_tg_vm_read(uint64_t address,void *out,size_t bytes) {
     kern_return_t rc=vm_read_overwrite(mach_task_self(),(vm_address_t)address,(vm_size_t)bytes,(vm_address_t)out,&copied);
     return rc==KERN_SUCCESS && copied==bytes;
 #else
-    (void)address;return 0;
+    /* Android has no Mach task port.  process_vm_readv performs the same
+     * checked read against this process and reports EFAULT for stale/invalid
+     * guest pointers instead of turning an optional title observer into a
+     * host crash. */
+    struct iovec local={.iov_base=out,.iov_len=bytes};
+    struct iovec remote={.iov_base=(void *)(uintptr_t)address,.iov_len=bytes};
+    return process_vm_readv(getpid(),&local,1,&remote,1,0)==(ssize_t)bytes;
 #endif
 }
 /* 诊断（DM_BINDING_DIAG）：最近一次的返回原因码与读到的 LR / 槽号，供 bridge 计数（v4 后快照全空，查卡在哪个返回点） | Diagnostic (DM_BINDING_DIAG): the most recent return reason code and the LR / slot number read, for bridge to count (after v4 the snapshot is entirely empty; find which return point it is stuck at) */

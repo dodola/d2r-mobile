@@ -33,10 +33,13 @@ typedef struct {
     VkSemaphore present_available;
     struct { unsigned reports;int candidate,traced;uint64_t wait_cpu,wait_start; } commit_info;
     VBuffer wb_stage;
+    VBuffer depth_input_guard;
+    unsigned depth_input_guard_active,depth_input,pass_depth_input;
     uint64_t wb_stage_total;
     int wb_staged;
     struct { uint32_t stages,access; } pend[4];
     NvnVkCommandState command_state;
+    uint64_t null_bindings[6];
 
     Range writes[LIMIT_WRITES];
     const uint8_t *write_cpu[LIMIT_WRITES];

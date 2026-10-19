@@ -138,7 +138,6 @@ static uint64_t resolve_sym(module_t *m, const char *name, int weak) {
     for (int i = 0; i < g_nmod; i++) { void *p = module_sym(&g_mod[i], name); if (p) return (uint64_t)p; }
     return weak ? resolve_import_optional(m, name) : resolve_import(m, name, 0);
 }
-}
 
 // 强制接管表（hle.h HLE_FORCE，__DATA,swforce 段）：命中即覆盖模块内定义
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
@@ -205,10 +204,21 @@ static void read_layout(module_t *m, const char *dir) {
     if (!f) die("open %s", path);
     static const char *kn[8] = {"K18", "KTLS", "KTLR", "KGATE", "KRES0", "KRES1", "KASPECT", "KASPECTUI"};
     char line[256], key[32]; unsigned long v; unsigned seen = 0;
+    m->build_id[0] = '\0';
 #ifdef __ANDROID__
     int android_layout = 0;
 #endif
     while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "# %31s", key) == 1 && !strcmp(key, "BUILD_ID")) {
+            char id[34], extra;
+            if (sscanf(line, "# %*31s %33s %c", id, &extra) != 1 || strlen(id) != 32 || m->build_id[0])
+                die("%s: invalid or duplicate BUILD_ID", path);
+            for (unsigned i = 0; i < 32; ++i)
+                if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f')))
+                    die("%s: invalid BUILD_ID", path);
+            memcpy(m->build_id, id, sizeof m->build_id);
+            continue;
+        }
         if (sscanf(line, "# %31s %lx", key, &v) != 2) die("%s: 产物是旧改写器出的，换成当前代号（dm/PRODUCT）的产物", path);
 #ifdef __ANDROID__
         if (!strcmp(key, "ANDROID_APP_SLOT")) { if (v != 2) die("unsupported Android app TLS slot"); android_layout = 1; }
@@ -466,7 +476,8 @@ void load_modules(const char *dir, const char **names, int n) {
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
         t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
-        LOG("%s: base %p size %#zx", names[i], m->base, m->size);
+        LOG("%s: base %p size %#zx build_id=%s", names[i], m->base, m->size,
+            m->build_id[0] ? m->build_id : "unknown");
         g_nmod++;
     }
     force_init();

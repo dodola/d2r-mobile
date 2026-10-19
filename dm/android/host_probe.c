@@ -185,8 +185,12 @@ int main(int argc, char **argv) {
         g_t0_ns = now_ns(); crash_thread_init(); return platform_check(argv[2]);
     }
     if (argc != 4 && argc != 5) { fprintf(stderr, "usage: dm_android_host_probe [--title-profile echoes-of-wisdom-1.1.0] PATCH_DIR RESULT_JSON load|os-init|os-services|sdk-startup [FIXTURE_BASE]\n"); return 2; }
-    if (strcmp(argv[3], "load") && strcmp(argv[3], "os-init") && strcmp(argv[3], "os-services") && strcmp(argv[3],"sdk-startup")) return 2;
-    if (!strcmp(argv[3],"sdk-startup") && argc!=5) return 2;
+    int audio_test=0;
+#ifdef DM_AUDIO_RENDERER_TEST
+    audio_test=!strcmp(argv[3],"audio-renderer");if(audio_test&&!echoes)return 2;
+#endif
+    if (!audio_test&&strcmp(argv[3], "load") && strcmp(argv[3], "os-init") && strcmp(argv[3], "os-services") && strcmp(argv[3],"sdk-startup")) return 2;
+    if ((!strcmp(argv[3],"sdk-startup")||audio_test) && argc!=5) return 2;
     g_flag.imports = getenv("DM_IMPORTS")!=NULL;
     g_flag.dbg = getenv("DM_DBG")!=NULL; g_flag.svc = getenv("DM_SVC")!=NULL;
     g_t0_ns = now_ns(); crash_thread_init();
@@ -204,7 +208,7 @@ int main(int argc, char **argv) {
         load_modules(argv[1],title_names,count);
     } else load_modules(argv[1], names, 3);
     guest_thread_init();
-    if (!strcmp(argv[3],"sdk-startup")) fixture_platform_context(argv[4]);
+    if (!strcmp(argv[3],"sdk-startup")||audio_test) fixture_platform_context(argv[4]);
     uint64_t tick0, tick1; native_clock_check(&tick0, &tick1);
     int initialized = 0;
     if (strcmp(argv[3],"load")) {
@@ -220,7 +224,7 @@ int main(int argc, char **argv) {
     unsigned service_cycles = 0;
     if (!strcmp(argv[3], "os-services")) { original_os_services_check(); service_cycles = 3; }
     unsigned startup_stages = 0;
-    if (!strcmp(argv[3],"sdk-startup")) {
+    if (!strcmp(argv[3],"sdk-startup")||audio_test) {
         LOG("ANDROID_ORIGINAL nninitInitializeSdkModule start");
         ((void (*)(void))required("nninitInitializeSdkModule"))(); ++startup_stages;
         LOG("ANDROID_ORIGINAL nninitStartup start");
@@ -228,6 +232,9 @@ int main(int argc, char **argv) {
         ((void (*)(void))required("_init_libc2"))(); ++startup_stages;
         native_clock_check(&tick0,&tick1);
     }
+#ifdef DM_AUDIO_RENDERER_TEST
+    if(audio_test){int dm_android_ar_verify(const char *);run_module_inits();return dm_android_ar_verify(argv[2]);}
+#endif
     FILE *out = fopen(argv[2], "w"); if (!out) die("Android result open");
     fprintf(out,"{\"passed\":true,\"title_profile\":\"%s\",\"mode\":\"%s\",\"modules\":%d,\"original_cpu_execution\":true,\"original_sdk_tls_checked\":true,\"tick0\":%" PRIu64 ",\"tick1\":%" PRIu64 ",\"nnos_initialized\":%s,\"get_info_calls\":%" PRIu64 ",\"original_thread_event_cycles\":%u,\"sdk_startup_stages\":%u,\"fixture_context\":%s,\"full_game_verified\":false}\n",echoes?"echoes-of-wisdom-1.1.0":"d2r-legacy",argv[3],g_nmod,tick0,tick1,initialized?"true":"false",dm_android_svc_count(0x29),service_cycles,startup_stages,startup_stages?"true":"false");
     if (fclose(out)) die("Android result close");

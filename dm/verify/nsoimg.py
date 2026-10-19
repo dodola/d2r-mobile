@@ -21,7 +21,7 @@ def header(out_dir, mod):
     h = {}
     for line in open(f'{out_dir}/{mod}.fixups.tsv'):
         if not line.startswith('#'): break
-        k, v = line[1:].split(); h[k] = int(v, 0)      # 0x 开头为偏移，十进制为槽号 | A 0x prefix means an offset, decimal means a slot number
+        k, v = line[1:].split(); h[k] = v if k == 'BUILD_ID' else int(v, 0)      # BUILD_ID is a hexadecimal label; other fields are offsets or slot indices.
     return h
 
 def mod0(img):

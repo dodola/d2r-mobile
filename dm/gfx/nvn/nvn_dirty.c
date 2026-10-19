@@ -78,7 +78,9 @@ static void mp(uintptr_t a, size_t len, int prot) {
 #endif
 }
 
+#ifndef __ANDROID__
 static mach_timebase_info_data_t g_tb;   // 首次登记池时取好（缺页路径里只做乘除） | Obtained when a pool is first registered (the fault path only multiplies and divides)
+#endif
 static _Atomic int g_busy_red;
 // 等这一页离开 BUSY。返回 1 = 已离开；0 = 等过了上限（报红一次）。信号处理里可用：只有原子读、mach_absolute_time、sched_yield
 // Wait for this page to leave BUSY. Returns 1 = it has left; 0 = waited past the limit (reported red once). Usable in a signal handler: only atomic reads, mach_absolute_time and sched_yield
@@ -86,8 +88,19 @@ static int busy_wait(range_t *r, uintptr_t p) {
     uint64_t t0 = 0;
     for (unsigned n = 1; atomic_load(&r->state[p]) == PG_BUSY; n++) {
         if (n & 0x3ff) continue;
-        uint64_t now = mach_absolute_time(); if (!t0) t0 = now;
-        if ((now - t0) * g_tb.numer / g_tb.denom > (uint64_t)BUSY_WAIT_MS * 1000000ull) {
+        uint64_t now;
+#ifdef __ANDROID__
+        now = dm_android_nvn_clock_ns();
+#else
+        now = mach_absolute_time();
+#endif
+        if (!t0) t0 = now;
+#ifdef __ANDROID__
+        uint64_t elapsed = now - t0;
+#else
+        uint64_t elapsed = (now - t0) * g_tb.numer / g_tb.denom;
+#endif
+        if (elapsed > (uint64_t)BUSY_WAIT_MS * 1000000ull) {
             if (!atomic_exchange(&g_busy_red, 1)) LOG("【红】脏页跟踪：页 %p 停在「忙」超过 %d 毫秒（改保护的线程没走完），不再等", (void *)(r->base + (p << g_shift)), BUSY_WAIT_MS);
             return 0; }
         sched_yield();
@@ -148,7 +161,6 @@ static void prep_write(void *addr, size_t len) {
                 if (st == PG_BUSY) busy_wait(r, p);
                 p++;
             }
-        }
         }
         a = stop;
     }

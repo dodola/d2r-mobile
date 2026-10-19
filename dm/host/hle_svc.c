@@ -11,6 +11,12 @@
 #include <unistd.h>
 #include <sched.h>
 #include <time.h>
+#ifdef __ANDROID__
+#include "../android/memory_permission.h"
+static struct {uint64_t base,size;uint32_t perm,state,attribute;} g_permission[256];
+static unsigned g_npermission;
+static pthread_rwlock_t g_permission_lock=PTHREAD_RWLOCK_INITIALIZER;
+#endif
 
 // 预留一整块客体地址空间，按 Horizon 分区（地址值直接用宿主 mmap 得到的真地址）。只占地址、不占内存。
 // 大小从 5 GB 起降档重试（部分设备预留 5 GB 返回 ENOMEM(12)），下限 4864 MiB（游戏要 1 GB 别名+栈 + 3728 MB 堆，4864 − 1024 = 3840 > 3728 + 余量）。
@@ -32,7 +38,16 @@ void dm_android_svc_set_program_id(uint64_t program_id) {
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap; static int g_heap_rejects;
 // 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
-int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
+int dm_guest_heap_readable(uint64_t a, size_t n) {
+    uint64_t b=(uint64_t)(uintptr_t)g_heap;size_t cur=g_heap_cur;
+    int readable=g_heap && a>=b && n<=cur && a-b<=cur-n;
+#ifdef __ANDROID__
+    pthread_rwlock_rdlock(&g_permission_lock);
+    if(readable)for(unsigned i=0;i<g_npermission;i++)if(!g_permission[i].perm && a<g_permission[i].base+g_permission[i].size && g_permission[i].base<a+n){readable=0;break;}
+    pthread_rwlock_unlock(&g_permission_lock);
+#endif
+    return readable;
+}
 static uint8_t *g_alias; static size_t g_alias_cap;
 static uint8_t *g_stack; static size_t g_stack_cap;
 
@@ -157,7 +172,56 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         regs[0] = 0; regs[1] = (uint64_t)g_heap; return 0;
     }
 #ifdef __ANDROID__
-    case 0x02: case 0x03: die("Android memory permission/attribute service %#x not yet implemented", num);
+    case 0x02: {
+        uint64_t address=regs[0],size=regs[1],permission=regs[2],region=0,region_size=0;
+        uint32_t state=5;
+        if(g_heap && address>=(uint64_t)g_heap && size<=g_heap_cur && address-(uint64_t)g_heap<=g_heap_cur-size){region=(uint64_t)g_heap;region_size=g_heap_cur;}
+        else for(int i=0;i<g_nmod;i++) {
+            module_t *m=&g_mod[i];uint64_t begin=(uint64_t)m->base+m->data_off;
+            if(address>=begin && size<=m->key_page_off-m->data_off && address-begin<=m->key_page_off-m->data_off-size) {
+                region=begin;region_size=m->key_page_off-m->data_off;state=4;break;
+            }
+        }
+        uint32_t result=dm_android_permission_validate(address,size,permission,region,region_size,(size_t)sysconf(_SC_PAGESIZE));
+        pthread_rwlock_wrlock(&g_permission_lock);
+        unsigned slot=g_npermission;
+        if(!result)for(unsigned i=0;i<g_npermission;i++) {
+            if(g_permission[i].base==address && g_permission[i].size==size){slot=i;if(g_permission[i].attribute&16)result=(106u<<9)|1u;break;}
+            if(address<g_permission[i].base+g_permission[i].size && g_permission[i].base<address+size){result=(106u<<9)|1u;break;}
+        }
+        if(!result && slot==256)result=(103u<<9)|1u;
+        if(!result && mprotect((void *)address,(size_t)size,permission==3?PROT_READ|PROT_WRITE:permission==1?PROT_READ:PROT_NONE))result=(106u<<9)|1u;
+        if(!result) {
+            g_permission[slot].base=address;g_permission[slot].size=size;g_permission[slot].perm=(uint32_t)permission;g_permission[slot].state=state;
+            if(slot==g_npermission)g_npermission++;
+        }
+        pthread_rwlock_unlock(&g_permission_lock);
+        LOG("ANDROID_MEMORY_PERMISSION address=%#llx size=%#llx permission=%llu result=%#x",address,size,permission,result);
+        regs[0]=result;return 0;
+    }
+    case 0x03: {
+        /* Newer rtld initializers lock RELRO permissions after changing them.
+         * Enforce that sticky lock in subsequent guest permission requests. */
+        uint64_t address=regs[0],size=regs[1];
+        if(regs[2]!=16 || regs[3]!=16)die("Android unsupported memory attribute addr=%#llx size=%#llx mask=%#llx attribute=%#llx origin=%#llx",address,size,regs[2],regs[3],orig_addr);
+        uint32_t result=(106u<<9)|1u;
+        pthread_rwlock_wrlock(&g_permission_lock);
+        int overlap=0;
+        for(unsigned i=0;i<g_npermission;i++) {
+            if(g_permission[i].base==address && g_permission[i].size==size){g_permission[i].attribute|=16;result=0;break;}
+            if(address<g_permission[i].base+g_permission[i].size && g_permission[i].base<address+size)overlap=1;
+        }
+        if(result && !overlap && g_npermission<256)for(int i=0;i<g_nmod;i++) {
+            module_t *m=&g_mod[i];uint64_t begin=(uint64_t)m->base+m->data_off;
+            if(m->key_page_off<=m->data_off || dm_android_permission_validate(address,size,3,begin,m->key_page_off-m->data_off,(size_t)sysconf(_SC_PAGESIZE)))continue;
+            unsigned slot=g_npermission++;
+            g_permission[slot].base=address;g_permission[slot].size=size;g_permission[slot].perm=3;g_permission[slot].state=4;g_permission[slot].attribute=16;
+            result=0;break;
+        }
+        pthread_rwlock_unlock(&g_permission_lock);
+        LOG("ANDROID_MEMORY_PERMISSION_LOCK address=%#llx size=%#llx result=%#x",address,size,result);
+        regs[0]=result;return 0;
+    }
 #else
     case 0x02: regs[0] = 0; return 0;   // SetMemoryPermission
     case 0x03: regs[0] = 0; return 0;   // SetMemoryAttribute
@@ -188,7 +252,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         uint64_t mi = regs[0], addr = regs[2];
         // MemoryInfo: base(0) size(8) state(0x10) attr(0x14) perm(0x18) ...
         uint8_t *a = (uint8_t *)addr;
-        uint64_t base, size, state, perm;
+        uint64_t base, size, state, perm;uint32_t attribute=0;
         int k;
         if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
         else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=3; }
@@ -221,7 +285,17 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
 #endif
             if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
             else { base=addr & ~0xFFFull; size=0x1000; state=3/*Code*/; perm=5; } }
-        if (mi) { uint64_t *m=(uint64_t*)mi; m[0]=base; m[1]=size; ((uint32_t*)mi)[4]=state; ((uint32_t*)mi)[5]=0; ((uint32_t*)mi)[6]=perm; ((uint32_t*)mi)[7]=0; ((uint32_t*)mi)[8]=0; }
+#ifdef __ANDROID__
+        pthread_rwlock_rdlock(&g_permission_lock);
+        for(unsigned i=0;i<g_npermission;i++) {
+            uint64_t begin=g_permission[i].base,end=begin+g_permission[i].size;
+            if(addr>=begin && addr<end){base=begin;size=end-begin;perm=g_permission[i].perm;state=g_permission[i].state;attribute=g_permission[i].attribute;break;}
+            if(begin>addr && begin<base+size)size=begin-base;
+            if(end<=addr && end>base){size=base+size-end;base=end;}
+        }
+        pthread_rwlock_unlock(&g_permission_lock);
+#endif
+        if (mi) { uint64_t *m=(uint64_t*)mi; m[0]=base; m[1]=size; ((uint32_t*)mi)[4]=state; ((uint32_t*)mi)[5]=attribute; ((uint32_t*)mi)[6]=perm; ((uint32_t*)mi)[7]=0; ((uint32_t*)mi)[8]=0; }
         regs[0] = 0; regs[1] = 0; return 0;
     }
     case 0x2C: case 0x2D: {  // MapPhysicalMemory / UnmapPhysicalMemory(addr, size)：只许在 alias 区内（SDK 的 VammManager 用） | MapPhysicalMemory / UnmapPhysicalMemory(addr, size): only allowed inside the alias region (used by the SDK's VammManager)

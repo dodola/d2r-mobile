@@ -1,6 +1,7 @@
 #include "dm_touch_game_state.h"
 #include "dm_touch_game_identity.h"
 #include "../../host/dm.h"
+#include <stdatomic.h>
 enum { OBS_BINDING_GETTER=6, MAPPING_OFFSET=0x2d13cbc, BINDING_OFFSET=0x2d5f0c0 };
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static dm_tg_snapshot latest;
@@ -9,6 +10,12 @@ static dm_tg_hud_cohort hud_cohort;
 static int scene_game;
 static uint64_t scene_epoch,world_epoch;
 static const module_t *main_module;
+#if defined(DM_ANDROID_HOST)
+/* The Android D2R bridge can be built independently of the optional action
+ * module.  If that module is present its strong implementation overrides this
+ * conservative weak fallback; unknown equipment is kept visible. */
+__attribute__((weak)) int dm_swapskill_equipped(int32_t item) { (void)item; return 1; }
+#endif
 void dm_touch_game_set_scene(int game,uint64_t scene,uint64_t world) {
     pthread_mutex_lock(&lock);
     if(world_epoch!=world)dm_tg_hud_reset(&hud_cohort,world);
@@ -46,7 +53,17 @@ int dm_touch_game_hide_own_glyph(uint64_t widget) {
     pthread_mutex_unlock(&lock);return match;
 }
 /* 诊断（DM_BINDING_DIAG=1）：各返回点计数，每 3 秒一行；身份确认失败再按原因码细分（identity.c） | Diagnostic (DM_BINDING_DIAG=1): counts per return point, one line every 3 seconds; identity confirmation failures are further broken down by reason code (identity.c) */
-static unsigned dg[8], dg_id[8]; static uint64_t dg_last;
+static _Atomic unsigned dg[8], dg_id[8]; static uint64_t dg_last;
+void dm_touch_game_diagnostics(dm_tg_diagnostics *out) {
+    if(!out)return;
+    pthread_mutex_lock(&lock);
+    *out=(dm_tg_diagnostics){.scene_game=scene_game,.scene_epoch=scene_epoch,.world_epoch=world_epoch,
+        .cohort_confirmed=hud_cohort.confirmed,.cohort_seen=hud_cohort.seen,.pending_seen=group.seen,
+        .cohort_world_epoch=hud_cohort.world_epoch,.cohort_hud_identity=hud_cohort.hud_identity,
+        .last_identity_reason=dm_tg_identity_reason,.last_identity_lr=dm_tg_identity_lr,.last_identity_slot=dm_tg_identity_slot};
+    for(unsigned i=0;i<8;i++){out->stage[i]=atomic_load(&dg[i]);out->reason[i]=atomic_load(&dg_id[i]);}
+    pthread_mutex_unlock(&lock);
+}
 static void diag_tick(void) {
     static int on=-1; if(on<0) on=getenv("DM_BINDING_DIAG")!=NULL; if(!on) return;
     uint64_t t=now_ns(); if(t-dg_last<3000000000ull) return; dg_last=t;
@@ -115,7 +132,14 @@ static void binding_getter(const uint64_t *regs) {
 }
 int dm_touch_game_attach(void) {
     main_module=NULL;
-    pthread_mutex_lock(&lock);int supported=gate_obs_present(OBS_BINDING_GETTER);memset(&latest,0,sizeof latest);
+    int supported=gate_obs_present(OBS_BINDING_GETTER);
+#if defined(DM_ANDROID_HOST)
+    /* The observation number and an in-bounds image do not identify the
+     * private D2R layout. Unknown/older Android products fail closed. */
+    if (g_nmod < 1 || strcmp(g_mod[0].name,"main") ||
+        strcmp(g_mod[0].build_id,"db0507f36b84200ac05f75d76ed5026f")) supported=0;
+#endif
+    pthread_mutex_lock(&lock);memset(&latest,0,sizeof latest);
     latest.supported=supported;latest.scene_epoch=scene_epoch;latest.world_epoch=world_epoch;latest.portal.slot=-1;memset(&group,0,sizeof group);
     pthread_mutex_unlock(&lock);
     if(!supported)return 0;

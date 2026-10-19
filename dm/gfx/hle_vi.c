@@ -8,6 +8,11 @@
 #include "../android/nvn_platform_backend.h"
 #include <android/native_window.h>
 static struct { uint32_t magic; void *native; } android_display,android_layer;
+int dm_android_vi_display_valid(const void *display) {return display==&android_display && android_display.magic==0x50534944;}
+Result dm_android_vi_set_layer_crop(void *layer,int x,int y,int width,int height) {
+    if(layer!=&android_layer || android_layer.magic!=0x5259414c || x<0 || y<0 || width<0 || height<0 || width>INT32_MAX-x || height>INT32_MAX-y)return RES_FAIL;
+    void dm_vk_set_layer_crop(int,int,int,int);dm_vk_set_layer_crop(x,y,width,height);return RES_OK;
+}
 static void *android_vi_window(void) {
     ANativeWindow *w=dm_android_native_window();
     if(!w || dm_vk_native_window()!=w || ANativeWindow_getWidth(w)<=0 || ANativeWindow_getHeight(w)<=0)

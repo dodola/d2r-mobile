@@ -39,6 +39,14 @@ int dm_touch_game_attach(void);
 /* 开：快照里把「绑着但玩家现在没有的技能」（如摘掉给技能的装备）按空位报；要调游戏函数，只在真游戏里开。 | On: in the snapshot, report "skills that are bound but the player does not currently have" (e.g. after taking off the gear that grants the skill) as empty slots; this calls game functions, so turn it on only in the real game. */
 void dm_touch_game_live_check(int on);
 int dm_touch_game_snapshot(dm_tg_snapshot *out);
+/* Copy-only observer diagnostics. Never reads guest memory or learns HUD
+ * identity; counters describe the existing getter/identity rejection gates. */
+typedef struct {
+    int scene_game,cohort_confirmed,last_identity_reason;
+    uint32_t cohort_seen,pending_seen,last_identity_slot,stage[8],reason[8];
+    uint64_t scene_epoch,world_epoch,cohort_world_epoch,cohort_hud_identity,last_identity_lr;
+} dm_tg_diagnostics;
+void dm_touch_game_diagnostics(dm_tg_diagnostics *out);
 void dm_touch_game_set_scene(int game_no_panel, uint64_t scene_epoch, uint64_t world_epoch);
 #ifdef DM_TG_TEST_SYNTHETIC_IDENTITY
 /* 仅SDK_STUB显式条件构建可提供此opaque seam；生产走strong Mach原HUD cohort。 | Only an explicitly conditional SDK_STUB build may provide this opaque seam; production uses the strong Mach original HUD cohort. */

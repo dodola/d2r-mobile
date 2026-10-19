@@ -146,7 +146,7 @@ static uint32_t shared_unit_id(uint8_t *b) {
 static uint64_t unit_any(uint8_t *b, uint32_t id, int type) { return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint32_t))(b + 0x45f5f0))((uint64_t)(uintptr_t)(b + 0x2d603a0 + type * 0x400), id & 0x7f, id, (uint32_t)type); }
 static uint64_t first_item(uint64_t u) { uint64_t c = u ? *(uint64_t *)(u + 0x90) : 0; return c && *(uint32_t *)c == 0x01020304 ? *(uint64_t *)(c + 0x10) : 0; }
 static struct { uint32_t base; int n; cand_t c[NROW]; int open; } g_list;   // 打开着的清单 | The currently open list
-static int rune_lv(uint8_t *b, uint64_t t, int cls, int lvoff) { uint64_t ir = *(uint64_t *)(t + 0x15c0); uint32_t in = *(uint32_t *)(t + 0x15c8); return ir && cls >= 0 && (uint32_t)cls < in && lvoff >= 0 ? *(uint8_t *)(ir + (uint64_t)cls * 0x1c0 + lvoff) : 0; }
+static int rune_lv(uint8_t *b, uint64_t t, int cls, int lvoff) { (void)b; uint64_t ir = *(uint64_t *)(t + 0x15c0); uint32_t in = *(uint32_t *)(t + 0x15c8); return ir && cls >= 0 && (uint32_t)cls < in && lvoff >= 0 ? *(uint8_t *)(ir + (uint64_t)cls * 0x1c0 + lvoff) : 0; }
 static void rune_code(uint64_t t, int cls, char out[4]) { uint64_t ir = *(uint64_t *)(t + 0x15c0); uint32_t in = *(uint32_t *)(t + 0x15c8); memset(out, 0, 4); if (ir && cls >= 0 && (uint32_t)cls < in) memcpy(out, (const void *)(ir + (uint64_t)cls * 0x1c0 + 0x80), 3); }
 static int g_lvoff = -1;   // 物品表行里「需求等级」（levelreq）的偏移：首次用到时按已知物品的原版值在行里找（dm_rwlv_core.c），找不到就不显示等级 | offset of "required level" (levelreq) in an item-table row: found on first use by the original values of known items (dm_rwlv_core.c); when not found no level is shown
 
@@ -454,6 +454,7 @@ static uint64_t held_item(uint8_t *b, uint64_t pl) { uint64_t inv = pl ? *(uint6
 // 底材在哪、能不能镶：1 = 格子（玩家自己物品，页 0 / 3 / 4），2 = 身上主装备位 1–10，0 = 不能（共享仓库 / 副武器位 / 别处）
 // Where the base item is and whether it can be socketed: 1 = grid cell (the player's own item, page 0 / 3 / 4), 2 = equipped in main equipment slot 1–10, 0 = cannot (shared stash / secondary weapon slot / elsewhere)
 static int base_where(uint8_t *b, uint64_t pl, uint64_t it, int *page, int *x, int *y, int *slot) {
+    (void)b;
     uint64_t d = it ? *(uint64_t *)(it + 0x10) : 0; if (!d || !pl) return 0; int own = 0;
     for (uint64_t q = first_item(pl); q && !own; ) { uint64_t qd = *(uint64_t *)(q + 0x10); if (!qd) break; own = q == it; q = *(uint64_t *)(qd + 0xb0); }
     if (!own) return 0;

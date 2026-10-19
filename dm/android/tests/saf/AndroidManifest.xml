@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.d2r.saf.controlled" android:versionCode="1" android:versionName="1">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
+    <application android:label="SAF controlled tests" android:debuggable="true" android:allowBackup="false">
+        <provider android:name="org.d2r.binaryprobe.ControlledDocumentsProvider" android:authorities="org.d2r.saf.controlled.documents" android:exported="true" android:grantUriPermissions="true" android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter><action android:name="android.content.action.DOCUMENTS_PROVIDER" /></intent-filter>
+        </provider>
+    </application>
+    <instrumentation android:name="org.d2r.binaryprobe.SafCloudInstrumentation" android:targetPackage="org.d2r.saf.controlled" android:functionalTest="true" />
+</manifest>

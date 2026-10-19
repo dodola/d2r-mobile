@@ -98,7 +98,6 @@ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE
     *out = dm_user_clock(); return RES_OK;
 #endif
 }
-}
 // 首领连战第 6–10 关的强制恐怖地带（dm_bossrush.c 设）：g_dm_tz_time 非 0 且未过期时，只有「恐怖地带」那几处取时钟拿到它，存档时间等其余调用照旧。
 // 哪几处：返回点落在地带函数 0x58f1e0 起的那一簇（0x58f1e0–0x591440），或返回后 8 条指令内调地带日程 0x58f310（服务端 0x636b38 套地带、0x694b48 等 9 处）。
 // 过期：dm_bossrush 每拍续 1 秒，本局停拍（退出 / 崩溃）后不再生效，下一局建局时取到的是真实时钟。
@@ -121,10 +120,14 @@ static int tz_site(uint64_t lr) {   // 只在强制期间才判，每次读返�
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "用户时钟 → 宿主 time()；首领连战强制地带时恐怖地带那几处另返回", int64_t, h_time_now, void) {
 #ifdef __ANDROID__
     // No main offsets are approved for the Android build. Time is read from the
-    // real system clock; Apple-only game modifications cannot redirect it here.
+    // A title-specific override is allowed only after its own build identity
+    // and caller validation. Other Android titles use the real system clock.
     if (!atomic_load(&g_time_initialized)) die("Android time backend is not initialized");
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts)) die("Android CLOCK_REALTIME failed");
+    int dm_android_title_clock_override(uint64_t,int64_t *) __attribute__((weak));
+    int64_t title_time;
+    if(dm_android_title_clock_override && dm_android_title_clock_override((uintptr_t)__builtin_return_address(0),&title_time))return title_time;
     int64_t ft = fixed_time(); return ft >= 0 ? ft : ts.tv_sec;
 #else
     int64_t tz = atomic_load(&g_dm_tz_time);

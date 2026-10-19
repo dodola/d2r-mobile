@@ -35,7 +35,25 @@ typedef struct {
     uint64_t serial;                     // 初始化序号：回放层按它在宿主表里找 MTLTexture（游戏可能按值拷贝对象，不能存对象指针） | Initialization serial: the replay layer uses it to find the MTLTexture in the host table (the game may copy the object by value, so object pointers cannot be stored)
     const void *snap;                    // 本序号的不可变副本（hle_nvn.c snap_tex）：命令载荷存它，不存游戏对象地址 | This serial's immutable snapshot (hle_nvn.c snap_tex): command payloads store it, not the game object's address
 } tex_t;                                                                                     FITS(tex_t, NVNtexture);
-typedef struct { uint8_t set_levels, set_layers, set_format, set_target; int32_t base_level, nlevels, min_layer, nlayers, format, target; } view_t;
+#ifdef __ANDROID__
+/* The guest constructs adjacent 16-byte texture views (Echoes 1.1.0,
+ * main+0x327238/0x327264). A larger host overlay corrupts its next copy
+ * region. These are private HLE fields; the opaque guest object is copied
+ * byte-for-byte, never interpreted as the original driver's field layout. */
+typedef struct {
+    uint8_t set_levels:1,set_layers:1,set_format:1,set_target:1,
+        set_swizzle:1,set_depth_mode:1,depth_mode:1,reserved:1;
+    int8_t base_level,nlevels;
+    uint8_t target;
+    int16_t min_layer,nlayers;
+    int32_t format;
+    uint8_t swizzle[4];
+} view_t;
+_Static_assert(sizeof(view_t)==16,"Android guest texture view ABI");
+#else
+typedef struct { uint8_t set_levels, set_layers, set_format, set_target; int32_t base_level, nlevels, min_layer, nlayers, format, target;
+} view_t;
+#endif
 FITS(view_t, NVNtextureView);
 
 // 采样器参数（builder 与对象共用一份）
@@ -93,7 +111,11 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_COPY_IMAGE_STRIDE, OP_SHADER_SCRATCH, OP_WAIT_SYNC, OP_FENCE_SYNC, OP_WAIT_EVENT, OP_COUNT_
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_COPY_IMAGE_STRIDE, OP_SHADER_SCRATCH, OP_WAIT_SYNC, OP_FENCE_SYNC, OP_WAIT_EVENT,
+#ifdef __ANDROID__
+    OP_SAVE_ZCULL, OP_RESTORE_ZCULL, OP_DEBUG, OP_DEPTH_CLAMP, OP_DRAW_INSTANCED,
+#endif
+    OP_COUNT_
 };
 // 载荷（紧跟 op_hdr）。贴图 / 程序指针都指向录制时按序号留下的不可变副本（snap_tex / snap_prog），游戏之后改写或重建对象不影响已录的命令
 // Payload (right after op_hdr). Texture / program pointers point to the immutable snapshots kept by serial at record time (snap_tex / snap_prog); later rewrites or rebuilds of the object by the game do not affect recorded commands
@@ -113,6 +135,9 @@ typedef struct { int32_t stage, first, n; uint64_t h[32]; } p_bind_handles; // �
 typedef struct { int32_t face, value_mask, mask, ref, which; } p_stencil;  // which：0 值掩码 1 写掩码 2 参考值 | which: 0 value mask 1 write mask 2 reference value
 typedef struct { float factor, units, clamp; } p_poly_offset;
 typedef struct { int32_t prim, first, count; } p_draw;
+#ifdef __ANDROID__
+typedef struct { p_draw draw;int32_t base_instance,instances; } p_draw_instanced;
+#endif
 typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instances; uint64_t ibuf; } p_draw_idx;
 typedef struct { int32_t x, y, z; uint64_t caller; } p_dispatch;   // caller：游戏调用点返回地址（定位派发者） | caller: return address of the game call site (to locate the dispatcher)
 typedef struct { const dpool_t *pool; } p_set_pool;
@@ -122,6 +147,10 @@ typedef struct { const tex_t *tex; view_t view; uint8_t has_view, is_uint; NVNco
 typedef struct { int64_t stride; } p_copy_stride;
 typedef struct { float rgba[4]; } p_blend_color;
 typedef struct { sync_t *sync; int32_t condition, flags; } p_sync;
+#ifdef __ANDROID__
+typedef struct { uint64_t address,size; } p_zcull;
+typedef struct {uint32_t action,domain,length,reserved;} p_debug;
+#endif
 
 // Metal 回放层入口（nvn_mtl.m）：把一组命令句柄回放进当前提交
 // Entry point of the Metal replay layer (nvn_mtl.m): replays a set of command handles into the current submission

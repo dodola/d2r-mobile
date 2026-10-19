@@ -25,11 +25,18 @@ int dm_private_aim_vector(int32_t rx,int32_t ry,float out[2]) {
 #ifndef DM_PRIVATE_AIM_VECTOR_ONLY
 #include "dm.h"
 #include "dm_input.h"
+#ifdef __ANDROID__
+#include "../ios/Sources/dm_touch_game_identity.h"
+static int read_live(uint64_t a,void *out,size_t n) {
+    return dm_tg_vm_read(a,out,n);
+}
+#else
 #include <mach/mach.h>
 static int read_live(uint64_t a,void *out,size_t n) {
     vm_size_t copied=0;
     return a && a<=UINT64_MAX-n && vm_read_overwrite(mach_task_self(),a,n,(vm_address_t)out,&copied)==KERN_SUCCESS && copied==n;
 }
+#endif
 // ---- 按住拖动时由手指方向选目标（缺省启用，半角 AIM_CONE_DEG；测试开关 DM_AIM_CONE=<半角度数> 可调，=0 关掉回到原生选目标） ----
 // 原生每帧按「距离 + 与移动摇杆方向 / 朝向的夹角」选怪（main+0x2f4320 / 0x2f8f90，±90°、20–22 格），右摇杆不参与，所以拖技能钮不改变打谁。
 // 这里在算施放方向的同一刻（本适配，早于游戏取目标）：手指方向的锥内有怪 → 把它写进「指定目标槽」（管理器 +0xd10，点击入口 0x4acec4 优先于自动选的）；

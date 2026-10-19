@@ -30,6 +30,7 @@ typedef struct {
     char name[16];
     uint8_t *base;             // 映像（含补丁区）在宿主地址空间的首址 | Start address of the image (including the patch area) in the host address space
     size_t size;
+    char build_id[33];         // Rewriter fixups BUILD_ID (NSO first 16 bytes, lowercase hex); empty for legacy artifacts.
     uint64_t text_end, ro_off, data_off, patch_off, key_page_off, key_page_size;   // 来自改写器 fixups 头 | From the rewriter fixups header
     unsigned key_idx[8];
     const Elf64_Dyn *dyn;
