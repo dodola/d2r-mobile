@@ -627,6 +627,10 @@ static void backend_init(void) {
     enabled.shaderImageGatherExtended=available.shaderImageGatherExtended;
     G.shader_image_gather_extended=enabled.shaderImageGatherExtended;
     G.shader_code_identity=getenv("DM_SHADER_IDENTITY_CODE")!=NULL;
+    {VkFormatProperties bc1,bc3,bc7,astc,etc2;vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_BC1_RGBA_UNORM_BLOCK,&bc1);vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_BC3_UNORM_BLOCK,&bc3);
+     vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_BC7_UNORM_BLOCK,&bc7);vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_ASTC_4x4_UNORM_BLOCK,&astc);vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK,&etc2);
+     fprintf(stderr,"[nvn-vulkan] TEXTURE_COMPRESSION feature_bc=%u feature_astc_ldr=%u feature_etc2=%u bc1=%#x bc3=%#x bc7=%#x astc4x4=%#x etc2=%#x\n",available.textureCompressionBC,available.textureCompressionASTC_LDR,available.textureCompressionETC2,
+         (unsigned)bc1.optimalTilingFeatures,(unsigned)bc3.optimalTilingFeatures,(unsigned)bc7.optimalTilingFeatures,(unsigned)astc.optimalTilingFeatures,(unsigned)etc2.optimalTilingFeatures);}
     enabled.samplerAnisotropy=available.samplerAnisotropy;
     enabled.depthBiasClamp=available.depthBiasClamp;G.depth_bias_clamp=enabled.depthBiasClamp;
     enabled.depthClamp=available.depthClamp;G.depth_clamp_available=enabled.depthClamp;
@@ -2113,9 +2117,9 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         if(!adapted)die("compute ballot adaptation bounds/interface",0);bytes=adapted;
         if(ballots)fprintf(stderr,"[nvn-vulkan] COMPUTE_BALLOT_REDUCE shader=%s ballots=%u driver=Qualcomm bytes=%zu\n",key,ballots,size);
     }
-    if(stage==0&&nvn_vk_quirk_enabled(&G.quirks,NVN_VK_QUIRK_LOWER_SKIN_UBO)&&
-       (!strcmp(key,"54c93fa22abff9ee")||!strcmp(key,"3deaf68fd65b5298"))){
-        unsigned accesses=0;uint8_t *adapted=dm_skin_ubo_apply(bytes,&size,&accesses);
+    if(stage==0&&nvn_vk_quirk_enabled(&G.quirks,NVN_VK_QUIRK_LOWER_SKIN_UBO)){
+        unsigned accesses=0;uint64_t skip_bindings=0;for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==8&&s->b[i].binding<64)skip_bindings|=1ull<<s->b[i].binding;
+        uint8_t *adapted=dm_skin_ubo_apply(bytes,&size,&accesses,skip_bindings);
         if(!adapted)die("skin UBO adaptation bounds/interface",0);bytes=adapted;
         if(accesses)fprintf(stderr,"[nvn-vulkan] SKIN_UBO_VEC4_EXTRACT shader=%s accesses=%u driver=Qualcomm bytes=%zu\n",key,accesses,size);
     }
