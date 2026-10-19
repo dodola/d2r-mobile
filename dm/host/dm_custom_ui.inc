@@ -18,6 +18,25 @@ static uint64_t custom_find(const dm_custom_ui_ops *o,uint64_t w,const char *nam
 static int custom_rect(const dm_custom_ui_ops *o,uint64_t w,int32_t out[4]) {
     return custom_read(o,w,0x70,out,4*sizeof *out);
 }
+static int custom_key_visible(int i) {
+    if(i<0||i>=NK)return 0;
+#if defined(DM_ANDROID_HOST) && DM_ANDROID_HOST
+    /* Keep the shared key table and its indices intact; Android has no cloud
+     * implementation, so the iOS-only row must not participate in the UI. */
+    return strcmp(k_keys[i],"icloud")!=0;
+#else
+    return 1;
+#endif
+}
+static int custom_first_visible(void) {
+    for(int i=0;i<NK;i++)if(custom_key_visible(i))return i;
+    return 0;
+}
+static int custom_next_visible(int from,int direction) {
+    int i=from+direction;
+    while(i>=0&&i<NK&&!custom_key_visible(i))i+=direction;
+    return i>=0&&i<NK?i:from;
+}
 void dm_custom_ui_pump(unsigned long long root) {
     dm_custom_ui_ops ops;
     if(!custom_context(root,&ops))return;
@@ -37,14 +56,15 @@ void dm_custom_ui_pump(unsigned long long root) {
     static int selected;
     static uint64_t selected_panel;static uint32_t selected_generation;
     if(selected_panel!=sp || selected_generation!=o->generation) {
-        selected_panel=sp;selected_generation=o->generation;selected=0;
+        selected_panel=sp;selected_generation=o->generation;selected=custom_first_visible();
     }
+    if(!custom_key_visible(selected))selected=custom_first_visible();
     uint64_t selection=custom_find(o,sp,"TouchCustomSel"),tw=0,cw=0;
     char name[64];
     if(pad) {
         uint64_t ev=o->keys(o->opaque,DM_BTN_UP|DM_BTN_DOWN|DM_BTN_A);
-        if(ev&DM_BTN_DOWN)selected=selected+1<NK?selected+1:selected;
-        else if(ev&DM_BTN_UP)selected=selected>0?selected-1:0;
+        if(ev&DM_BTN_DOWN)selected=custom_next_visible(selected,1);
+        else if(ev&DM_BTN_UP)selected=custom_next_visible(selected,-1);
         snprintf(name,sizeof name,"TouchCustom_%s",k_keys[selected]);cw=custom_find(o,sp,name);
         snprintf(name,sizeof name,"TouchCustom_%s_Text",k_keys[selected]);tw=custom_find(o,sp,name);
         if((ev&DM_BTN_A) && cw && seen[selected].w==cw && seen[selected].gen==o->generation) {
@@ -59,7 +79,7 @@ void dm_custom_ui_pump(unsigned long long root) {
             }
         }
     }
-    int32_t sr[4],tr[4],cr[4];int have_row=pad&&custom_rect(o,tw,tr)&&custom_rect(o,cw,cr);
+    int32_t sr[4],tr[4],cr[4];int have_row=pad&&custom_visible(o,tw)&&custom_visible(o,cw)&&custom_rect(o,tw,tr)&&custom_rect(o,cw,cr);
     if(custom_rect(o,selection,sr)) {
         int32_t want[4]={99999,0,sr[2],sr[3]};
         if(have_row) {
@@ -79,6 +99,7 @@ void dm_custom_ui_pump(unsigned long long root) {
         }
     }
     for(int i=0;i<NK;i++) {
+        if(!custom_key_visible(i)){seen[i].w=seen[i].z=0;continue;}
         snprintf(name,sizeof name,"TouchCustom_%s",k_keys[i]);uint64_t w=custom_find(o,sp,name);
         if(!custom_visible(o,w)||custom_toggle_value(o,w)<0){seen[i].w=seen[i].z=0;continue;}
         uint64_t z=rev_box(i)?custom_find(o,sp,rev_box(i)):0;
@@ -109,6 +130,6 @@ void dm_custom_ui_pump(unsigned long long root) {
             if(custom_rect(o,hint,r)) {int x=diff&&shown==k?lr[0]:99999;if(r[0]!=x){r[0]=x;o->rect(o->opaque,hint,r);}}
         }
     }
-    int dirty=0;for(int i=0;i<NK;i++){int pd=atomic_load(&g_pend[i]);dirty|=pd>=0&&pd!=atomic_load(&g_val[i]);}
+    int dirty=0;for(int i=0;i<NK;i++){if(!custom_key_visible(i))continue;int pd=atomic_load(&g_pend[i]);dirty|=pd>=0&&pd!=atomic_load(&g_val[i]);}
     o->dirty(o->opaque,sp,dirty);
 }

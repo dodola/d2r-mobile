@@ -128,7 +128,7 @@ def main():
             constants, facts = record.pop("constants"), record.pop("facts")
             digest = hashlib.sha256(control).hexdigest()
             # Control blocks are pipeline properties, not a program digest.
-            # Echoes has byte-identical controls for distinct machine code.
+            # Distinct machine-code programs can share byte-identical controls.
             key = program_key(control,code)
             if required is not None and key not in required:
                 continue

@@ -1,4 +1,0 @@
-/* Generated from the title profile; source hashes are checked by android_title.py. */
-static const uint64_t echoes_probe_program_id = UINT64_C(0x@DM_PROBE_PROGRAM_ID@);
-static const struct { const char *name, *build; } echoes_probe_modules[] = {
-@DM_PROBE_MODULE_ROWS@};

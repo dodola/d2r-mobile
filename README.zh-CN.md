@@ -12,7 +12,7 @@ English: [README.md](README.md)
 
 D2R Android 工作统一回归 `main`。离线生产安装链继续绑定 **91738**；**94012** 使用独立诊断包与显式启用、带版本检查的私有 adapter。实体手柄输入、事务存档和 iOS 触控/UI 桥的验证范围不同，具体见 [功能对齐记录](docs/ANDROID_IOS_PARITY.md) 与 [主线整合记录](docs/ANDROID_MAIN_INTEGRATION_2026-10-19.zh-CN.md)。本次整合版仍需原游戏验收，历史测试包的实游证据不直接覆盖整合版。
 
-短期暂停《塞尔达传说 智慧的再现》移植。保留 [Android 游戏适配档案](dm/android/titles/README.md) 中原有独立探针资料，本次不合入 Zelda 应用入口。下方 Android 玩法和 FPS 数据仍然只对应 D2R。
+《塞尔达传说 智慧的再现》移植已彻底停止，不再排期；相关 Android 应用入口、探针、profile 和移植工具均已移除。下方 Android 玩法和 FPS 数据只对应 D2R。
 
 ## Android 支持（实验性）
 

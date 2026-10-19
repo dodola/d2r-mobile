@@ -48,8 +48,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static native String nativeStatus();
     private static native int nativeRenderScale(float scale);
     private static native void nativeControllerCancelActions(long buttons,int lx,int ly,int rx,int ry);
-    static native int nativeCloudProvider(Object store,String providerId,String cacheDirectory);
-    static native String nativeCloudStatus();
     private static native String nativeSaveFailure();
     private static native String nativeKeyboardRequest();
     private static native void nativeKeyboardResult(long id,boolean accepted,String text);
@@ -71,7 +69,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private int appliedRendererFlags=RendererOptions.DEFAULT_FLAGS;
     private float appliedRenderScale=RenderQuality.ORIGINAL;
     private GameUiStrings strings;
-    private SafCloudSettings cloudSettings;
     private final GameDisplayMetrics.FpsSampler fpsSampler=new GameDisplayMetrics.FpsSampler();
     private double displayedFps=Double.NaN;
     private TouchControlsView touchControls;
@@ -106,7 +103,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         strings=new GameUiStrings(getResources().getConfiguration().getLocales().get(0));
-        cloudSettings=new SafCloudSettings(this,strings);
         new GameHaptics(this);
         inputManager=(android.hardware.input.InputManager)getSystemService(INPUT_SERVICE);
         if(inputManager!=null)inputManager.registerInputDeviceListener(deviceListener,ui);
@@ -157,7 +153,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         mode.setGravity(Gravity.CENTER);mode.setBackgroundColor(0x8030241b);mode.setContentDescription(strings.modeDescription(touchMode));mode.setClickable(true);mode.setFocusable(true);
         FrameLayout.LayoutParams modeParams=new FrameLayout.LayoutParams(dp(100),dp(48),Gravity.LEFT|Gravity.TOP);modeParams.leftMargin=dp(18);modeParams.topMargin=dp(18);
         mode.setOnClickListener(v -> setTouchMode(!touchMode));
-        mode.setOnLongClickListener(v -> {cloudSettings.showMenu();return true;});
         viewport.addView(mode,modeParams);
         Button system=new Button(this);systemControl=system;
         refreshSystemLabel();system.setTextColor(TouchControlsView.TEXT);system.setTextSize(16);
@@ -181,7 +176,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         status.setPadding(dp(28),dp(18),dp(28),dp(18));status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         status.setText(t("正在准备游戏文件"));root.addView(status,new FrameLayout.LayoutParams(-1,-1));setContentView(root);
         new Thread(() -> {
-            try { prepareModules();GraphicsDriverSettings.configure(this);cloudSettings.prepareProvider();ui.post(() -> {prepared=true;configureAndStart();}); }
+            try { prepareModules();GraphicsDriverSettings.configure(this);ui.post(() -> {prepared=true;configureAndStart();}); }
             catch(Exception e){ui.post(() -> fail(t("游戏文件准备失败"),e));}
         },"game-files").start();
     }
@@ -194,7 +189,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         game.setContentDescription(t("游戏画面"));
         if(modeControl!=null){modeControl.setText(strings.modeLabel(touchMode));modeControl.setContentDescription(strings.modeDescription(touchMode));}
         for(View view:menuControls){TextView button=(TextView)view;String label=(String)button.getTag();button.setText(t(label));button.setContentDescription(strings.menuDescription(label));}
-        if(cloudSettings!=null)cloudSettings.refreshText();
     }
     private int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
     private void setTouchMode(boolean on){
@@ -436,7 +430,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             JSONObject scene=s.optJSONObject("scene");inGame=scene!=null&&scene.optInt("game",0)!=0;
             long frame=s.getLong("presented_frames");
             if(frame>0&&touchControls!=null&&touchControls.refreshLanguage())refreshFrontendStrings();
-            if(cloudSettings!=null)cloudSettings.updateNativeStatus(nativeCloudStatus());
             if(frame>0)status.setVisibility(View.GONE);else status.setText(t(s.getString("phase")));
             if(resumed){double current=fpsSampler.sample(frame,SystemClock.elapsedRealtime());
                 if(!Double.isNaN(current)&&Double.compare(current,displayedFps)!=0){
@@ -463,11 +456,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if(configured){nativeControllerCancel(0);nativeActions(0,0,0,0,0);}
         if(touchControls!=null)touchControls.cancel();
     }}
-    @Override public void onResume(){super.onResume();resumed=true;if(cloudSettings!=null)cloudSettings.onResume();fpsSampler.reset();nativeKeyboardReady(true);if(configured)nativeAudioInterruption(false);if(configured)nativeLifecycle(2);configureAndStart();}
-    @Override public void onPause(){if(cloudSettings!=null)cloudSettings.onPause();clearControllers();closeRendererSettings();if(configured){nativeLifecycle(0);nativeLifecycle(1);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}resumed=false;fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;controllerButtons=0;if(touchControls!=null)touchControls.cancel();if(configured){nativeActions(0,0,0,0,0);nativeControllerCancel(0);}if(configured&&surfaceReady)publishSurface();super.onPause();}
-    @Override protected void onActivityResult(int request,int result,android.content.Intent data){super.onActivityResult(request,result,data);if(cloudSettings!=null)cloudSettings.onActivityResult(request,result,data);}
+    @Override public void onResume(){super.onResume();resumed=true;fpsSampler.reset();nativeKeyboardReady(true);if(configured)nativeAudioInterruption(false);if(configured)nativeLifecycle(2);configureAndStart();}
+    @Override public void onPause(){clearControllers();closeRendererSettings();if(configured){nativeLifecycle(0);nativeLifecycle(1);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}resumed=false;fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;controllerButtons=0;if(touchControls!=null)touchControls.cancel();if(configured){nativeActions(0,0,0,0,0);nativeControllerCancel(0);}if(configured&&surfaceReady)publishSurface();super.onPause();}
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}
-    @Override public void onDestroy(){if(cloudSettings!=null)cloudSettings.close();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();closeRendererSettings();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
+    @Override public void onDestroy(){if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();closeRendererSettings();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
 }

@@ -9,7 +9,6 @@
 #include "d2r_host_modules.h"
 #include "d2r_custom_android.h"
 #include "lifecycle_android.h"
-#include "cloud_android.h"
 #include "scale3d_android.h"
 #include "../gfx/nvn/nvn_vk_memory.h"
 #include "../host/dm_hud.h"
@@ -57,7 +56,7 @@ extern int dm_touch_game_snapshot(dm_tg_snapshot *) __attribute__((weak));
 extern void dm_touch_game_diagnostics(dm_tg_diagnostics *) __attribute__((weak));
 
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
-/* Focus callbacks stay short. Save waits, filesystem/cloud work and shutdown
+/* Focus callbacks stay short. Save waits, filesystem work and shutdown
  * run on a dedicated worker; SurfaceView already owns a separate GPU worker. */
 static pthread_mutex_t focus_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t lifecycle_cv = PTHREAD_COND_INITIALIZER;
@@ -149,7 +148,6 @@ static void status_text(char *text,size_t capacity) {
     if(dm_android_d2r_scene_status_get)dm_android_d2r_scene_status_get(&scene);
     dm_android_scale3d_status scale;dm_android_scale3d_status_get(&scale);
     DmVkMemoryStats memory={0};int memory_error=dm_vk_memory_get_stats(&memory);
-    dm_android_cloud_status cloud={0};int cloud_error=dm_android_cloud_status_get(&cloud);
     dm_tg_snapshot binding={0};dm_tg_diagnostics binding_diag={0};
     if(dm_touch_game_snapshot)dm_touch_game_snapshot(&binding);
     if(dm_touch_game_diagnostics)dm_touch_game_diagnostics(&binding_diag);
@@ -163,7 +161,6 @@ static void status_text(char *text,size_t capacity) {
         "\"binding_diag\":{\"scene_game\":%d,\"cohort_confirmed\":%d,\"cohort_seen\":%u,\"pending_seen\":%u,\"scene_epoch\":%llu,\"world_epoch\":%llu,\"cohort_world\":%llu,\"cohort_hud\":%llu,\"last_reason\":%d,\"lr\":%llu,\"slot\":%u,\"stage\":[%u,%u,%u,%u,%u,%u,%u,%u],\"reason\":[%u,%u,%u,%u,%u,%u,%u,%u]},"
         "\"scale3d\":{\"supported\":%d,\"quality\":%d,\"level\":%d,\"configured\":%.3f,\"current\":%.3f,\"floor\":%.3f,\"internal\":[%u,%u],\"output\":[%u,%u],\"target_ms\":%.3f,\"interval_ms\":%.3f,\"thermal\":%d,\"changes\":%llu,\"hold_until\":%llu,\"source\":\"queue-present-return\",\"scanout_completion\":false},"
         "\"gpu_memory\":{\"available\":%s,\"error\":%d,\"allocation_bytes\":%llu,\"peak_allocation_bytes\":%llu,\"texture\":%llu,\"sample_copy\":%llu,\"shadow\":%llu,\"pool\":%llu,\"support\":%llu,\"temp\":%llu,\"writeback\":%llu,\"readback\":%llu,\"present\":%llu,\"cpu_baseline\":%llu,\"temp_recording\":%llu,\"temp_inflight\":%llu,\"temp_retired\":%llu,\"trims\":%llu,\"last_trim_freed\":%llu},"
-        "\"cloud\":{\"available\":%s,\"configured\":%d,\"enabled\":%d,\"busy\":%d,\"pending\":%d,\"active\":%d,\"error\":%d,\"attempt\":%llu,\"successful_attempts\":%llu},"
         "\"input\":{\"ready\":%d,\"initialized\":%d,\"publications\":%llu,\"samples\":%llu,\"action_buttons\":%llu,\"controller_buttons\":%llu,\"raw_buttons\":%llu,\"buttons\":%llu,\"buttons_seen\":%llu,\"nonzero_samples\":%llu,\"attributes\":%u,\"id\":%u,\"style\":%u,\"lx\":%d,\"ly\":%d,\"rx\":%d,\"ry\":%d}}",current_phase,
         atomic_load(&sdk_ready)?"true":"false",atomic_load(&main_entered)?"true":"false",
         (unsigned long long)atomic_load(&presented_frames),atomic_load(&returned)?"true":"false",
@@ -200,8 +197,6 @@ static void status_text(char *text,size_t capacity) {
         (unsigned long long)memory.bytes[DM_VK_MEMORY_PRESENT],(unsigned long long)memory.cpu_baseline_bytes,
         (unsigned long long)memory.temp_recording_bytes,(unsigned long long)memory.temp_inflight_bytes,
         (unsigned long long)memory.temp_retired_bytes,(unsigned long long)memory.trim_count,(unsigned long long)memory.last_trim_freed_bytes,
-        cloud_error?"false":"true",cloud.configured,cloud.enabled,cloud.busy,cloud.pending,cloud.active,
-        cloud_error?cloud_error:cloud.last_error,(unsigned long long)cloud.attempt,(unsigned long long)cloud.successful_attempts,
         input.source_ready,input.npad_initialized,(unsigned long long)input.action_publications,
         (unsigned long long)input.npad_samples,(unsigned long long)input.action_buttons,
         (unsigned long long)input.controller_buttons,(unsigned long long)input.raw_buttons,
@@ -254,7 +249,7 @@ static void *lifecycle_worker(void *unused) {
         pthread_mutex_lock(&state_lock);
         while (shutdown_requested==1 || (!shutdown_requested && !background_pending_epoch && !foreground_pending))
             pthread_cond_wait(&lifecycle_cv,&state_lock);
-        int shutdown=shutdown_requested, foreground=foreground_pending;
+        int shutdown=shutdown_requested;
         foreground_pending=0;
         uint64_t epoch=background_pending_epoch, save_epoch=background_pending_save_epoch;
         uint64_t final_save_epoch=shutdown_save_epoch;
@@ -270,13 +265,11 @@ static void *lifecycle_worker(void *unused) {
                 LOG("Android lifecycle: destroy save wait %.0f ms commits=%llu froze=%d",elapsed,
                     (unsigned long long)commits,froze);
             }
-            dm_android_cloud_flush_wait(3.0);
             /* Shutdown's backend watchdog supplies the hard exit deadline;
              * never join a potentially blocked provider on the UI thread. */
             if (atomic_load(&started)) dm_host_shutdown("Android Activity destroyed");
             return NULL;
         }
-        if (foreground) dm_android_cloud_foreground();
         if (!epoch) continue;
         if (background_current(epoch)) {
             uint64_t commits=0; int froze=0; double elapsed=0;
@@ -289,7 +282,6 @@ static void *lifecycle_worker(void *unused) {
                 char save[PATH_MAX]; path(save,sizeof save,port_root,"save");
                 if (dm_android_fs_sync_tree(save)) LOG("Android lifecycle: save tree sync failed errno=%d",errno);
             }
-            if (background_current(epoch)) dm_android_cloud_flush_wait(2.5);
         }
         pthread_mutex_lock(&state_lock);
         /* The focus write and this check/apply share the same mutex. A stale
@@ -419,10 +411,6 @@ static void *game_thread(void *unused) {
 #endif
     const char *startup_locale=custom_locale?custom_locale:locale_tag;
     if(custom_locale) {setenv("DM_LANG",custom_locale,1);LOG("ANDROID_CUSTOM_LANGUAGE startup_locale=%s source=sw_custom.txt",custom_locale);}
-    /* Optional provider-backed save sync.  Startup runs before the guest
-     * mounts its save, matching iOS's dm_cloud_boot ordering. */
-    if ((error = dm_android_cloud_boot(save)))
-        LOG("Android cloud startup skipped/error=%d", error);
     char private_vulkan[PATH_MAX];path(private_vulkan,sizeof private_vulkan,port_root,"diagnostics/private-vulkan");
     if(access(private_vulkan,F_OK)==0)setenv("DM_PRIVATE_VULKAN","turnip",1);
     dm_android_platform_config config = {.mode=DM_ANDROID_HOST_ACTIVITY,
@@ -438,8 +426,8 @@ static void *game_thread(void *unused) {
     const char *names[]={"main","sdk","subsdk0"}; load_modules(modules,names,3);
     /* D2R's binding observer is an optional, build-gated title adapter.  It
      * only installs when the loaded artifact advertises OBS_BINDING_GETTER
-     * and the exact module size/identity checks pass; Echoes does not link
-     * this adapter and never reaches this path. */
+     * and the exact module size/identity checks pass; unreviewed titles do not
+     * link this adapter and never reach this path. */
 #ifdef DM_ANDROID_D2R_UI
     { int binding_attached=dm_touch_game_attach();
       int dm_android_d2r_host_attach(void); int host_attached=dm_android_d2r_host_attach();

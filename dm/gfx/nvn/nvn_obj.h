@@ -36,10 +36,10 @@ typedef struct {
     const void *snap;                    // 本序号的不可变副本（hle_nvn.c snap_tex）：命令载荷存它，不存游戏对象地址 | This serial's immutable snapshot (hle_nvn.c snap_tex): command payloads store it, not the game object's address
 } tex_t;                                                                                     FITS(tex_t, NVNtexture);
 #ifdef __ANDROID__
-/* The guest constructs adjacent 16-byte texture views (Echoes 1.1.0,
- * main+0x327238/0x327264). A larger host overlay corrupts its next copy
- * region. These are private HLE fields; the opaque guest object is copied
- * byte-for-byte, never interpreted as the original driver's field layout. */
+/* Guest code constructs adjacent 16-byte texture views. A larger host
+ * overlay corrupts the next copy region. These are private HLE fields; the
+ * opaque guest object is copied byte-for-byte, never interpreted as the
+ * original driver's field layout. */
 typedef struct {
     uint8_t set_levels:1,set_layers:1,set_format:1,set_target:1,
         set_swizzle:1,set_depth_mode:1,depth_mode:1,reserved:1;

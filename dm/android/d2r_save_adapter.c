@@ -19,7 +19,7 @@ _Static_assert(sizeof k_exp / sizeof k_exp[0] == 100, "D2R generated experience 
 const uint32_t dm_android_hud_exp_table_entries = HUD_EXPERIENCE ? 100 : 0;
 
 /* These offsets are shared with diag.c's reviewed D2R tick/HUD producer.
- * Echoes never links this file. Reads and writes use the kernel's checked
+ * Hosts without a reviewed D2R adapter never link this file. Reads and writes use the kernel's checked
  * same-process copy API so a stale guest heap pointer does not fault here. */
 #define D2R_BUILD_ID "db0507f36b84200ac05f75d76ed5026f"
 enum {

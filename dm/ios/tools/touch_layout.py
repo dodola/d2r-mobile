@@ -1176,38 +1176,35 @@ def _drop_rows(*rows):
 # the video page's table is replaced entirely with our rows: section header + one original-game checkbox per switch (following the fields of the 「自动拾取金币」(Auto Gold Pickup) row on the 「游戏」(Game) page). Widget names are TouchCustom_<key>,
 # and the host dm_custom.c reads whether each is checked and handles apply / discard / default. The checkbox message sends a harmless ClosePanel (same as 「极乐世界」(Elysium)), which the game does not recognize
 _CUSTOM_KEYS = ('auto_mana', 'merc_pot', 'drop_light', 'map_mark', 'item_notes', 'icloud', 'pot_pick', 'drop_haptic', 'gem_pick', 'store_btn', 'eco_fps', 'q3d', 'loot_filter', 'auto_buff', 'touch_swap_above')
-# 字在中英表（dm/i18n/ui_text.tsv 的 dmCustom<键名驼峰>），布局写 @键、跟原版语言走（英文版）；行高按中文行数分，英文必须同样行数（不然换语言排版变）
-# The text lives in the Chinese-English string table (dmCustom<key name in camel case> in dm/i18n/ui_text.tsv); layouts write @key and follow the
-# original game's language (English version); row height is assigned by the number of Chinese lines, and English must have the same number of lines
-# (otherwise the layout changes with the language)
 def _custom_key(key): return 'dmCustom' + ''.join(w.capitalize() for w in key.split('_'))   # auto_mana → dmCustomAutoMana（布局里 @键 遇下划线就断，键名不能带 _） | auto_mana → dmCustomAutoMana (in layouts @key stops at an underscore, so key names cannot contain _)
-def _custom_label(key):
-    import dm_i18n
-    t = {k: (zh, en) for k, zh, en in dm_i18n.rows()}[_custom_key(key)]
-    if t[0].count('\n') != t[1].count('\n'): raise SystemExit('touch_layout：自定义页 %s 的中英行数不同：%r / %r' % (key, t[0], t[1]))
-    return t[0]
-_CUSTOM_ROWS = tuple((k, '@' + _custom_key(k)) for k in _CUSTOM_KEYS)
+# Android deliberately has no platform cloud-sync implementation. Keep the
+# shared key table and its indices unchanged, but omit the iCloud row from the
+# Android layout. The default (iOS/macOS) keeps the complete row list.
+def _custom_keys(platform=None):
+    platform = (platform or os.environ.get('DM_PLATFORM', 'ios')).strip().lower()
+    return (('lang_en', '@dmCustomLang'),) + tuple((k, '@' + _custom_key(k)) for k in _CUSTOM_KEYS if not (platform == 'android' and k == 'icloud'))
 # 视频页的类会把它不认识的表格行整行隐藏（控件树：我们的行 +0x50 = 0，只剩没有勾选框的标题行可见），所以各行不进表格；
 # 但它不动滚动区里别的控件——各行包在一个容器 TouchCustomRows 里、挂在原版滚动区 ScrollView 下，内容多高原版就滚多高、滚出列表框的由原版裁掉
 # （和别的选项页同一套滚动：拖动、滚动条、滚轮）。原先各行直接钉在面板上、不在滚动区里，列表框只有 1260 高，11 行把行高压到了 98。
 # 尺寸取自同一控件树里表格排出来的值：行高 180；文字 1000×180；勾选框在行内 x 1315、70×70 垂直居中。标题行 180（下面的分隔金线按 180 行高摆）。
-# 第一行是语言开关（宿主键表里也排第一），之后是 _CUSTOM_KEYS 各行；加行 = 往 _CUSTOM_KEYS 加键（宿主 dm_custom.c 的 k_keys 同序加）
+# 第一行是语言开关（宿主键表里也排第一），之后是键表各行；加行 = 往 _CUSTOM_KEYS 加键（宿主 dm_custom.c 的 k_keys 同序加）
 # The video page's class hides any table row it does not recognize as a whole row (widget tree: our rows have +0x50 = 0, and only the header rows without checkboxes stay visible), so the rows do not go into the table;
 # but it does not touch other widgets in the scroll area -- the rows are wrapped in a container TouchCustomRows hung under the original scroll area ScrollView, so the original game scrolls as far as the content is tall and clips whatever scrolls out of the list box
-# (the same scrolling as the other option pages: drag, scrollbar, wheel). Previously the rows were pinned directly on the panel, outside the scroll area; the list box is only 1260 high, and 11 rows squeezed the row height down to 98.
-# Dimensions are taken from the values the table lays out in the same widget tree: row height 180; text 1000×180; checkbox at x 1315 within the row, 70×70, vertically centered. Header row 180 (the gold divider line below it is placed for a 180 row height).
-# The first row is the language switch (also first in the host's key table), followed by the rows of _CUSTOM_KEYS; adding a row = adding a key to _CUSTOM_KEYS (and to k_keys in the host's dm_custom.c in the same order)
+# (the same scrolling as the other options page: drag, scrollbar, wheel). Previously the rows were pinned directly on the panel, outside the scroll area; the list box is only 1260 high, and 11 rows squeezed the row height down to 98.
+# Dimensions are taken from the values the table lays out in the same widget tree: row height 180; text 1000x180; checkbox at x 1315 within the row, 70x70, vertically centered. Header row 180 (the gold divider line below it is placed for a 180 row height).
+# The first row is the language switch (also first in the host's key table), followed by the rows of the selected key table; adding a row = adding a key to _CUSTOM_KEYS (and to k_keys in the host's dm_custom.c in the same order)
 _CUSTOM_TITLE_H, _CUSTOM_LINE_H = 180, 180
-_CUSTOM_ALL = (('lang_en', '@dmCustomLang'),) + _CUSTOM_ROWS
+_CUSTOM_ALL = (('lang_en', '@dmCustomLang'),) + tuple((k, '@' + _custom_key(k)) for k in _CUSTOM_KEYS)
 _CUSTOM_TEST_ROWS = int(os.environ.get('DM_CUSTOM_TEST_ROWS', '0'))   # 测试（造现场）：末尾多摆这么多行假行，验更多行时的滚动；产品不设 | test (test setup): append this many dummy rows at the end, to verify scrolling with more rows; not set in the product
-# 「3D 画质」（q3d）是单选的两项、每项下面一行说明小字，占两行高（_CUSTOM_Q3D_H）；其余各行一行高
-# "3D Quality" (q3d) is a radio with two options, each with a line of small description text below, taking two rows of height (_CUSTOM_Q3D_H); every other row is one row high
+# 「3D 画质」（q3d）和「换组按钮在传送门上方」是单选的两项、每项下面一行说明小字，占两行高（_CUSTOM_Q3D_H）；其余各行一行高
+# "3D Quality" (q3d) and "Swap control above the portal" are radios with two options, each with a line of small description text below, taking two rows of height (_CUSTOM_Q3D_H); every other row is one row high
 _CUSTOM_Q3D_H = 2 * _CUSTOM_LINE_H
-_CUSTOM_ROW_H = [(_CUSTOM_Q3D_H if k in ('q3d', 'touch_swap_above') else _CUSTOM_LINE_H) for k, _ in _CUSTOM_ALL] + [_CUSTOM_LINE_H] * _CUSTOM_TEST_ROWS
-_CUSTOM_Y = [_CUSTOM_TITLE_H + sum(_CUSTOM_ROW_H[:i]) for i in range(len(_CUSTOM_ROW_H))]
-_CUSTOM_H = _CUSTOM_TITLE_H + sum(_CUSTOM_ROW_H)
-def _custom_toggle_row(i, key, label):
-    y, h = _CUSTOM_Y[i], _CUSTOM_LINE_H
+def _custom_geometry(keys):
+    row_h = [(_CUSTOM_Q3D_H if k in ('q3d', 'touch_swap_above') else _CUSTOM_LINE_H) for k, _ in keys] + [_CUSTOM_LINE_H] * _CUSTOM_TEST_ROWS
+    y = [_CUSTOM_TITLE_H + sum(row_h[:i]) for i in range(len(row_h))]
+    return row_h, y, _CUSTOM_TITLE_H + sum(row_h)
+def _custom_toggle_row(y, key, label):
+    h = _CUSTOM_LINE_H
     return ('        { "type": "TextBoxWidget", "name": "TouchCustom_%s_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "%s", "style": "$StyleSettingsText", "style/options/newlineHandling": "standard" } },\n'
             '        { "type": "ToggleButtonWidget", "name": "TouchCustom_%s", "fields": {\n'
             '            "rect": { "x": 1315, "y": %d, "width": 70, "height": 70 }, "sound": "cursor_menu_select_hd",\n'
@@ -1219,18 +1216,19 @@ def _custom_toggle_row(i, key, label):
 # 语言开关（第一行，普通行）：勾上 = 英文界面 + 英文语音，下次启动生效（宿主 dm_custom.c 的 lang_en、hle_fs.c settings_lang_apply）。
 # 「重启游戏后生效」那句先放在屏外，勾选与当前语言不一致时宿主挪到这一行文字的下半（横坐标取标签的）
 # Language switch (first row, an ordinary row): checked = English UI + English voice, effective at the next launch (lang_en in the host's dm_custom.c, settings_lang_apply in hle_fs.c).
-# The line 「重启游戏后生效」(Takes effect after restarting the game) is first placed off screen; when the checkbox does not match the current language the host moves it to the lower half of this row's text (x taken from the label)
-_CUSTOM_LANG_HINT = ''.join('        { "type": "TextBoxWidget", "name": "TouchCustomLangHint%s", "fields": { "rect": { "x": 99999, "y": %d, "width": 1400, "height": 60 }, "text": "@dmCustomLangHint%s", "style": "$StyleSettingsText", "style/fontFace": "BlizzardGlobal" } },\n'
-                            % (n, _CUSTOM_Y[0] + 112, n) for n in ('Zh', 'En'))   # 两句各一个控件，宿主按选中的语言摆其中一句 | One control per sentence; the host places one of them according to the chosen language
+# The line "Takes effect after restarting the game" is first placed off screen; when the checkbox does not match the current language the host moves it to the lower half of this row's text (x taken from the label)
+def _custom_lang_hint(y):
+    return ''.join('        { "type": "TextBoxWidget", "name": "TouchCustomLangHint%s", "fields": { "rect": { "x": 99999, "y": %d, "width": 1400, "height": 60 }, "text": "@dmCustomLangHint%s", "style": "$StyleSettingsText", "style/fontFace": "BlizzardGlobal" } },\n'
+                   % (n, y + 112, n) for n in ('Zh', 'En'))
 # 语言那一行是并排的两个选项「中文 / English」（单选：宿主 dm_custom.c 让两个勾选框互斥，存的仍是 lang_en 一个键）。
 # 这一行的字两种界面都要写汉字：英文界面缺省的 Formal 字体没有汉字（缺字画不出），所以这几个文字控件指定原版的全球字体 BlizzardGlobal
 # （原版标题页、队伍名等同样按控件指定它）。English 的勾选框留在各行勾选框那一列，「中文」的在它左边
-# The language row is two options side by side, 「中文 / English」 (single choice: the host dm_custom.c makes the two checkboxes mutually exclusive, and what is stored is still the one key lang_en).
+# The language row is two options side by side, "Chinese / English" (single choice: the host dm_custom.c makes the two checkboxes mutually exclusive, and what is stored is still the one key lang_en).
 # The text of this row has to show Chinese characters in both UIs: the default Formal font of the English UI has no Chinese characters (missing glyphs cannot be drawn), so these text controls specify the original global font BlizzardGlobal
-# (the original title page, party names and so on specify it per control in the same way). The checkbox of English stays in the column where every row has its checkbox; the one of 「中文」 is to its left
+# (the original title page, party names and so on specify it per control in the same way). The checkbox of English stays in the column where every row has its checkbox; the one of Chinese is to its left
 _LANG_ZH_X, _LANG_EN_X = (770, 905), (1100, 1315)   # （文字 x，勾选框 x） | (text x, checkbox x)
-def _custom_lang_row():
-    y, h = _CUSTOM_Y[0], 112; cy = y + (h - 70) // 2   # 标签、两个选项排在这一行的上 112，下面 68 留给提示那一句 | The label and the two options go in the top 112 of this row; the bottom 68 is left for the hint sentence
+def _custom_lang_row(y):
+    h = 112; cy = y + (h - 70) // 2   # 标签、两个选项排在这一行的上 112，下面 68 留给提示那一句 | The label and the two options go in the top 112 of this row; the bottom 68 is left for the hint sentence
     def text(name, x, w, key): return ('        { "type": "TextBoxWidget", "name": "%s", "fields": { "rect": { "x": %d, "y": %d, "width": %d, "height": %d }, "text": "@%s", "style": "$StyleSettingsText", "style/fontFace": "BlizzardGlobal" } },\n' % (name, x, y, w, h, key))
     def box(name, x): return ('        { "type": "ToggleButtonWidget", "name": "%s", "fields": {\n'
             '            "rect": { "x": %d, "y": %d, "width": 70, "height": 70 }, "sound": "cursor_menu_select_hd",\n'
@@ -1242,15 +1240,9 @@ def _custom_lang_row():
     return (text('TouchCustom_lang_en_Text', 0, 700, 'dmCustomLang')
             + text('TouchCustomLangZh_Text', _LANG_ZH_X[0], _LANG_ZH_X[1] - _LANG_ZH_X[0] - 10, 'dmCustomLangZh') + box('TouchCustom_lang_zh', _LANG_ZH_X[1])
             + text('TouchCustomLangEn_Text', _LANG_EN_X[0], _LANG_EN_X[1] - _LANG_EN_X[0] - 10, 'dmCustomLangEnOpt') + box('TouchCustom_lang_en', _LANG_EN_X[1]))
-# 「3D 画质」（流畅优先（缺省，掉帧自动降 3D 比例）/ 画质优先（不自动降））：上下两项单选，每项标题下一行说明小字。
-# 存的是一个键 q3d（1 = 画质优先）：「画质优先」的勾选框叫 TouchCustom_q3d、「流畅优先」的叫 TouchCustom_q3d_smooth（它的反面），宿主 dm_custom.c 让两框互斥（同语言行）。
-# TouchCustom_q3d_Text 是空字、高度盖住两项的框：手柄选中框按「文字框与勾选框的上下沿取并」框住整行（dm_custom.c），所以用它把两项一起框进去
-# "3D Quality" (Smoothness first (default, automatically lowers the 3D scale on frame drops) / Quality first (no automatic lowering)): a stacked two-option radio, each option with a line of small description text below its title.
-# It stores a single key q3d (1 = quality first): the "Quality first" checkbox is TouchCustom_q3d and the "Smoothness first" one is TouchCustom_q3d_smooth (its inverse); the host's dm_custom.c makes the two boxes mutually exclusive (like the language row).
-# TouchCustom_q3d_Text is an empty-text box tall enough to cover both options: the controller selection frame wraps the whole row by "the union of the top/bottom edges of the text box and the checkbox" (dm_custom.c), so it is used to frame both options together
-def _custom_q3d_row(i, setting="q3d"):
-    prefix = "TouchCustom_" + setting
-    y = _CUSTOM_Y[i]; h = _CUSTOM_LINE_H
+def _custom_q3d_row(y, setting='q3d'):
+    prefix = 'TouchCustom_' + setting
+    h = _CUSTOM_LINE_H
     def text(name, yy, hh, key, small): return ('        { "type": "TextBoxWidget", "name": "%s", "fields": { "rect": { "x": 0, "y": %d, "width": 1200, "height": %d }, "text": "@%s", "style": %s } },\n'
                                                 % (name, yy, hh, key, '{ "fontColor": "$FontColorGray", "pointSize": 30, "alignment": { "h": "left", "v": "center" } }' if small else '"$StyleSettingsText"'))
     def box(name, yy): return ('        { "type": "ToggleButtonWidget", "name": "%s", "fields": {\n'
@@ -1266,8 +1258,11 @@ def _custom_q3d_row(i, setting="q3d"):
         yy = y + k * h
         out += text(nm + '_Label', yy + 10, 100, key, False) + text(nm + '_Hint', yy + 100, 70, key + 'Hint', True) + box(nm, yy + 15)
     return out
-def _custom_page(text):
+def _custom_page(text, keys=None):
     if '"name": "VideoOptionsPanel"' not in text or '"name": "OptionsTable"' not in text: raise SystemExit('touch_layout：主机版视频页不是原样（原版布局变了？），自定义页没换')
+    keys = tuple(keys if keys is not None else _custom_keys())
+    if not keys or keys[0][0] != 'lang_en': raise SystemExit('touch_layout：自定义页第一行必须是 lang_en')
+    row_h, y, height = _custom_geometry(keys)
     title = ('{ "type": "TableRowWidget", "name": "Row TouchCustomTitle", "children": [\n'
              '    { "type": "TextBoxWidget", "name": "TouchCustomTitle", "fields": { "text": "@KeyBindingTypeCustom", "style": "$StyleSettingsTitle" }, "children": [\n'
              '        { "type": "ImageWidget", "name": "Divider", "fields": { "rect": "$OptionsDividerRect", "filename": "PauseMenu\\\\Divider" } },\n'
@@ -1278,23 +1273,22 @@ def _custom_page(text):
            '        { "type": "ScrollViewWidget", "name": "ScrollView", "children": [\n'
            '            { "type": "TableWidget", "name": "OptionsTable", "fields": { "columns": [ "$OptionsTableColumn1", "$OptionsTableColumn2" ], "rowHeight": %d }, "children": [\n' % _CUSTOM_TITLE_H
            + title + '            ] },\n'
-           + '            { "type": "Widget", "name": "TouchCustomRows", "fields": { "rect": { "x": 0, "y": 0, "width": 1500, "height": %d } }, "children": [\n' % _CUSTOM_H
-           + _custom_lang_row() + ''.join((_custom_q3d_row(i, k) if k in ('q3d', 'touch_swap_above') else _custom_toggle_row(i, k, l)) for i, (k, l) in enumerate(_CUSTOM_ALL) if i) + _CUSTOM_LANG_HINT
+           + '            { "type": "Widget", "name": "TouchCustomRows", "fields": { "rect": { "x": 0, "y": 0, "width": 1500, "height": %d } }, "children": [\n' % height
+           + _custom_lang_row(y[0]) + ''.join((_custom_q3d_row(y[i], k) if k in ('q3d', 'touch_swap_above') else _custom_toggle_row(y[i], k, l)) for i, (k, l) in enumerate(keys) if i) + _custom_lang_hint(y[0])
            + ''.join('        { "type": "TextBoxWidget", "name": "TouchCustomTest%d_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "@KeyBindingTypeCustom", "style": "$StyleSettingsText" } },\n'
-                     % (n, _CUSTOM_Y[len(_CUSTOM_ALL) + n], _CUSTOM_LINE_H) for n in range(_CUSTOM_TEST_ROWS)) +
+                     % (n, y[len(keys) + n], _CUSTOM_LINE_H) for n in range(_CUSTOM_TEST_ROWS)) +
            # 手柄模式的选中框（同符文之语清单 TouchRwSel）：框住十字键选中的那一行，宿主摆（dm_custom.c）；触屏模式一直在屏外（只把 x 挪出去、y 留在内容范围内：滚动区按子控件的范围算内容高度，y 放到 99999 会把可滚范围撑到十万）。和各行在同一个容器里，跟着滚
            # Selection frame in controller mode (same as TouchRwSel of the runeword list): frames the row selected with the D-pad, positioned by the host (dm_custom.c); always off-screen in touch mode (only x is moved out while y stays within the content range: the scroll area computes the content height from the extent of its child widgets, and a y of 99999 would stretch the scrollable range to a hundred thousand). It is in the same container as the rows and scrolls with them
            '        { "type": "NineTileImageWidget", "name": "TouchCustomSel", "fields": { "rect": { "x": 99999, "y": 0, "width": 1000, "height": 100 }, "backgroundColor": [ 0, 0, 0, 0 ], '
            '"filename": "Controller/PANEL/ControllerSelector/ControllerSelectorBorder", "tileScale": 0.5 } },\n'
            '            ] },\n        ] },\n'
            '    ]\n}\n')
-    return out, len(_CUSTOM_ALL) + 2
+    return out, len(keys) + 2
 PRESENT['controller/console/videooptionspanelhd.json'] = _custom_page
 # 手柄版选项页：原版页签条不动，只把第一项「视频」换成「自定义」——它打开的视频页就是上面那份自定义页（两种模式同一份内容）
-# Controller options page: the original tab bar is untouched, only the first item "Video" is replaced by "Custom"; the video page it opens is the Custom
-# page above (same content in both modes)
+# Controller options page: the original tab bar is untouched, only the first item "Video" is replaced by "Custom"; the video page it opens is the Custom page above (same content in both modes)
 def pad_settings(s): return _sub1(s, '"@OptionsMenuVideo"', '"@KeyBindingTypeCustom"')   # 原版串：自定义 / Custom（跟游戏语言走） | original string: "Custom" in Chinese / English (follows the game language)
-def pad_custom_page(s): return _custom_page(s)[0]
+def pad_custom_page(s): return _custom_page(s, _custom_keys())[0]
 # 挂进 PRESENT：build_ingame 对同一份文件（往选项页插「应用 / 默认 / 放弃」）会先套这里的变换再插按钮，不会出两份覆盖互相盖掉
 # Hooked into PRESENT: for the same file (inserting 「应用 / 默认 / 放弃」(Apply / Default / Discard) into the options page) build_ingame applies the transform here first and then inserts the buttons, so two overlays that overwrite each other are not produced
 PRESENT['controller/console/settingspanelhd.json'] = _settings_tabs

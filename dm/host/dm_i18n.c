@@ -96,7 +96,7 @@ const char *dm_ui(const char *key) {
 
 const char *dm_str(uint8_t *b, const char *key) {
 #if defined(DM_ANDROID_HOST)
-    /* Echoes has no reviewed string-table observer yet.  Returning the
+    /* The generic host has no reviewed string-table observer yet. Returning the
      * generated fallback is safe and avoids a D2R-private offset. */
     (void)b;
     return dm_ui(key);

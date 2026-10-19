@@ -11,9 +11,9 @@
 
 extern uint64_t dm_fs_commit_count(void);
 
-/* Echoes currently has no reviewed game-private HUD offsets. Do not
- * manufacture an in-game result or poke an arbitrary address: a title
- * adapter must bind these callbacks after validating its exact build. The
+/* D2R HUD offsets are title-private. Do not manufacture an in-game result or
+ * poke an arbitrary address: a title adapter must bind these callbacks after
+ * validating its exact build. The
  * generic part still observes real transactional Commit events and durably
  * syncs the committed tree for lifecycle callers. */
 static pthread_mutex_t adapter_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -79,7 +79,7 @@ static int adapter_snapshot(dm_android_save_adapter *out, char *title, size_t ti
 
 static void log_missing_adapter(void) {
     if (!atomic_exchange(&missing_logged, 1))
-        LOG("ANDROID_SAVE_ADAPTER_UNAVAILABLE title=echoes-of-wisdom reason=game-private save offsets are not registered; lifecycle will only sync the transaction tree");
+        LOG("ANDROID_SAVE_ADAPTER_UNAVAILABLE title=d2r reason=game-private save offsets are not registered; lifecycle will only sync the transaction tree");
 }
 
 static uint64_t save_wait_limit(double max_s) {

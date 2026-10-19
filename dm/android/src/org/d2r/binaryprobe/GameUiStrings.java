@@ -56,26 +56,6 @@ final class GameUiStrings {
             case "缺少游戏图形缓存":return "Game graphics cache missing";
             case "输入内容":return "Enter text";
             case "设置":return "Settings";
-            case "存档同步目录":return "Save sync folder";
-            case "存档同步":return "Save sync";
-            case "是否传输由游戏「自定义」中的存档同步开关控制。":return "Transfers are controlled by Save Sync in the game's Custom settings.";
-            case "所选目录将在下次启动游戏时用于同步。":return "The selected folder will be used for sync the next time the game starts.";
-            case "将在下次启动游戏时断开目录。":return "The folder will be disconnected the next time the game starts.";
-            case "已连接":return "Connected";
-            case "待重启":return "Restart required";
-            case "未授权":return "Not authorized";
-            case "授权已失效":return "Access expired";
-            case "同步失败":return "Sync failed";
-            case "选择目录":return "Choose folder";
-            case "重新选择":return "Choose another folder";
-            case "断开":return "Disconnect";
-            case "关闭":return "Close";
-            case "已同步到所选目录":return "Synced to the selected folder";
-            case "正在同步到所选目录…":return "Syncing to the selected folder…";
-            case "无法打开目录选择器":return "Could not open the folder picker";
-            case "需要目录的读写授权":return "Read and write access to the folder is required";
-            case "无法保存目录授权":return "Could not save folder access";
-            case "无法保存目录设置":return "Could not save folder settings";
             default:return zh;
         }
     }

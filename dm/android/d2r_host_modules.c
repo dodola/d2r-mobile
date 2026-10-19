@@ -1,6 +1,5 @@
 #include "d2r_host_modules.h"
 #include "d2r_save_adapter.h"
-#include "cloud_android.h"
 #include "../host/dm.h"
 #include "../host/hle.h"
 #include "../host/dm_hud.h"
@@ -263,7 +262,6 @@ static void d2r_uimsg(const uint64_t *regs) {
       if(!g_ui_enabled)
 #endif
       dm_custom_on_uimsg(category, action, argument); }
-    dm_android_cloud_message(category, action);
     dm_rift_ui_on_uimsg(category,action,argument);
     { void dm_padmode_on_uimsg(const char *,const char *,const char *);
       dm_padmode_on_uimsg(category,action,argument); }

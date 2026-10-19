@@ -31,11 +31,10 @@ add_library(dm_android_core OBJECT
   # verified title transport; dm_i18n uses the Android locale fallback and
   # dm_namegen is pure utility code.  Modules that inspect title-private
   # object layouts (vault/pouch/actions/cursor/world, etc.) remain opt-in
-  # title adapters below and must not be guessed from the Echoes image.
+  # title adapters below and must not be inferred from another title.
   ${DM_HOST}/dm_hud.c ${DM_HOST}/dm_textbox_core.c ${DM_HOST}/dm_rwlv_core.c
-  ${DM_HOST}/dm_cloudsync.c ${DM_HOST}/dm_custom.c ${DM_HOST}/dm_i18n.c
+  ${DM_HOST}/dm_custom.c ${DM_HOST}/dm_i18n.c
   ${DM_HOST}/dm_namegen.c
-  cloud_android.c
   lifecycle_android.c
   save_notice_android.c
   ${DM_HOST}/hle_lifecycle.c ${DM_HOST}/hle_friends.c ${DM_HOST}/hle_misc.c
@@ -52,33 +51,11 @@ target_link_libraries(dm_android_core PUBLIC android log dl m aaudio)
 target_link_options(dm_android_core INTERFACE -Wl,-z,nostart-stop-gc)
 add_executable(dm_android_host_probe host_probe.c gate_check.S)
 
-# Keep the standalone bring-up probe's module set/build labels in sync with
-# the pinned source profile. This does not change the D2R app bootstrap.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/titles/echoes-of-wisdom.json" DM_PROBE_TITLE_JSON)
-string(JSON DM_PROBE_PROGRAM_ID GET "${DM_PROBE_TITLE_JSON}" program_id)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/titles/echoes-of-wisdom.json")
-set(DM_PROBE_MODULE_ROWS "")
-string(JSON DM_PROBE_MODULE_COUNT LENGTH "${DM_PROBE_TITLE_JSON}" module_order)
-math(EXPR DM_PROBE_MODULE_LAST "${DM_PROBE_MODULE_COUNT}-1")
-foreach(DM_PROBE_INDEX RANGE ${DM_PROBE_MODULE_LAST})
-  string(JSON DM_PROBE_NAME GET "${DM_PROBE_TITLE_JSON}" module_order ${DM_PROBE_INDEX})
-  string(JSON DM_PROBE_BUILD GET "${DM_PROBE_TITLE_JSON}" versions "196608" modules "${DM_PROBE_NAME}" build_id)
-  string(SUBSTRING "${DM_PROBE_BUILD}" 0 32 DM_PROBE_BUILD_SHORT)
-  string(APPEND DM_PROBE_MODULE_ROWS "{\"${DM_PROBE_NAME}\",\"${DM_PROBE_BUILD_SHORT}\"},\n")
-endforeach()
-file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
-configure_file(title_probe_profile.h.in "${CMAKE_BINARY_DIR}/generated/title_probe_profile.h" @ONLY)
-target_include_directories(dm_android_host_probe PRIVATE "${CMAKE_BINARY_DIR}/generated")
+
 target_compile_options(dm_android_host_probe PRIVATE -Wall -Wextra -Werror -ffixed-x18)
 target_link_libraries(dm_android_host_probe PRIVATE dm_android_core)
 
-# Explicit original-SDK audio regression, separate from either game APK.
-add_executable(dm_android_ar_probe EXCLUDE_FROM_ALL host_probe.c gate_check.S audio_renderer_android.c tests/t_audio_renderer_device.c)
-target_include_directories(dm_android_ar_probe PRIVATE "${CMAKE_BINARY_DIR}/generated" ../host)
-target_compile_definitions(dm_android_ar_probe PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0 DM_AUDIO_RENDERER_TEST)
-target_compile_options(dm_android_ar_probe PRIVATE -Wall -Wextra -Werror -Wno-format -ffixed-x18)
-target_link_libraries(dm_android_ar_probe PRIVATE dm_android_core)
-target_link_options(dm_android_ar_probe PRIVATE -Wl,-z,max-page-size=16384)
+
 target_link_options(dm_android_host_probe PRIVATE -Wl,-z,max-page-size=16384)
 # An explicit standalone test target; never adds test hooks to the game APK.
 get_target_property(DM_NVNGFX_TEST_SOURCES dm_android_gfx SOURCES)
@@ -192,11 +169,7 @@ add_executable(dm_android_d2r_custom_consumers_probe EXCLUDE_FROM_ALL tests/t_d2
 target_compile_definitions(dm_android_d2r_custom_consumers_probe PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0)
 target_compile_options(dm_android_d2r_custom_consumers_probe PRIVATE -Wall -Wextra -Werror -Wno-format -ffixed-x18)
 target_link_libraries(dm_android_d2r_custom_consumers_probe PRIVATE dl)
-add_executable(dm_android_cloud_probe EXCLUDE_FROM_ALL tests/t_cloud_android_device.c)
-target_compile_definitions(dm_android_cloud_probe PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0)
-target_compile_options(dm_android_cloud_probe PRIVATE -Wall -Wextra -Werror -Wno-format -ffixed-x18 -UNDEBUG)
-target_link_libraries(dm_android_cloud_probe PRIVATE dl)
-target_link_options(dm_android_cloud_probe PRIVATE -Wl,--export-dynamic-symbol=fsync)
+
 add_executable(dm_android_d2r_autobuff_setting_probe EXCLUDE_FROM_ALL tests/t_d2r_autobuff_setting.c)
 target_compile_definitions(dm_android_d2r_autobuff_setting_probe PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0 DM_ANDROID_HOST=1)
 target_compile_options(dm_android_d2r_autobuff_setting_probe PRIVATE -Wall -Wextra -Werror -Wno-format -Wno-unused-function -ffunction-sections -fdata-sections -ffixed-x18)
@@ -236,7 +209,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
   # d2r_host_modules.c attaches only the gates present in the loaded artifact.
   set(DM_ANDROID_VAULT_TABLE "" CACHE FILEPATH "Generated dm_vault_tab.h for the D2R UI bridge")
   option(DM_ANDROID_D2R_HOST_MODULES "Enable verified D2R 94012 private adapters" OFF)
-  add_library(d2r_mobile_android SHARED app_jni.c cloud_jni.c ${DM_RESOURCE_PROBE_SOURCE})
+  add_library(d2r_mobile_android SHARED app_jni.c ${DM_RESOURCE_PROBE_SOURCE})
   target_include_directories(d2r_mobile_android PRIVATE "${CMAKE_BINARY_DIR}/generated")
   if(DM_ANDROID_D2R_HOST_MODULES)
   if(NOT DM_ANDROID_VAULT_TABLE)

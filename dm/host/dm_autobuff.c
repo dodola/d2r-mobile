@@ -111,7 +111,7 @@ static int enabled(void) { static int env = -2; if (env == -2) { const char *e =
     if (env >= 0) return env;
 #if defined(DM_ANDROID_HOST)
     /* Only the reviewed D2R adapter opts the Android product into this
-     * private gameplay feature. Generic/Echoes hosts never provide it. */
+     * private gameplay feature. Hosts without the reviewed callback never provide it. */
     int dm_android_title_custom_settings(void) __attribute__((weak));
     return dm_android_title_custom_settings && dm_android_title_custom_settings() && dm_custom_get("auto_buff");
 #else

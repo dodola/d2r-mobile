@@ -76,16 +76,18 @@ int main(int argc,char **argv) {
     put64(scroll,0x58,(uintptr_t)scroll_children);put64(scroll,0x60,1);put64(view,0x58,(uintptr_t)view_children);put64(view,0x60,1);
     put64(mods[0].base,0x2f05458,(uintptr_t)root);put64(mods[0].base,0x20c0000+7*8,base+0xae5f28);
     const char *keys[]={"lang_en","auto_mana","merc_pot","drop_light","map_mark","item_notes","icloud","pot_pick","drop_haptic","gem_pick","store_btn","eco_fps","q3d","loot_filter","auto_buff","touch_swap_above"};
-    char names[32][64];uint8_t *box[16],*labels[16];unsigned count=0;
+    char names[32][64];uint8_t *box[16],*labels[16];int32_t row_y[16];unsigned count=0,visual=0;
     for(int i=0;i<16;i++) {
+        row_y[i]=visual*180;
         snprintf(names[i*2],64,"TouchCustom_%s",keys[i]);snprintf(names[i*2+1],64,"TouchCustom_%s_Text",keys[i]);
-        box[i]=widget(names[i*2],DM_VT_TOGGLE,rows,1315,i*180+30,70,70);box[i][0xa88]=127;
-        labels[i]=widget(names[i*2+1],DM_VT_TEXT,rows,25,i*180,1000,180);
+        box[i]=widget(names[i*2],DM_VT_TOGGLE,rows,1315,row_y[i]+30,70,70);box[i][0xa88]=127;
+        labels[i]=widget(names[i*2+1],DM_VT_TEXT,rows,25,row_y[i],1000,180);
         row_children[count++]=(uintptr_t)box[i];row_children[count++]=(uintptr_t)labels[i];
+        if(i!=6)visual+=(i==12||i==15)?2:1;
     }
     uint8_t *zh=widget("TouchCustom_lang_zh",DM_VT_TOGGLE,rows,905,30,70,70);
-    uint8_t *smooth=widget("TouchCustom_q3d_smooth",DM_VT_TOGGLE,rows,1315,12*180,70,70);
-    uint8_t *near=widget("TouchCustom_touch_swap_above_near",DM_VT_TOGGLE,rows,1315,15*180,70,70);
+    uint8_t *smooth=widget("TouchCustom_q3d_smooth",DM_VT_TOGGLE,rows,1315,row_y[12]+180,70,70);
+    uint8_t *near=widget("TouchCustom_touch_swap_above_near",DM_VT_TOGGLE,rows,1315,row_y[15]+180,70,70);
     uint8_t *hint_en=widget("TouchCustomLangHintEn",DM_VT_TEXT,rows,99999,112,1400,60);
     uint8_t *hint_zh=widget("TouchCustomLangHintZh",DM_VT_TEXT,rows,99999,112,1400,60);
     uint8_t *selection=widget("TouchCustomSel",0x20bc048,rows,99999,0,1000,100);
@@ -98,7 +100,8 @@ int main(int argc,char **argv) {
     gate(0x1000,"obs",OBS_UIMSG,0);gate(0x2000,"obs",OBS_TICK,0);gate(0x3000,"obs",OBS_C2S,0);CHECK(!attach(&mods[0]));
     gate(0x8100,"svc",SVC_HOST_C2S_DELIVER,0);size_t size=mods[0].size;mods[0].size=0x1000;CHECK(!attach(&mods[0]));mods[0].size=size;CHECK(attach(&mods[0]));
     pump((uintptr_t)root);CHECK(box[1][0xa88]==127);run();
-    for(int i=0;i<16;i++){int def=i!=0&&i!=11&&i!=12&&i!=15;CHECK(frames(box[i],def)&&get(keys[i])==def);}
+    CHECK(box[6][0xa88]==127);
+    for(int i=0;i<16;i++){if(i==6)continue;int def=i!=0&&i!=11&&i!=12&&i!=15;CHECK(frames(box[i],def)&&get(keys[i])==def);}
     CHECK(frames(zh,1)&&frames(smooth,1)&&frames(near,1)&&!panel[0x1a0]);
     CHECK(fps_setting()==60);box[11][0xa88]=1;run();CHECK(panel[0x1a0]&&fps_setting()==60);
     message("OptionsPanelMessage","CancelChanges","");run();CHECK(fps_setting()==60&&!checked(box[11]));
@@ -174,6 +177,11 @@ int main(int argc,char **argv) {
     run();int32_t selected_rect[4];memcpy(selected_rect,selection+0x70,16);CHECK(selected_rect[0]==-5&&selected_rect[1]==-10);
     CHECK(!page_filter(DM_BTN_DOWN));run();memcpy(selected_rect,selection+0x70,16);CHECK(selected_rect[1]==170);
     CHECK(!page_filter(0)&&!page_filter(DM_BTN_UP));run();memcpy(selected_rect,selection+0x70,16);CHECK(selected_rect[1]==-10);
+    for(int i=1;i<=5;i++){CHECK(!page_filter(0)&&!page_filter(DM_BTN_DOWN));run();}
+    memcpy(selected_rect,selection+0x70,16);CHECK(selected_rect[1]==row_y[5]-10);
+    CHECK(!page_filter(0)&&!page_filter(DM_BTN_DOWN));run();memcpy(selected_rect,selection+0x70,16);CHECK(selected_rect[1]==row_y[7]-10&&box[6][0xa88]==127);
+    CHECK(!page_filter(0)&&!page_filter(DM_BTN_UP));run();memcpy(selected_rect,selection+0x70,16);CHECK(selected_rect[1]==row_y[5]-10&&box[6][0xa88]==127);
+    for(int i=1;i<=5;i++){CHECK(!page_filter(0)&&!page_filter(DM_BTN_UP));run();}
     CHECK(!page_filter(0)&&!page_filter(DM_BTN_DOWN));run();
     CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(!checked(box[1])&&get("auto_mana")==1&&panel[0x1a0]);
     CHECK(!page_filter(DM_BTN_A));run();CHECK(!checked(box[1])&&panel[0x1a0]);
@@ -184,6 +192,6 @@ int main(int argc,char **argv) {
     for(int i=0;i<4;i++)tick();CHECK(!page_filter(0)&&page_filter(DM_BTN_A)==DM_BTN_A);run();CHECK(!checked(box[1])&&!panel[0x1a0]);
     modal[0x50]=0;run();CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(checked(box[1])&&panel[0x1a0]);
     message("OptionsPanelMessage","CancelChanges","");run();
-    printf("ANDROID_D2R_CUSTOM_OK checks=%d rows=16 checked_widget_transport=1 original_layout_call_recorded=1 apply_discard_defaults=1 radio_pairs=3 controller_page_keys=1 controller_repeat_guard=1 modal_release=1 dirty_original_contract=1 disk_commit=1 lifetime_guards=1 guest_thread_scope=1 synthetic_memory=1 original_game_not_claimed=1\n",checks);
+    printf("ANDROID_D2R_CUSTOM_OK checks=%d shared_rows=16 android_navigable=15 checked_widget_transport=1 original_layout_call_recorded=1 apply_discard_defaults=1 radio_pairs=3 controller_page_keys=1 controller_repeat_guard=1 modal_release=1 dirty_original_contract=1 disk_commit=1 lifetime_guards=1 guest_thread_scope=1 synthetic_memory=1 original_game_not_claimed=1\n",checks);
     return 0;
 }

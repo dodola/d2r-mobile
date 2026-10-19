@@ -18,10 +18,9 @@ see the [parity record](docs/ANDROID_IOS_PARITY.md) and
 [main integration notes](docs/ANDROID_MAIN_INTEGRATION_2026-10-19.zh-CN.md).
 The integrated main build still needs original-game acceptance testing.
 
-Zelda: Echoes of Wisdom porting is paused. Historical standalone probe profiles
-remain in the [Android title notes](dm/android/titles/README.md); no Zelda app
-entry point is included in this integration. Gameplay measurements below refer
-to D2R.
+Zelda: Echoes of Wisdom port work has stopped and is not scheduled. Its
+title-specific Android entry points, probes, profiles and porting tools have
+been removed. Gameplay measurements below refer to D2R.
 
 ## Android support — experimental
 

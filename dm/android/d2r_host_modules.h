@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-/* Reviewed D2R 3.3.94012 host adapters; never linked into Echoes. */
+/* Reviewed D2R 3.3.94012 host adapters; linked only after exact title identity checks. */
 int dm_android_d2r_host_attach(void);
 int dm_android_title_host_call(int number, uint64_t *registers);
 

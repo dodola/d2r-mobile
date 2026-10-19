@@ -1,6 +1,6 @@
 # Android 工作回归 main（2026-10-19）
 
-本次将 D2R Android 的有效工作整合回 `main`。暂停 Zelda 移植；此前暂停的 iOS 功能对齐目标不在本次恢复，云同步继续低优先级。
+本次将 D2R Android 的有效工作整合回 `main`。Zelda 移植已彻底停止且不再排期；Android 平台云同步明确不实现。此前暂停的 iOS 功能对齐目标不在本次恢复。
 
 ## 分支处理
 
@@ -9,13 +9,13 @@
 | `codex/d2r-offline-installer`，`ed20612` | 已包含在原 main `dd0e3c7`，不重复合并。保留离线安装器、启动图标、严格包校验和驱动选择。 |
 | `upstream/main`，`9393b00` | 合并上游后续修复，包含 v1.0.18 的 guest_dylib 修正及 iOS 音频行为。 |
 | `codex/android-measured-optimizations`，`ed0db1c` | 合并剩余管线缓存持久化及预热；复用 main 的驱动缓存与锁，保留异步翻译、驱动兼容及顶点格式处理。 |
-| `codex/zelda-echoes-of-wisdom-android`，`b1546ff` | 仅转入该检查点内的 D2R Android/iOS 对齐工作，手工解决与 main 修复的重叠。旧历史存在补丁等价的重放提交，因此不整体 merge 此分支。 |
+| `codex/zelda-echoes-of-wisdom-android`，`b1546ff` | 仅转入该检查点内可复用的 D2R Android/iOS 对齐工作，手工解决与 main 修复的重叠。该分支只保留作历史参考。 |
 
-旧分支保留作历史参考。Zelda 分支的 Git 祖先关系不会显示为全部已合并；这不代表应继续合并其整条历史。新增 Zelda Activity、应用 manifest、应用构建 target 和专用 APK 打包工具未转入 main；main 原有、明确标为未完成游戏验证的独立探针资料保留。
+Zelda 分支保留作历史参考，不再整体合并或继续开发。Zelda Activity、应用 manifest、应用构建 target、探针 profile、测试、音频探针脚本和专用 APK 打包工具均已从 `main` 移除。
 
 ## 主线约定与版本边界
 
-- 后续 D2R Android 工作从 `main` 开始，避免继续提交到 Zelda 命名分支。
+- 后续 Android 工作只从 `main` 开始；Zelda 与 Android 平台云同步均不属于后续排期。
 - 离线生产链 `tools/d2r-mobile-port/build_apk.py` / `build_offline_package.py` 仍绑定 **91738**。默认 CMake 构建不需要新版专用资源表，保留通用触控、手柄输入、事务存档、系统画质菜单和驱动选择。
 - **94012** 私有场景、技能、物品及后台主动存档桥使用显式 `DM_ANDROID_D2R_HOST_MODULES=ON`，并要求匹配资源生成的 `DM_ANDROID_VAULT_TABLE`；完整 HUD 还需对应经验表与原生图集。运行时继续验证模块身份和锚点，拒绝把 94012 地址应用到 91738。
 - `dm/tools/android_d2r_apk.py` 为 94012 独立诊断包流程；其模块、RomFS、overlay、字体、shader 与 HUD 素材必须匹配，不能混用 91738 离线资源包。未建立新的 94012 生产离线发布链。
@@ -28,6 +28,6 @@
 
 主线 merge runner 全部通过，包含 4,463 项触控状态检查、73 项存档恢复检查、dirty/pacing/presentation 回归，以及 200 个真实 pthread 的生命周期测试（800 次分配全部释放，覆盖显式 detach 与线程退出）。整合同时修复了 TLS 视图改为独立 owner 后遗留的 Android 释放路径。
 
-本次检查不代表整合版已完成原游戏端到端验收。设备游戏未替换，已部署基线仍见 [功能对齐记录](ANDROID_IOS_PARITY.md)。实体手柄硬件、94012 全部物品/技能流程、云同步和跨设备效果仍按该记录的未完成项处理。
+本次检查不代表整合版已完成原游戏端到端验收。设备游戏未替换，已部署基线仍见 [功能对齐记录](ANDROID_IOS_PARITY.md)。实体手柄硬件与 94012 全部物品/技能流程仍按该记录的未完成项处理。
 
 本地整合收据：`D:/AndroidSwitch/analysis/main-integration-20261019/`；Java候选与API编译收据：`D:/AndroidSwitch/analysis/parity-20261019/main-integration/frontend-candidate/`。生成资源和游戏文件留在 checkout 外。
