@@ -67,8 +67,11 @@ static VkPipeline depth_copy_pipeline(VkFormat format,VkRenderPass pass,int sten
         .pVertexInputState=&vi,.pInputAssemblyState=&ia,.pViewportState=&vp,.pRasterizationState=&rs,.pMultisampleState=&ms,
         .pDepthStencilState=&ds,.pColorBlendState=&cb,.pDynamicState=&dy,.layout=DepthCopy.layout,.renderPass=pass};
     uint64_t started=dm_android_nvn_clock_ns();
-    CHECK(vkCreateGraphicsPipelines(G.device,G.pipeline_cache,1,&gp,NULL,result));
-    PC.revision++;G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-started;return *result;
+    pthread_mutex_lock(&PC.cache_lock);
+    VkResult status=vkCreateGraphicsPipelines(G.device,G.pipeline_cache,1,&gp,NULL,result);
+    if(status==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);
+    pthread_mutex_unlock(&PC.cache_lock);CHECK(status);
+    G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-started;return *result;
 }
 static VkImageView depth_copy_view(VTexture *t,uint32_t level,uint32_t layer,VkImageAspectFlags plane) {
     VkImageViewCreateInfo info={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=t->image,.viewType=VK_IMAGE_VIEW_TYPE_2D,

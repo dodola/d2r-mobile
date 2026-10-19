@@ -42,7 +42,10 @@ def main():
     parser.add_argument('--pool-owned-bypass', action='store_true', help='Enable fully GPU-owned pool-read bypass in all fixture processes')
     parser.add_argument('--chunk-checks', action='store_true', help='Compare live submission thresholds with GPU-produced vertex data and alternating attachments')
     parser.add_argument('--pass-stats-checks', action='store_true', help='With --chunk-checks, compare disabled/enabled pipeline statistics, query overflow and both reset paths')
+    parser.add_argument('--pipeline-check', action='store_true', help='Also repeat with a fresh persistent cache, then warm it across a process restart')
     args = parser.parse_args()
+    if args.pipeline_check and any((args.cache_roundtrip,args.sampler_checks,args.command_state_checks,args.depth_copy_checks,args.vertex_checks,args.index_checks,args.resource_checks,args.image_usage_checks,args.chunk_checks)):
+        parser.error("Run pipeline prewarming separately from other optional suites")
     if args.image_usage_checks and any((args.resource_checks,args.index_checks,args.chunk_checks,args.vertex_checks,args.depth_copy_checks,args.command_state_checks,args.cache_roundtrip,args.sampler_checks)):
         parser.error('Run image usage checks separately from other optional suites')
     if args.resource_checks and any((args.index_checks,args.chunk_checks,args.vertex_checks,args.depth_copy_checks,args.command_state_checks,args.cache_roundtrip,args.sampler_checks)):
@@ -62,7 +65,7 @@ def main():
     if args.chunk_checks and (args.vertex_checks or args.depth_copy_checks or args.command_state_checks or args.cache_roundtrip or args.sampler_checks):
         parser.error('Run chunk comparisons separately from other optional suites')
     repo = Path(__file__).resolve().parents[3]
-    out = args.output.resolve(); out.mkdir(parents=True, exist_ok=True)
+    out = args.output.resolve(); out.mkdir(parents=True, exist_ok=not args.pipeline_check)
     report = {'passed': False, 'device_executed': False, 'original_game_frame': False,
               'recorded_at_utc': datetime.now(timezone.utc).isoformat()}
     receipt = out / 'result.json'
@@ -186,6 +189,8 @@ def main():
         extra_cases += '\n' + sampler_cases
         report['sampler_template_sha256'] = sha(Path(__file__).with_name('sampler_device_cases.inc'))
     source = source.replace(anchor, extra_cases + '\n' + anchor)
+    if args.pipeline_check:
+        source = source.replace('    int draw_ok=', '    if(getenv("DM_VK_PIPELINE_DIR"))sleep(6);\n    int draw_ok=')
     functions = sorted(set(re.findall(r'p_([A-Z][A-Za-z0-9]+)', source)))
     source = source.replace('@DECLARATIONS@', '\n'.join(f'static PFNNVN{x.upper()}PROC p_{x};' for x in functions))
     source = source.replace('@INITIALIZERS@', '\n'.join(f'p_{x}=(PFNNVN{x.upper()}PROC)boot("nvn{x}");' for x in functions))
@@ -571,6 +576,29 @@ def main():
         if len({r['driver_id'] for r in records}) != 1:
             raise RuntimeError('Driver changed across cache runs')
         report['pipeline_cache_roundtrip'] = records
+    if args.pipeline_check:
+        baseline_hash = sha(out / 'color.rgba')
+        run([*adb, 'shell', 'mkdir', '-p', remote + '/pipeline-cache'], 'pipeline-mkdir.log')
+        pipeline_runs = []
+        for label in ('first', 'repeat'):
+            tested_pipeline = run([*adb, 'shell', 'env', 'DM_VK_PIPELINE_MODE=2',
+                'DM_VK_PIPELINE_DIR=' + remote + '/pipeline-cache', 'timeout', '90', remote + '/probe',
+                remote + '/cache', remote + '/color.rgba', 'run'], 'pipeline-' + label + '.log', 100)
+            pipeline_log = (tested_pipeline.stdout + tested_pipeline.stderr).decode(errors='replace')
+            if 'cases=120 compared_bytes=1720320 mismatches=0 same_process=1 passed=1' not in pipeline_log:
+                raise RuntimeError('Pipeline GPU pixel comparison failed')
+            run([*adb, 'pull', remote + '/color.rgba', out / ('pipeline-' + label + '.rgba')], 'pipeline-' + label + '-pull.log')
+            if sha(out / ('pipeline-' + label + '.rgba')) != baseline_hash:
+                raise RuntimeError('Persistent pipeline changed base GPU pixels')
+            loaded = int(re.search(r'PIPELINE_CACHE_LOAD .*seed_bytes=(\d+)', pipeline_log)[1])
+            claims = len(re.findall(r'PIPELINE_USE seed=1 ', pipeline_log))
+            if label == 'first' and loaded:
+                raise RuntimeError('First pipeline run must use a fresh cache directory')
+            if label == 'repeat' and (not loaded or not claims):
+                raise RuntimeError('Expected disk-cache load and manifest pipeline claim')
+            pipeline_runs.append({'label': label, 'passed': True, 'loaded_bytes': loaded,
+                                  'manifest_claims': claims, 'pixels_sha256': baseline_hash})
+        report['pipeline_runs'] = pipeline_runs
     props = run([*adb, 'shell', 'getprop'], 'device-properties.log').stdout.decode('utf-8', errors='replace')
     report.update(passed=True, phases=phases, summary=summary[0], runtime=runtime, pixel_readback_sha256=sha(out / 'color.rgba'),
                   device_log_sha256=sha(out / 'device.log'),

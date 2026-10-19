@@ -356,6 +356,20 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
         setenv("DM_VK_AB_CONTROL",driver_option,1);
     }
     if (dm_android_fs_ensure_directory(logs)) return errno?errno:EIO;
+    char pipeline_dir[PATH_MAX];path(pipeline_dir,sizeof pipeline_dir,port_root,"pipeline-cache");
+    if(dm_android_fs_ensure_directory(pipeline_dir))return errno?errno:EIO;
+    setenv("DM_VK_PIPELINE_DIR",pipeline_dir,1);
+    /* Launch-only diagnostic modes: 0 memory only, 1 disk, 2 disk + warm-up.
+     * Unlike attachment controls, these need a restart to distinguish a fresh
+     * process from ordinary in-process pipeline reuse. */
+    setenv("DM_VK_PIPELINE_MODE","2",1);
+    path(driver_option,sizeof driver_option,logs,"pipeline-mode.txt");
+    FILE *pipeline_mode=fopen(driver_option,"r");
+    if(pipeline_mode){int mode=-1;char extra;int fields=fscanf(pipeline_mode,"%d %c",&mode,&extra);fclose(pipeline_mode);
+        if(fields!=1||mode<0||mode>2)return EINVAL;
+        char value[2]={(char)('0'+mode),0};setenv("DM_VK_PIPELINE_MODE",value,1);}
+    unsetenv("DM_VK_PIPELINE_TRACE");path(driver_option,sizeof driver_option,logs,"pipeline-ab");
+    if(access(driver_option,F_OK)==0)setenv("DM_VK_PIPELINE_TRACE","1",1);
     path(log,sizeof log,logs,"game-startup.log");
     char previous_log[PATH_MAX];path(previous_log,sizeof previous_log,logs,"game-startup.previous.log");
     /* Preserve the failed session when a player relaunches after a crash.

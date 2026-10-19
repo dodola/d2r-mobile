@@ -98,6 +98,8 @@ static PFN_vkCreateImageView dm_vkCreateImageView;
 #define vkCreateImageView dm_vkCreateImageView
 static PFN_vkCreateInstance dm_vkCreateInstance;
 #define vkCreateInstance dm_vkCreateInstance
+static PFN_vkGetPipelineCacheData dm_vkGetPipelineCacheData;
+#define vkGetPipelineCacheData dm_vkGetPipelineCacheData
 static PFN_vkCreatePipelineCache dm_vkCreatePipelineCache;
 #define vkCreatePipelineCache dm_vkCreatePipelineCache
 static PFN_vkCreatePipelineLayout dm_vkCreatePipelineLayout;
@@ -265,6 +267,7 @@ static void dm_vk_resolve(VkInstance instance) {
     dm_vkCreateImage=(PFN_vkCreateImage)dm_vk_get(instance,"vkCreateImage");if(!dm_vkCreateImage)die("Vulkan dispatch vkCreateImage",0);
     dm_vkCreateImageView=(PFN_vkCreateImageView)dm_vk_get(instance,"vkCreateImageView");if(!dm_vkCreateImageView)die("Vulkan dispatch vkCreateImageView",0);
     dm_vkCreatePipelineCache=(PFN_vkCreatePipelineCache)dm_vk_get(instance,"vkCreatePipelineCache");if(!dm_vkCreatePipelineCache)die("Vulkan dispatch vkCreatePipelineCache",0);
+    dm_vkGetPipelineCacheData=(PFN_vkGetPipelineCacheData)dm_vk_get(instance,"vkGetPipelineCacheData");if(!dm_vkGetPipelineCacheData)die("Vulkan dispatch vkGetPipelineCacheData",0);
     dm_vkCreatePipelineLayout=(PFN_vkCreatePipelineLayout)dm_vk_get(instance,"vkCreatePipelineLayout");if(!dm_vkCreatePipelineLayout)die("Vulkan dispatch vkCreatePipelineLayout",0);
     dm_vkCreateQueryPool=(PFN_vkCreateQueryPool)dm_vk_get(instance,"vkCreateQueryPool");if(!dm_vkCreateQueryPool)die("Vulkan dispatch vkCreateQueryPool",0);
     dm_vkCreateRenderPass=(PFN_vkCreateRenderPass)dm_vk_get(instance,"vkCreateRenderPass");if(!dm_vkCreateRenderPass)die("Vulkan dispatch vkCreateRenderPass",0);

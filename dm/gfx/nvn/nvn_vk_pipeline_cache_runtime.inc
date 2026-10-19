@@ -1,5 +1,6 @@
-/* Included after backend state. Vulkan cache access stays under G.lock; the
- * writer only owns an immutable byte snapshot and never calls Vulkan. */
+/* Included after backend state. Replay owns metadata under G.lock. The cache
+ * mutex serializes driver-cache access with the compiler worker; disk writers
+ * own immutable byte snapshots and never call Vulkan or take G.lock. */
 #include "nvn_vk_pipeline_cache_io.h"
 typedef struct {
     NvnVkPipelineCacheKey key;
@@ -10,9 +11,10 @@ typedef struct {
 static struct {
     PFN_vkGetPipelineCacheData get;
     char path[1200];
-    uint64_t revision,saved_revision,next_ns;
+    _Atomic uint64_t revision;uint64_t saved_revision,next_ns,loaded_bytes;
+    pthread_mutex_t cache_lock;
     PipelineCacheWrite *pending;pthread_t thread;
-} PC;
+} PC={.cache_lock=PTHREAD_MUTEX_INITIALIZER};
 
 static void *pipeline_cache_writer(void *opaque) {
     PipelineCacheWrite *job=opaque;
@@ -33,15 +35,19 @@ static void pipeline_cache_checkpoint(int force) {
     if(!G.pipeline_cache||!PC.get||!PC.path[0]||PC.pending||PC.saved_revision==PC.revision)return;
     uint64_t now=dm_android_nvn_clock_ns();if(!force&&now<PC.next_ns)return;
     PC.next_ns=now+30000000000ull;
-    size_t bytes=0;VkResult result=PC.get(G.device,G.pipeline_cache,&bytes,NULL);
-    if(result!=VK_SUCCESS||bytes<32||bytes>NVN_VK_CACHE_MAX_BYTES){
-        fprintf(stderr,"[nvn-vulkan] PIPELINE_CACHE_SNAPSHOT skipped result=%d bytes=%zu\n",result,bytes);return;}
     PipelineCacheWrite *job=calloc(1,sizeof(*job));if(!job)return;
-    job->data=malloc(bytes);if(!job->data){free(job);return;}
-    result=PC.get(G.device,G.pipeline_cache,&bytes,job->data);
-    if(result!=VK_SUCCESS||!nvn_vk_cache_blob_valid(job->data,bytes,&G.pipeline_cache_key)){
+    pthread_mutex_lock(&PC.cache_lock);
+    size_t bytes=0;VkResult result=PC.get(G.device,G.pipeline_cache,&bytes,NULL);
+    if(result==VK_SUCCESS&&bytes>=32&&bytes<=NVN_VK_CACHE_MAX_BYTES){
+        job->data=malloc(bytes);
+        if(job->data)result=PC.get(G.device,G.pipeline_cache,&bytes,job->data);
+    }
+    job->revision=atomic_load(&PC.revision);
+    pthread_mutex_unlock(&PC.cache_lock);
+    if(result!=VK_SUCCESS||!job->data||!nvn_vk_cache_blob_valid(job->data,bytes,&G.pipeline_cache_key)){
+        fprintf(stderr,"[nvn-vulkan] PIPELINE_CACHE_SNAPSHOT skipped result=%d bytes=%zu\n",result,bytes);
         free(job->data);free(job);return;}
-    job->key=G.pipeline_cache_key;strcpy(job->path,PC.path);job->bytes=bytes;job->revision=PC.revision;
+    job->key=G.pipeline_cache_key;strcpy(job->path,PC.path);job->bytes=bytes;
     if(pthread_create(&PC.thread,NULL,pipeline_cache_writer,job)){free(job->data);free(job);return;}
     PC.pending=job;
 }
@@ -52,6 +58,7 @@ void dm_vk_pipeline_cache_save(void) {
  * a process without atexit, so normal rendering also checkpoints periodically. */
 void dm_vk_pipeline_cache_flush(void) {
     pthread_mutex_lock(&G.lock);pipeline_cache_checkpoint(1);pipeline_cache_join(1);
+    pipeline_manifest_flush();
     fprintf(stderr,"[nvn-vulkan] PIPELINE_CACHE_STATS pipelines=%llu compile_ns=%llu\n",
         (unsigned long long)PC.revision,(unsigned long long)G.profile_pipeline_ns);
     pthread_mutex_unlock(&G.lock);
@@ -60,8 +67,9 @@ static void pipeline_cache_start(void) {
     if(getenv("DM_DISABLE_PIPELINE_CACHE"))return;
     void *seed=NULL;size_t seed_bytes=0;int status=0;
     PC.get=(PFN_vkGetPipelineCacheData)dm_vk_get(G.instance,"vkGetPipelineCacheData");
-    const char *override=getenv("DM_VK_PIPELINE_CACHE_DIR");
-    if(!getenv("DM_DISABLE_PIPELINE_CACHE_DISK")&&PC.get&&(override||G.shader_root[0])){
+    const char *override=getenv("DM_VK_PIPELINE_CACHE_DIR"),*mode=getenv("DM_VK_PIPELINE_MODE");
+    if(!override)override=getenv("DM_VK_PIPELINE_DIR");
+    if(!getenv("DM_DISABLE_PIPELINE_CACHE_DISK")&&(!mode||atoi(mode)!=0)&&PC.get&&(override||G.shader_root[0])){
         char directory[1100];int n=override?snprintf(directory,sizeof directory,"%s",override):
             snprintf(directory,sizeof directory,"%s/../pipeline-cache",G.shader_root);
         struct stat st;
@@ -78,10 +86,10 @@ static void pipeline_cache_start(void) {
     VkResult result=vkCreatePipelineCache(G.device,&info,NULL,&G.pipeline_cache);
     if(result!=VK_SUCCESS&&seed_bytes){
         fprintf(stderr,"[nvn-vulkan] PIPELINE_CACHE_REJECT result=%d retry=empty\n",result);
-        info.initialDataSize=0;info.pInitialData=NULL;
+        info.initialDataSize=0;info.pInitialData=NULL;seed_bytes=0;
         result=vkCreatePipelineCache(G.device,&info,NULL,&G.pipeline_cache);status=-3;
     }
-    free(seed);
+    free(seed);PC.loaded_bytes=result==VK_SUCCESS?seed_bytes:0;
     if(result!=VK_SUCCESS){G.pipeline_cache=VK_NULL_HANDLE;PC.path[0]=0;}
     fprintf(stderr,"[nvn-vulkan] PIPELINE_CACHE_LOAD status=%d seed_bytes=%zu enabled=%d disk=%d\n",
         status,seed_bytes,G.pipeline_cache!=VK_NULL_HANDLE,PC.path[0]!=0);

@@ -9,6 +9,7 @@
 #include <android/native_window.h>
 #include "nvn_obj.h"
 #include "nvn_vk_attachment_plan.h"
+#include "nvn_vk_pipeline_store.h"
 #include "nvn_translation_sync.h"
 #include "../../android/nvn_platform_clock.h"
 #include "nvn_mtl.h"
@@ -282,6 +283,7 @@ static struct {
     pthread_mutex_t lock;
     void *transfer_memory; size_t transfer_size; int graphics_live;
 } G={.lock=PTHREAD_MUTEX_INITIALIZER};
+static void pipeline_manifest_flush(void);
 #include "nvn_vk_pipeline_cache_runtime.inc"
 /* Immutable per-device capabilities. Binding the same format should not call
  * into a vendor driver again on every draw. Extension formats remain queried. */
@@ -420,6 +422,9 @@ void mtl_set_window_origin_mode(int mode) {
     atomic_store(&G.window_origin,mode);
     fprintf(stderr,"[nvn-vulkan] WINDOW_ORIGIN mode=%d negative_viewport=%d\n",mode,mode==NVN_WINDOW_ORIGIN_MODE_UPPER_LEFT);
 }
+static void pipeline_cache_init(void);
+static void pipeline_worker_start(void);
+static void pipeline_frame(uint64_t frame);
 static void backend_init(void) {
     void *loader=NULL;
     const char *private_driver=getenv("DM_PRIVATE_VULKAN");
@@ -552,7 +557,7 @@ static void backend_init(void) {
     fprintf(stderr,"[nvn-vulkan] shader_draw_parameters=%d\n",G.shader_draw_parameters);
     fprintf(stderr,"[nvn-vulkan] attachment_feedback_layout=%d independent_blend=%u fragment_stores=%u\n",G.feedback_layout,enabled.independentBlend,enabled.fragmentStoresAndAtomics);
     vkGetDeviceQueue(G.device,G.family,0,&G.queue);
-    pipeline_cache_start();
+    pipeline_cache_init();
     fprintf(stderr,"[nvn-vulkan] driver_pipeline_cache=%d\n",G.pipeline_cache!=VK_NULL_HANDLE);
     G.disable_pso_reuse=getenv("DM_DISABLE_PSO_REUSE")!=NULL;
     {const char *last=getenv("DM_PSO_LAST_CACHE");G.enable_pso_last=last&&atoi(last)!=0;G.last_pso_slot=UINT32_MAX;}
@@ -594,6 +599,7 @@ static void backend_init(void) {
     G.state.stencil_compare[0]=G.state.stencil_compare[1]=G.state.stencil_write[0]=G.state.stencil_write[1]=UINT32_MAX;
     fprintf(stderr,"[nvn-vulkan] initialized %s\n",G.properties.deviceName);
     G.profile_start_ns=dm_android_nvn_clock_ns();
+    pipeline_worker_start();
 }
 void mtl_init(void) { if(pthread_once(&init_once,backend_init))die("Vulkan initialize once",0); }
 #ifdef DM_VK_INDEX_TEST
@@ -1722,11 +1728,10 @@ static const uint8_t *shader_entry(const void *control,uint32_t stage) {
         slot=(slot+1)&(G.shader_entry_capacity-1);}
     return NULL;
 }
-static VShader *shader_get(const void *control,uint32_t stage) {
-    const uint8_t *entry=shader_entry(control,stage);if(!entry)die("original shader not in verified Vulkan cache",stage);
-    char key[17]={0};memcpy(key,entry,16);
-    for(int i=0;i<G.nshader;i++)if(!strcmp(G.shaders[i].key,key))return &G.shaders[i];
-    if(G.nshader==LIMIT_OBJECTS)die("shader object limit",G.nshader); VShader *s=&G.shaders[G.nshader++]; strcpy(s->key,key);
+/* The compiler worker owns its shader copies; it never touches replay state,
+ * the live shader registry, C1 buffers or submission resources. */
+static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm) {
+    strcpy(s->key,key);
     char name[40];snprintf(name,sizeof(name),"%s.vkmeta",key);size_t size=0;uint8_t *bytes=read_file(name,&size);
     if(size<sizeof(RHeader))die("shader metadata header",size);memcpy(&s->h,bytes,sizeof(RHeader));
     if(s->h.magic!=0x4d4b5644 || s->h.version!=1 || s->h.stage!=stage || s->h.nb>LIMIT_BINDINGS || s->h.na>32 || s->h.ncap>32 || s->h.c1n>4096)
@@ -1743,7 +1748,7 @@ static VShader *shader_get(const void *control,uint32_t stage) {
        if(cap==4427 && stage==0 && G.shader_draw_parameters)continue; /* BaseVertex/BaseInstance/DrawIndex use actual Vulkan draw arguments. */
        if(cap!=1 && cap!=46 && cap!=47 && cap!=50 && cap!=55 && cap!=56){fprintf(stderr,"[nvn-vulkan] shader feature key=%s stage=%u cap=%u\n",key,stage,cap);die("shader feature needs device/semantic adaptation",cap);}
     }
-    if(s->h.c1n){s->c1=buffer_make(65536,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);memcpy(s->c1.map,p,s->h.c1n);}free(bytes);
+    if(s->h.c1n&&!warm){s->c1=buffer_make(65536,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);memcpy(s->c1.map,p,s->h.c1n);}free(bytes);
     if(s->h.reserved) {
         /* Metadata records the exact uncompressed size. zlib validates gzip
          * CRC32 and ISIZE; reject trailing/concatenated streams and short data.
@@ -1828,7 +1833,7 @@ static VShader *shader_get(const void *control,uint32_t stage) {
         if(s->storage_bias.mask)fprintf(stderr,"[nvn-vulkan] STORAGE_BIAS_MODULE shader=%s mask=%#llx bytes=%zu\n",s->key,(unsigned long long)s->storage_bias.mask,size);
     }
     const char *dump=getenv("DM_ADAPTED_SHADER_DIR");
-    if(dump&&s->storage_bias.mask){char path[1200];if(snprintf(path,sizeof(path),"%s/%s.spv",dump,s->key)>=(int)sizeof path)die("adapted shader dump path",0);
+    if(dump&&!warm&&s->storage_bias.mask){char path[1200];if(snprintf(path,sizeof(path),"%s/%s.spv",dump,s->key)>=(int)sizeof path)die("adapted shader dump path",0);
         FILE *out=fopen(path,"wb");if(!out||fwrite(bytes,1,size,out)!=size)die("adapted shader dump",size);fclose(out);}
     VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=size,.pCode=(uint32_t *)bytes};
     CHECK(vkCreateShaderModule(G.device,&mi,NULL,&s->module));
@@ -1844,7 +1849,7 @@ static VShader *shader_get(const void *control,uint32_t stage) {
        if(s->b[i].count!=1 || s->b[i].set!=(stage==1?1u:0u))die("shader descriptor set/count",s->b[i].set);
        bindings[i]=(VkDescriptorSetLayoutBinding){s->b[i].binding,(VkDescriptorType)s->b[i].type,1,stage==0?VK_SHADER_STAGE_VERTEX_BIT:stage==1?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_COMPUTE_BIT,NULL}; }
     VkDescriptorSetLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=s->h.nb,.pBindings=bindings};
-    CHECK(vkCreateDescriptorSetLayout(G.device,&li,NULL,&s->layout));s->plan=binding_plan_compile(s);return s;
+    CHECK(vkCreateDescriptorSetLayout(G.device,&li,NULL,&s->layout));if(!warm)s->plan=binding_plan_compile(s);
 }
 static VkShaderModule vertex_module(VShader *s,const NvnVkVertexAdapt *plan) {
     unsigned active=plan->split;for(unsigned l=0;l<16;l++)active|=plan->convert[l];
@@ -1862,6 +1867,14 @@ static VkShaderModule vertex_module(VShader *s,const NvnVkVertexAdapt *plan) {
     fprintf(stderr,"[nvn-vulkan] VERTEX_INPUT_ADAPT shader=%s split=%#x unsigned=%#x signed=%#x bytes=%zu\n",s->key,plan->split,u,i,bytes);
     return v->module;
 }
+static VShader *shader_get(const void *control,uint32_t stage) {
+    const uint8_t *entry=shader_entry(control,stage);if(!entry)die("original shader not in verified Vulkan cache",stage);
+    char key[17]={0};memcpy(key,entry,16);
+    for(int i=0;i<G.nshader;i++)if(!strcmp(G.shaders[i].key,key))return &G.shaders[i];
+    if(G.nshader==LIMIT_OBJECTS)die("shader object limit",G.nshader);
+    VShader *s=&G.shaders[G.nshader++];shader_load_into(s,key,stage,0);return s;
+}
+#include "nvn_vk_pipeline.inc"
 void mtl_prog_release(prog_t *p) { (void)p; /* Programs own only immutable shared shader-cache entries; no per-program GPU allocation. */ }
 static void aligned_writeback(void) {
     for(int i=0;i<S.naligned;i++)if(S.aligned[i].written){AlignedBinding *b=&S.aligned[i];uint64_t offset=0;
@@ -2688,10 +2701,8 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     G.profile_bind_ns+=prof_now()-bind_started;
     if(G.profile_detail){int n=0;G.last_uses[0]=0;for(unsigned u=0;u<S.nimage_uses&&n<90;u++)n+=snprintf(G.last_uses+n,sizeof G.last_uses-n,"%llu%s ",(unsigned long long)S.image_uses[u].serial,(S.image_uses[u].roles&2)?"w":"");}
     G.xition_vertex=0;
-    VkDescriptorSetLayout set_layouts[2]={vs->layout,ps?ps->layout:VK_NULL_HANDLE};
     if(S.active_occlusion==UINT32_MAX)query_reserve(S.occlusion,&S.occlusion_reset_count,S.nocc,1,LIMIT_WRITES);
-    uint64_t render_started=prof_now();VkRenderPass renderpass=render_begin();G.profile_render_ns+=prof_now()-render_started;
-    VkPipelineLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,.setLayoutCount=ps?2u:1u,.pSetLayouts=set_layouts};
+    uint64_t render_started=prof_now();render_begin();G.profile_render_ns+=prof_now()-render_started;
     VkVertexInputAttributeDescription attributes[32];VkVertexInputBindingDescription bindings[16];uint32_t nbindings=0,nattributes=0,locations=0;uint8_t used[16]={0};
     NvnVkVertexAdapt vertex_plan={0};
     for(unsigned l=0;l<16;l++)if(vs->vertex_inputs[l].type)locations|=1u<<l;
@@ -2736,16 +2747,12 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
         }
     }
     if(nattributes>G.properties.limits.maxVertexInputAttributes)die("vertex attribute count device limit",nattributes);
-    VkShaderModule vertex_shader=vertex_module(vs,&vertex_plan);
     for(unsigned i=0;i<16;i++)if(used[i]) { vs_st v=G.state.streams[i];if(v.divisor>1)die("vertex divisor",v.divisor);
         bindings[nbindings++]=(VkVertexInputBindingDescription){i,v.stride,v.divisor?VK_VERTEX_INPUT_RATE_INSTANCE:VK_VERTEX_INPUT_RATE_VERTEX};
         NVNbufferRange r=G.state.vbuf[i];if(!r.address || !r.size)die("unbound vertex stream",i);uint64_t offset=0;VPool *p=pool_read(r.address,r.size,&offset);
         command_bind_profile(NVN_VK_CMD_VERTEX,nvn_vk_cmd_vertex(&S.command_state,G.enable_command_cache&&!G.trace_frame,S.command,i,p->v.b,offset)); }
-    VkPipelineVertexInputStateCreateInfo vi={.sType=VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,.vertexBindingDescriptionCount=nbindings,
-        .pVertexBindingDescriptions=bindings,.vertexAttributeDescriptionCount=nattributes,.pVertexAttributeDescriptions=attributes};
     VkPipelineInputAssemblyStateCreateInfo ai={.sType=VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology=topology(a?a->prim:idx->prim)};
-    VkPipelineViewportStateCreateInfo vp={.sType=VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,.viewportCount=1,.scissorCount=1};
     VkPipelineRasterizationStateCreateInfo raster={.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,.polygonMode=VK_POLYGON_MODE_FILL,
        .cullMode=G.state.polygon.cull==NVN_FACE_FRONT?VK_CULL_MODE_FRONT_BIT:G.state.polygon.cull==NVN_FACE_BACK?VK_CULL_MODE_BACK_BIT:
           G.state.polygon.cull==NVN_FACE_FRONT_AND_BACK?VK_CULL_MODE_FRONT_AND_BACK:VK_CULL_MODE_NONE,
@@ -2754,7 +2761,6 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
         .frontFace=(G.state.polygon.front==NVN_FRONT_FACE_CCW)==upper_left?VK_FRONT_FACE_COUNTER_CLOCKWISE:VK_FRONT_FACE_CLOCKWISE,.lineWidth=1,
         .depthBiasEnable=depth_bias.enabled,.depthBiasConstantFactor=depth_bias.constant,
         .depthBiasSlopeFactor=depth_bias.slope,.depthBiasClamp=depth_bias.clamp};
-    VkPipelineMultisampleStateCreateInfo ms={.sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT};
     VkPipelineDepthStencilStateCreateInfo ds={.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,.depthTestEnable=G.state.ds.dt,
         .depthWriteEnable=G.state.ds.dw,.depthCompareOp=(VkCompareOp)(G.state.ds.df-1),.stencilTestEnable=G.state.ds.st};
     ds.front=(VkStencilOpState){.failOp=(VkStencilOp)(G.state.ds.fail_f-1),.passOp=(VkStencilOp)(G.state.ds.zpass_f-1),
@@ -2771,21 +2777,10 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
            blends[i].dstColorBlendFactor=blend_factor(b.dst_rgb);blends[i].srcAlphaBlendFactor=blend_factor(b.src_a);
            blends[i].dstAlphaBlendFactor=blend_factor(b.dst_a);blends[i].colorBlendOp=blend_op(b.eq_rgb);blends[i].alphaBlendOp=blend_op(b.eq_a);} }
     VkPipelineColorBlendStateCreateInfo cb={.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,.attachmentCount=G.state.rt.n,.pAttachments=blends};
-    VkDynamicState dynamic[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS};
-    VkPipelineDynamicStateCreateInfo dy={.sType=VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,.dynamicStateCount=3,.pDynamicStates=dynamic};
-    VkPipelineShaderStageCreateInfo stages[2]={
-       {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_VERTEX_BIT,.module=vertex_shader,.pName="main"},
-       {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_FRAGMENT_BIT,.module=ps?ps->module:VK_NULL_HANDLE,.pName="main"}};
-    VkSpecializationMapEntry bias_maps[2][LIMIT_BINDINGS];VkSpecializationInfo bias[2];
-    bias[0]=storage_specialization(vs,bias_maps[0]);if(bias[0].mapEntryCount)stages[0].pSpecializationInfo=&bias[0];
-    if(ps){bias[1]=storage_specialization(ps,bias_maps[1]);if(bias[1].mapEntryCount)stages[1].pSpecializationInfo=&bias[1];}
-    VkGraphicsPipelineCreateInfo gp={.sType=VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,.flags=S.feedback_flags,.stageCount=ps?2u:1u,.pStages=stages,
-        .pVertexInputState=&vi,.pInputAssemblyState=&ai,.pViewportState=&vp,.pRasterizationState=&raster,.pMultisampleState=&ms,
-        .pDepthStencilState=&ds,.pColorBlendState=&cb,.pDynamicState=&dy,.renderPass=renderpass};
     PsoKey key;memset(&key,0,sizeof(key));
     key.shader[0]=(uint32_t)(vs-G.shaders)+1;key.shader[1]=ps?(uint32_t)(ps-G.shaders)+1:0;
     memcpy(key.storage_bias[0],S.storage_bias[0],sizeof key.storage_bias[0]);if(ps)memcpy(key.storage_bias[1],S.storage_bias[1],sizeof key.storage_bias[1]);
-    key.flags=gp.flags;key.topology=ai.topology;key.cull=raster.cullMode;key.front=raster.frontFace;
+    key.flags=S.feedback_flags;key.topology=ai.topology;key.cull=raster.cullMode;key.front=raster.frontFace;
     key.depth_bias=depth_bias;
     key.vertex_split=vertex_plan.split;
     for(unsigned l=0;l<16;l++){if(vertex_plan.convert[l]==1)key.vertex_unsigned|=1u<<l;if(vertex_plan.convert[l]==2)key.vertex_signed|=1u<<l;}
@@ -2802,11 +2797,7 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     }
     uint64_t hash=0;Pso pso,*cached=pso_lookup(&key,&hash);
     if(cached)pso=*cached;
-    else{
-        uint64_t pipeline_start=dm_android_nvn_clock_ns();CHECK(vkCreatePipelineLayout(G.device,&li,NULL,&pso.layout));gp.layout=pso.layout;
-        CHECK(vkCreateGraphicsPipelines(G.device,G.pipeline_cache,1,&gp,NULL,&pso.pipeline));PC.revision++;G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-pipeline_start;
-        pso=pso_remember(&key,hash,pso);
-    }
+    else pso=pipeline_obtain(&key,hash,vs,ps);
     int cache_commands=G.enable_command_cache&&!G.trace_frame;
     command_bind_profile(NVN_VK_CMD_PIPELINE,nvn_vk_cmd_pipeline(&S.command_state,cache_commands,S.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pso.pipeline));
     command_bind_profile(NVN_VK_CMD_DESCRIPTORS,nvn_vk_cmd_descriptors(&S.command_state,cache_commands,S.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pso.layout,ps?2:1,descriptor_sets));
@@ -2848,20 +2839,12 @@ static void dispatch(const p_dispatch *p) {
     S.read_snapshots_allowed=0;
     pass_end();if(p->x<0 || p->y<0 || p->z<0)die("dispatch dimensions",p->x);VShader *s=program_stage(5);
     S.nimage_uses=0;collect_image_uses(s);prepare_comparison_images(s);
-    VkDescriptorSet set=bind_shader(s);VkPipelineLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount=1,.pSetLayouts=&s->layout};
-    VkComputePipelineCreateInfo ci={.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage={.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_COMPUTE_BIT,.module=s->module,.pName="main"}};
-    VkSpecializationMapEntry bias_map[LIMIT_BINDINGS];VkSpecializationInfo bias=storage_specialization(s,bias_map);if(bias.mapEntryCount)ci.stage.pSpecializationInfo=&bias;
+    VkDescriptorSet set=bind_shader(s);
     PsoKey key;memset(&key,0,sizeof(key));key.compute=1;key.shader[0]=(uint32_t)(s-G.shaders)+1;
     memcpy(key.storage_bias[0],S.storage_bias[5],sizeof key.storage_bias[0]);
     uint64_t hash=0;Pso pso,*cached=pso_lookup(&key,&hash);
     if(cached)pso=*cached;
-    else{
-        uint64_t pipeline_start=dm_android_nvn_clock_ns();CHECK(vkCreatePipelineLayout(G.device,&li,NULL,&pso.layout));ci.layout=pso.layout;
-        CHECK(vkCreateComputePipelines(G.device,G.pipeline_cache,1,&ci,NULL,&pso.pipeline));PC.revision++;G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-pipeline_start;
-        pso=pso_remember(&key,hash,pso);
-    }
+    else pso=pipeline_obtain(&key,hash,s,NULL);
     int cache_commands=G.enable_command_cache&&!G.trace_frame;
     command_bind_profile(NVN_VK_CMD_PIPELINE,nvn_vk_cmd_pipeline(&S.command_state,cache_commands,S.command,VK_PIPELINE_BIND_POINT_COMPUTE,pso.pipeline));
     command_bind_profile(NVN_VK_CMD_DESCRIPTORS,nvn_vk_cmd_descriptors(&S.command_state,cache_commands,S.command,VK_PIPELINE_BIND_POINT_COMPUTE,pso.layout,1,&set));
@@ -3562,7 +3545,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
             }
             fprintf(stderr,"[nvn-vulkan] TRACE_NEXT_FRAME frame=%llu\n",(unsigned long long)G.present_count+2);}}
     pipeline_cache_checkpoint(0);
-    attachment_ab_frame(G.present_count+1);
+    pipeline_frame(G.present_count+1);attachment_ab_frame(G.present_count+1);
     if(async_present){G.active=0;async_enqueue_locked(&S,1);uint64_t pticket=++G.present_count;pthread_mutex_unlock(&G.lock);return pticket;}
     if(S.nwrites || S.nevents || S.ncounter)die("present has unpublished guest effects",S.epoch);
     submission_publish(&S);submission_released(&S);
@@ -3628,7 +3611,6 @@ void mtl_pkg_stats(uint64_t *uploads,uint64_t *reuploads) { *uploads=G.uploads;*
 void mtl_set_frame(uint64_t frame) { G.frame=frame; }
 double mtl_gpu_ms(uint64_t frame) { (void)frame;return -1; }
 int mtl_gpu_span(uint64_t frame,uint64_t *a,uint64_t *b) { (void)frame;(void)a;(void)b;return 0; }
-int mtl_warm_wait(int timeout) { (void)timeout;return 0; } /* No asynchronous pipeline warm-up job exists. */
 int mtl_link_active(void) { return 0; } /* No Android frame-link service has been installed. */
 int mtl_link_wait_tick(uint64_t timeout) { (void)timeout;return 0; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; } /* No cross-frame store-elision ledger exists. */
