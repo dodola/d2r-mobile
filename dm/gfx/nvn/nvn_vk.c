@@ -985,23 +985,23 @@ static void dsmix_print_reset(void){fprintf(stderr," dload=%d dstore=%d ds=",dbg
  * DM_FRAME_DIR/pass-<index>-<w>x<h>-fmt<vk>-bpp<n>-s<serial>.bin so two drivers can be diffed pass by pass. */
 static VTexture *texture_get(const tex_t *source,int upload);
 static VkImageAspectFlags aspect(VkFormat f);
-static const tex_t *dbg_dump_src;static uint32_t dbg_dump_level,dbg_dump_w,dbg_dump_h,dbg_dump_idx;static uint64_t dbg_dump_frame_seen;
+static const tex_t *dbg_dump_src;static uint32_t dbg_dump_level,dbg_dump_layer,dbg_dump_w,dbg_dump_h,dbg_dump_idx;static uint64_t dbg_dump_frame_seen;
 static void dump_pass_color(void){
     const tex_t *src=dbg_dump_src;dbg_dump_src=NULL;if(!src||S.ntrace_captures>=500)return;
-    VTexture *t=texture_get(src,0);uint32_t w=dbg_dump_w,h=dbg_dump_h,lvl=dbg_dump_level;
+    VTexture *t=texture_get(src,0);uint32_t w=dbg_dump_w,h=dbg_dump_h,lvl=dbg_dump_level,lay_i=dbg_dump_layer;
     VkImageAspectFlags all=aspect(t->format),plane=(all&VK_IMAGE_ASPECT_COLOR_BIT)?VK_IMAGE_ASPECT_COLOR_BIT:VK_IMAGE_ASPECT_DEPTH_BIT;
     uint32_t texel=(plane==VK_IMAGE_ASPECT_COLOR_BIT)?(uint32_t)t->bpp:4;uint64_t bytes=(uint64_t)w*h*texel;
     VBuffer *b=temporary(bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT);VkImageLayout lay=t->layout;
-    VkImageSubresourceRange rg={all,lvl,1,0,1};
+    VkImageSubresourceRange rg={all,lvl,1,lay_i,1};
     VkImageMemoryBarrier br={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT,.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT,
         .oldLayout=lay,.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.image=t->image,.subresourceRange=rg};
     vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,NULL,0,NULL,1,&br);
-    VkBufferImageCopy cp={.imageSubresource={plane,lvl,0,1},.imageExtent={w,h,1}};
+    VkBufferImageCopy cp={.imageSubresource={plane,lvl,lay_i,1},.imageExtent={w,h,1}};
     vkCmdCopyImageToBuffer(S.command,t->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,b->b,1,&cp);
     br.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;br.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
     br.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;br.newLayout=lay;
     vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,NULL,0,NULL,1,&br);
-    char name[128];snprintf(name,sizeof name,"pass-%03u-%ux%u-fmt%d-bpp%d-s%llu",dbg_dump_idx++,w,h,(int)t->format,(int)texel,(unsigned long long)src->serial);
+    char name[128];snprintf(name,sizeof name,"pass-%03u-%ux%u-fmt%d-bpp%d-s%llu-l%u",dbg_dump_idx++,w,h,(int)t->format,(int)texel,(unsigned long long)src->serial,lay_i);
     trace_capture_queue(b,bytes,name);
 }
 static void pass_end_at(int line) { if(S.in_pass) { ghost_flush();G.pass_end_sites[line&4095]++;if(G.profile_detail&&G.profile_frames==30){fprintf(stderr,"[nvn-vulkan] PASSLOG seg=%u rt=%s ps=%.6s n=%d bb=%#x uses=%s draws=%llu end_line=%d",G.seg_index,G.pass_desc,G.last_ps,G.last_count,G.last_barrier_bits,G.last_uses,(unsigned long long)(G.draws-G.pass_draws0),line);dsmix_print_reset();fputc(10,stderr);}else ndsmix=0;occlusion_end();
@@ -3287,7 +3287,7 @@ static VkRenderPass render_begin(void) {
         S.framebuffer_keys[index]=key;G.profile_framebuffer_misses++;G.resource_passes++;
     }else {G.profile_framebuffer_hits++;G.resource_hits++;}
     if(G.dump_frame&&G.present_count+1==G.dump_frame&&(rt->color[0]||rt->depth)){if(dbg_dump_frame_seen!=G.dump_frame){dbg_dump_frame_seen=G.dump_frame;dbg_dump_idx=0;}
-        const tex_t *dsrc=rt->color[0]?rt->color[0]:rt->depth;VkImageSubresourceRange dr=rt->color[0]?attachment_range(rt->color[0],rt->has_cview[0]?&rt->cview[0]:NULL):attachment_range(rt->depth,rt->has_dview?&rt->dview:NULL);dbg_dump_src=dsrc;dbg_dump_level=dr.baseMipLevel;dbg_dump_w=width;dbg_dump_h=height;}
+        const tex_t *dsrc=rt->color[0]?rt->color[0]:rt->depth;VkImageSubresourceRange dr=rt->color[0]?attachment_range(rt->color[0],rt->has_cview[0]?&rt->cview[0]:NULL):attachment_range(rt->depth,rt->has_dview?&rt->dview:NULL);dbg_dump_src=dsrc;dbg_dump_level=dr.baseMipLevel;dbg_dump_layer=dr.baseArrayLayer;dbg_dump_w=width;dbg_dump_h=height;}
     S.active_pass=index;G.pass_draws0=G.draws;{const tex_t *f0=rt->n>0?rt->color[0]:rt->depth;snprintf(G.pass_desc,sizeof G.pass_desc,"%ux%u c%d d%d s%llu",f0?f0->d.width:0,f0?f0->d.height:0,rt->n,rt->depth!=NULL,(unsigned long long)(f0?f0->serial:0));}
     VkRenderPassBeginInfo begin={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,.renderPass=S.passes[index],.framebuffer=S.framebuffers[index],
        .renderArea={{0,0},{(G.diag_shape&4)&&width>16?16:width,(G.diag_shape&4)&&height>16?16:height}},.clearValueCount=n,.pClearValues=clears};
