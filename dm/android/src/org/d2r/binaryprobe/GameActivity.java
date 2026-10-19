@@ -392,6 +392,22 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         try(InputStream in=new FileInputStream(file)){int n;while((n=in.read(bytes))!=-1)md.update(bytes,0,n);}
         StringBuilder text=new StringBuilder();for(byte b:md.digest())text.append(String.format("%02x",b&255));return text.toString();
     }
+    private void installPipelineSeed()throws Exception {
+        String[] names=getAssets().list("pipeline-cache");
+        if(names.length==0)return;
+        File directory=new File(getFilesDir(),"d2r-mobile/pipeline-cache");
+        if(!directory.isDirectory()&&!directory.mkdirs())throw new java.io.IOException(t("不能创建管线缓存目录"));
+        for(String name:names){
+            if(!name.matches("[0-9a-f]{16}\\.bin|pso_user\\.vkbin"))throw new java.io.IOException(t("管线缓存名称无效"));
+            File target=new File(directory,name);
+            if(target.isFile()&&target.length()>0)continue;
+            File temporary=new File(directory,name+".new");
+            try(InputStream in=getAssets().open("pipeline-cache/"+name);FileOutputStream out=new FileOutputStream(temporary)){
+                byte[] buffer=new byte[65536];int count;while((count=in.read(buffer))!=-1)out.write(buffer,0,count);out.getFD().sync();
+            }
+            if(!temporary.renameTo(target))throw new java.io.IOException(t("不能保存管线缓存"));
+        }
+    }
     private void prepareModules()throws Exception {
         String json;
         try(InputStream in=getAssets().open("module-manifest.json")){
@@ -444,6 +460,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             }
         }
         if(!new File(getFilesDir(),"d2r-mobile/shaders/shader_index.bin").isFile())throw new java.io.IOException(t("缺少游戏图形缓存"));
+        installPipelineSeed();
     }
     private void configureAndStart(){
         if(!prepared||failed||destroyed)return;

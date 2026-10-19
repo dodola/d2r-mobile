@@ -641,9 +641,12 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_WRITEBACK_COALESCE");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/writeback-coalesce");
     if(access(driver_option,F_OK)==0)setenv("DM_WRITEBACK_COALESCE","1",1);
-    unsetenv("DM_COMMAND_STATE_CACHE");
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/command-state-cache");
-    if(access(driver_option,F_OK)==0)setenv("DM_COMMAND_STATE_CACHE","1",1);
+    /* Exact state reuse is safe within a command buffer and materially cuts
+     * replay work on the 1280x720 model-heavy scene. Keep the diagnostic
+     * marker for a conservative A/B fallback. */
+    setenv("DM_COMMAND_STATE_CACHE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-command-state-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_COMMAND_STATE_CACHE","0",1);
     setenv("DM_DIRTY_SUMMARY","1",1);unsetenv("DM_DIRTY_QUERY_STATS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-dirty-summary");
     if(access(driver_option,F_OK)==0)setenv("DM_DIRTY_SUMMARY","0",1);

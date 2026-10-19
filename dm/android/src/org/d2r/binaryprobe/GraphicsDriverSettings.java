@@ -31,8 +31,15 @@ final class GraphicsDriverSettings {
             }
         }
         boolean turnip=GraphicsDriverPolicy.useBundledTurnip(mode,Build.VERSION.SDK_INT,Build.VERSION.SDK_INT>=31?Build.SOC_MODEL:"");
-        if(turnip)Os.setenv("DM_PRIVATE_VULKAN","turnip",true);
-        else Os.unsetenv("DM_PRIVATE_VULKAN");
+        if(turnip){
+            Os.setenv("DM_PRIVATE_VULKAN","turnip",true);
+            // The bundled Turnip build is validated on the sysmem path. It
+            // avoids the tiled-cache transition stalls seen on Adreno 642L.
+            Os.setenv("TU_DEBUG","sysmem",true);
+        }else{
+            Os.unsetenv("DM_PRIVATE_VULKAN");
+            Os.unsetenv("TU_DEBUG");
+        }
         android.util.Log.i("D2RDriver","selection="+mode+" resolved="+(turnip?"turnip":"system"));
     }
 }

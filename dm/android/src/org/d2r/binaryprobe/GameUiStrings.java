@@ -43,6 +43,9 @@ final class GameUiStrings {
             case "操作输入不可用":return "Action input unavailable";
             case "错误 ":return "Error ";
             case "不能创建游戏目录":return "Could not create game directory";
+            case "不能创建管线缓存目录":return "Could not create the pipeline cache directory";
+            case "管线缓存名称无效":return "Invalid pipeline cache name";
+            case "不能保存管线缓存":return "Could not save the pipeline cache";
             case "模块清单无效":return "Invalid module manifest";
             case "模块清单重复或校验值无效":return "Duplicate module or invalid checksum";
             case "游戏模块校验失败":return "Game module checksum mismatch";

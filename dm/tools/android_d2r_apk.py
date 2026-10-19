@@ -294,6 +294,8 @@ def main(argv=None):
                         help="Android debug keystore (password android); release signing is a separate step")
     parser.add_argument("--update-url", default=os.environ.get("DM_UPDATE_URL", ""),
                         help="Absolute HTTPS update manifest URL; DM_UPDATE_URL is used when omitted")
+    parser.add_argument("--pipeline-cache", type=Path,
+                        help="Optional Turnip pipeline-cache seed directory (driver-keyed cache and pso_user.vkbin)")
     parser.add_argument("--validate-only", action="store_true", help="Check prepared inputs without creating output or invoking SDK tools")
     args = parser.parse_args(argv)
     repo, out = args.repo.resolve(), args.out.resolve()
@@ -308,6 +310,19 @@ def main(argv=None):
             (out.exists() and (not out.is_dir() or any(out.iterdir())))):
         parser.error("Use a fresh output directory outside the checkout and all input directories")
     native_data, modules, assets_data, report = validate_inputs(native, images, assets)
+    pipeline_seed = {}
+    if args.pipeline_cache is not None:
+        seed_root = args.pipeline_cache.resolve()
+        if not seed_root.is_dir():
+            parser.error(f"Pipeline cache directory is missing: {seed_root}")
+        for source in sorted(seed_root.iterdir()):
+            if not source.is_file() or not re.fullmatch(r"(?:[0-9a-f]{16}\.bin|pso_user\.vkbin)", source.name):
+                raise ValueError(f"Unexpected pipeline cache input: {source.name}")
+            data = source.read_bytes()
+            if not data or len(data) > 32 * 1024 * 1024:
+                raise ValueError(f"Invalid pipeline cache size: {source.name}")
+            pipeline_seed["pipeline-cache/" + source.name] = data
+        assets_data.update(pipeline_seed)
     sources = sorted((repo / "dm/android/src").rglob("*.java"))
     if not sources:
         raise ValueError("No Android Java sources in --repo")
@@ -315,6 +330,7 @@ def main(argv=None):
                    "native_sha256": sha(native_data),
                    "java_sources": {p.relative_to(repo).as_posix(): sha(p.read_bytes()) for p in sources},
                    "assets": {name: {"bytes": len(data), "sha256": sha(data)} for name, data in assets_data.items()},
+                   "pipeline_cache_seed": {name: sha(data) for name, data in pipeline_seed.items()},
                    "requested_permissions": ["android.permission.INTERNET", "android.permission.VIBRATE"],
                    "update_url_configured": bool(update_url),
                    "original_game_or_canvas_verified": False, "external_romfs_verified_by_packager": False})
