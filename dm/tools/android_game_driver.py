@@ -1,6 +1,7 @@
 """adb driver for the D2R Android port: enter the world with a new character, then explore with the touch joystick.
 Coordinates assume a 2652x1200 panel (joystick centre (712, 823), IME candidate tap (915, 815)); adjust CENTER for other panels.
-Character names must be real words the IME completes verbatim (e.g. Warrior); "Tester2" was completed to the existing "Tester".
+Character names must be real words the IME completes verbatim (e.g. Warrior/Hunter); "Tester2" was completed to the existing "Tester".
+explore is west-biased (the camp exit to the Blood Moor is on the camp's west side).
 usage: drive.py enter <name>      -- cold start, create a character, wait until the world is loaded
        drive.py explore <seconds> -- feedback-driven walk; stops when a loading screen (zone change) is detected
 """
@@ -53,20 +54,27 @@ def loading_screen(img):
 def swipe(dx, dy, ms):
     shell('input swipe %d %d %d %d %d' % (CENTER[0], CENTER[1], CENTER[0] + dx, CENTER[1] + dy, ms), timeout=ms // 1000 + 30)
 
-def explore(seconds):
-    dirs = [(-260, 0), (-200, -150), (0, -200), (200, -150), (260, 0), (200, 150), (0, 200), (-200, 150)]
-    t0 = time.time(); cur = random.randrange(8); moved_total = 0; zone = False
-    prev = shot()
+def explore(seconds, west_bias=True):
+    west = [(-260, 0)] * 3 + [(-200, -120)] * 2 + [(-200, 150)] * 2
+    other = [(0, -200), (0, 200), (200, -150), (200, 150), (260, 0)]
+    pool = west + (other if not west_bias else other[:2])
+    t0 = time.time(); cur = random.choice(pool); zone = False
+    prev = shot(); stuck = 0
     while time.time() - t0 < seconds:
-        swipe(*dirs[cur], 5000)
+        swipe(cur[0], cur[1], 7000)
         time.sleep(0.4); now = shot()
         if not alive(): print('PROCESS DIED'); return 'died'
         d = diff(prev, now)
         if loading_screen(now) or 'STOP' in log_text()[-4000:]:
             print('loading screen / stop detected'); zone = True; break
-        print('dir', dirs[cur], 'scene change %.3f' % d)
-        if d < 0.02: cur = (cur + random.choice([1, 2, 3, 5, 6, 7])) % 8   # blocked -> turn
-        else: moved_total += 1
+        print('dir', cur, 'scene change %.3f' % d)
+        if d < 0.02:
+            stuck += 1
+            cur = random.choice([p for p in pool if p != cur])
+            if stuck >= 3:          # wedged against something: break out sideways for a few seconds
+                swipe(random.choice([-1, 1]) * 220, random.choice([-1, 1]) * 200, 4000); stuck = 0
+        else:
+            stuck = 0
         prev = now
     return 'zone' if zone else 'timeout'
 
