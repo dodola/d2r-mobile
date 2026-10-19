@@ -624,6 +624,26 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_PRIVATE_VULKAN","turnip",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan-sysmem");
     if(access(driver_option,F_OK)==0){setenv("DM_PRIVATE_VULKAN","turnip",1);setenv("TU_DEBUG","sysmem",1);}
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/turnip-debug.txt");
+    if(getenv("DM_PRIVATE_VULKAN")&&!strcmp(getenv("DM_PRIVATE_VULKAN"),"turnip")){
+        FILE *tf=fopen(driver_option,"r");
+        if(tf){
+            char value[64];size_t n=fread(value,1,sizeof value-1,tf);int extra=fgetc(tf);int read_error=ferror(tf);fclose(tf);
+            if(!read_error&&extra==EOF&&n<sizeof value){
+                size_t begin=0,end=n;
+                while(begin<end&&isspace((unsigned char)value[begin]))begin++;
+                while(end>begin&&isspace((unsigned char)value[end-1]))end--;
+                int valid=end>begin&&end-begin<sizeof value;
+                for(size_t i=begin;i<end&&valid;i++){
+                    unsigned char c=(unsigned char)value[i];
+                    if(!(islower(c)||isdigit(c)||c=='_'||c==','))valid=0;
+                }
+                if(valid){value[end]=0;setenv("TU_DEBUG",value+begin,1);
+                    LOG("ANDROID_TURNIP_DEBUG options=%s",value+begin);}
+                else LOG("ANDROID_TURNIP_DEBUG invalid file ignored");
+            }else LOG("ANDROID_TURNIP_DEBUG invalid file ignored");
+        }
+    }
     path(driver_option,sizeof driver_option,port_root,"diagnostics/vulkan-validation");
     if(access(driver_option,F_OK)==0)setenv("DM_VULKAN_VALIDATION","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-pass-reuse");
