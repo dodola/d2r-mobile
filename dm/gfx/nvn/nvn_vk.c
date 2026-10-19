@@ -229,7 +229,7 @@ static struct {
     VkFormatProperties format_properties[256];uint8_t format_known[256];
     int depth_order,depth_input_experiment,depth_input_profile,depth_input_calibrated_ties,fragment_stores;
     VkPipelineCache pipeline_cache;
-    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts,dump_frame;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
+    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts,dump_frame;int filter_cubic_ext,present_cubic;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
     uint64_t profile_slot_wait_ns,profile_drain_wait_ns,profile_completion_wait_ns,profile_completion_waits;
     VBuffer support,zero,default_vertex; VPool pools[LIMIT_POOLS]; int npool;
     PoolUpload pool_uploads[UPLOAD_BUCKETS][UPLOAD_WAYS];uint64_t upload_age;
@@ -556,6 +556,7 @@ static void backend_init(void) {
         has_robustness2|=!strcmp(name,VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
         has_draw_parameters|=!strcmp(name,VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME);
         has_depth_order|=!strcmp(name,VK_ARM_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME);
+        G.filter_cubic_ext|=!strcmp(name,VK_EXT_FILTER_CUBIC_EXTENSION_NAME);
     }
     {char line[6144];int n=0;int host=0;for(uint32_t i=0;i<extension_count&&n<(int)sizeof line-80;i++){const char *name=extension_properties[i].extensionName;host|=!strcmp(name,"VK_EXT_external_memory_host");n+=snprintf(line+n,sizeof line-n,"%s ",name);}
      fprintf(stderr,"[nvn-vulkan] DEVICE_EXTENSIONS count=%u external_memory_host=%d %s\n",extension_count,host,line);}
@@ -609,6 +610,9 @@ static void backend_init(void) {
     G.feedback_layout=feedback.attachmentFeedbackLoopLayout;
     if(G.feedback_layout)de[enabled_extensions++]=VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME;
     if(G.mirror_clamp)de[enabled_extensions++]=VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME;
+    {const char *pf=getenv("DM_PRESENT_FILTER");G.present_cubic=G.filter_cubic_ext&&!(pf&&!strcmp(pf,"linear")); /* cubic by default; "linear" opts out */
+     if(G.present_cubic)de[enabled_extensions++]=VK_EXT_FILTER_CUBIC_EXTENSION_NAME;
+     fprintf(stderr,"[nvn-vulkan] PRESENT_FILTER filter=%s cubic_extension=%d enabled=%d\n",pf?pf:"default",G.filter_cubic_ext,G.present_cubic);}
     if(has_draw_parameters)de[enabled_extensions++]=VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME;
     G.null_descriptors=robustness2.nullDescriptor;
     robustness2.robustBufferAccess2=robustness2.robustImageAccess2=VK_FALSE;
@@ -4301,8 +4305,10 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     VTexture *encoded=present_encoded_source(t);
     VkFormatProperties src_format=format_properties(encoded->format),dst_format=format_properties(G.swap_format);
     if(!(src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT)||!(dst_format.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT))die("present blit formats",t->format);
-    vkCmdBlitImage(S.command,encoded->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,G.swap_images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,
-       src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST);
+    VkFilter present_filter=src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST;
+    /* Upscaling 1280x720 to the panel by about 2x: cubic keeps text and edges sharper than bilinear. */
+    if(G.present_cubic&&(src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_CUBIC_BIT_EXT))present_filter=VK_FILTER_CUBIC_EXT;
+    vkCmdBlitImage(S.command,encoded->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,G.swap_images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,present_filter);
     barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=0;
     vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,NULL,0,NULL,1,&barrier);

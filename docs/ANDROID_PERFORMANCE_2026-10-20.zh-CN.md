@@ -137,6 +137,12 @@ Qualcomm 系统编译器对“UBO 数组访问的动态分量索引”编译错�
 
 Turnip 暴露 `textureCompressionBC`（BC1/BC3/BC7 均可采样并线性过滤），系统驱动不暴露。目前后端所有 BC 纹理都在 CPU 解码成 RGBA8（体积 4–8 倍）。改用原生 BC 需要同时改格式映射、创建、上传（块行大小）、重传、缓冲到纹理拷贝（块对齐步长）、纹理到纹理拷贝和回读共约六条路径，并且需要进入游戏世界逐一验证，当前无法在设备上自动化验证，所以暂不实现。启动日志新增 `TEXTURE_COMPRESSION` 行，打印两个驱动的实际能力。
 
+## UI / 文字清晰度：present 放大改用三次滤波
+
+游戏的 3D、UI 和文字都以 1280×720 渲染，最后由 present 阶段用 blit 放大到面板（本机 2652×1200，约 2.07 倍），原先是双线性滤波。现在启用 `VK_EXT_filter_cubic`（系统驱动和 Turnip 都支持），源格式支持时用 `VK_FILTER_CUBIC_EXT` 放大，不支持则回退线性；`diagnostics/present-filter.txt` 写 `linear` 可关闭。日志 `PRESENT_FILTER filter=… cubic_extension=… enabled=…`。
+
+实测（角色选择）：文字区域的平均边缘梯度 14.8 → 17.6（约 +20%），人物面部没有可见光晕或过冲，帧率无变化（约 13 FPS，blit 由硬件完成）。这只改善放大质量，不增加原始细节；要获得更高的原生文字清晰度仍需在游戏内提高 UI 输出尺寸或扩展原生 HUD 叠加层（未做）。
+
 ## 后续
 
 - 剩余 GPU 空闲约 6 ms/帧，下一个瓶颈是彩色 pass 本身（片元受限）。

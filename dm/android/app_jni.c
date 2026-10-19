@@ -795,6 +795,10 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_STATS","1",1);
     /* Diagnostic only: shader dump and texture LOD bias A/B. Absent markers leave both off. */
     /* Render submission slots in flight (1 = previous behaviour). */
+    /* Present upscale filter: cubic (VK_EXT_filter_cubic) by default when the device has it; "linear" opts out. */
+    unsetenv("DM_PRESENT_FILTER");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/present-filter.txt");
+    {FILE *pf=fopen(driver_option,"r");if(pf){char pv[16]={0};size_t pn=fread(pv,1,15,pf);fclose(pf);while(pn&&(pv[pn-1]=='\n'||pv[pn-1]=='\r'||pv[pn-1]==' '))pv[--pn]=0;if(pn)setenv("DM_PRESENT_FILTER",pv,1);}}
     unsetenv("DM_DIAG_DUMP_FRAME");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/dump-frame.txt");
     {FILE *df=fopen(driver_option,"r");if(df){char dv[24]={0};size_t dn=fread(dv,1,23,df);fclose(df);if(dn)setenv("DM_DIAG_DUMP_FRAME",dv,1);}}
