@@ -9,7 +9,7 @@ typedef struct {StablePso stable;Pso pso;int state,demand,seed;VkResult result;}
 static struct {
     pthread_mutex_t lock,store_lock;pthread_cond_t changed;pthread_t thread;
     PipelineJob jobs[LIMIT_PSOS];unsigned count;int mode,started,trace;
-    char manifest_path[1200];DmPipelineIdentity identity;
+    char manifest_path[1200],legacy_path[1200];DmPipelineIdentity identity;
     uint64_t generation,saved_generation,last_save,loaded_bytes;
     uint64_t sync_creates,claims,waits,wait_ns;
     _Atomic uint64_t background_creates,background_ns;
@@ -124,7 +124,16 @@ static void pipeline_cache_init(void) {
     memcpy(PW.identity.uuid,G.properties.pipelineCacheUUID,16);
     if(PW.mode){
         size_t index_size=0;uint8_t *index=read_file("shader_index.bin",&index_size);PW.identity.shader_crc=crc32(0,index,(uInt)index_size);free(index);
-        if(snprintf(PW.manifest_path,sizeof PW.manifest_path,"%s/pso_user.vkbin",dir)>=(int)sizeof PW.manifest_path)die("pipeline manifest path",0);
+        /* One user manifest per driver identity: switching between the system driver and Turnip no longer overwrites the
+         * other driver's warm-start list. The unsuffixed pso_user.vkbin (shipped seeds) is still read, and rejected by the
+         * identity check when it belongs to another driver. */
+        uint32_t manifest_id=crc32(0,(const uint8_t *)&PW.identity.vendor,sizeof PW.identity.vendor);
+        manifest_id=crc32(manifest_id,(const uint8_t *)&PW.identity.device,sizeof PW.identity.device);
+        manifest_id=crc32(manifest_id,(const uint8_t *)&PW.identity.driver,sizeof PW.identity.driver);
+        manifest_id=crc32(manifest_id,PW.identity.uuid,sizeof PW.identity.uuid);
+        manifest_id=crc32(manifest_id,(const uint8_t *)&PW.identity.options,sizeof PW.identity.options);
+        if(snprintf(PW.manifest_path,sizeof PW.manifest_path,"%s/pso_user-%08x.vkbin",dir,manifest_id)>=(int)sizeof PW.manifest_path||
+           snprintf(PW.legacy_path,sizeof PW.legacy_path,"%s/pso_user.vkbin",dir)>=(int)sizeof PW.legacy_path)die("pipeline manifest path",0);
     }
     /* Main's validated driver cache is the sole opaque-cache reader/writer. */
     pipeline_cache_start();PW.loaded_bytes=PC.loaded_bytes;
@@ -181,6 +190,7 @@ static void pipeline_worker_start(void) {
     const char *manifest=getenv("DM_PSO_MANIFEST");int warm=PW.mode==2&&!G.disable_pso_reuse&&(!manifest||strcmp(manifest,"off"));
     if(manifest&&*manifest&&strcmp(manifest,"off"))pipeline_manifest_load(manifest,warm);
     else{char seed[1200];snprintf(seed,sizeof seed,"%s/pso_manifest.vkbin",G.shader_root);pipeline_manifest_load(seed,warm);}
+    pipeline_manifest_load(PW.legacy_path,warm);
     pipeline_manifest_load(PW.manifest_path,warm);
     int rc=pthread_create(&PW.thread,NULL,pipeline_worker,NULL);if(rc){PW.mode=0;atomic_store(&PW.warm_pending,0);fprintf(stderr,"[nvn-vulkan] PIPELINE_WORKER unavailable=%d synchronous_fallback=1\n",rc);return;}
     pthread_detach(PW.thread);PW.started=1;
