@@ -2324,12 +2324,18 @@ static int depth_read_only(void) {
     if(!d->st || (!G.state.stencil_write[0]&&!G.state.stencil_write[1]))return 1;
     return d->fail_f==NVN_STENCIL_OP_KEEP&&d->zfail_f==NVN_STENCIL_OP_KEEP&&d->zpass_f==NVN_STENCIL_OP_KEEP&&d->fail_b==NVN_STENCIL_OP_KEEP&&d->zfail_b==NVN_STENCIL_OP_KEEP&&d->zpass_b==NVN_STENCIL_OP_KEEP;
 }
+/* A shader texture binding with no resource: handle 0 while texture id 0 was never created, or the NVN invalid-id
+ * sentinel 0xfffff (guest left the slot pointing past the pool, e.g. an unused sampler of a small room's material). */
+static int texture_binding_null(uint64_t handle) {
+    if((handle&0xfffff)==0xfffff)return 1;
+    return !handle && (!G.texture_slots||!G.tslot[0].live);
+}
 static void collect_image_uses(VShader *s) {
     if(!s)return;
     for(unsigned i=0;i<s->h.nb;i++) {RBinding *b=&s->b[i];if(b->kind!=4&&b->kind!=6&&b->kind!=11)continue;
         if(b->slot<0 || b->slot>=(b->kind!=4?32:128))die("image-use shader slot",b->slot);
         uint64_t handle=b->kind!=4?G.state.img[s->h.stage][b->slot]:G.state.tex[s->h.stage][b->slot];unsigned tid=handle&0xfffff;
-        if(!handle && (!G.texture_slots||!G.tslot[0].live))continue;
+        if(texture_binding_null(handle))continue;
         if(tid>=G.texture_slots||!G.tslot[tid].live){fprintf(stderr,"[nvn-vulkan] IMAGE_MISSING shader=%s stage=%u kind=%u slot=%d tid=%u\n",s->key,s->h.stage,b->kind,b->slot,tid);
             for(unsigned slot=0;slot<32;slot++)fprintf(stderr,"[nvn-vulkan] IMAGE_BIND slot=%u handle=%llx\n",slot,(unsigned long long)G.state.img[s->h.stage][slot]);
             for(unsigned slot=0;slot<128;slot++)if(G.state.tex[s->h.stage][slot])fprintf(stderr,"[nvn-vulkan] TEXTURE_BIND slot=%u handle=%llx\n",slot,(unsigned long long)G.state.tex[s->h.stage][slot]);
@@ -2383,7 +2389,7 @@ static void prepare_sampling_copies(VShader *s) {
     if(!s || G.feedback_layout || s->h.stage==5)return;
     for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==4 && !(s->dref_bindings&(1ull<<i))){
         uint64_t handle=G.state.tex[s->h.stage][s->b[i].slot];unsigned tid=handle&0xfffff;
-        if(!handle&&(!G.texture_slots||!G.tslot[0].live))continue;
+        if(texture_binding_null(handle))continue;
         if(tid>=G.texture_slots||!G.tslot[tid].live)die("sample copy descriptor",tid);
         TSlot *slot=&G.tslot[tid];
         VTexture *t=slot_texture(slot,1);if(!sampling_copy_required(t,slot,s->h.stage))continue;
@@ -2502,7 +2508,7 @@ static void prepare_comparison_images(VShader *s) {
     if(!s)return;
     for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==4&&(s->dref_bindings&(1ull<<i))){
         uint64_t handle=G.state.tex[s->h.stage][s->b[i].slot];unsigned tid=handle&0xfffff;
-        if(!handle&&(!G.texture_slots||!G.tslot[0].live))continue;
+        if(texture_binding_null(handle))continue;
         if(tid>=G.texture_slots||!G.tslot[tid].live)die("comparison image descriptor",tid);
         VTexture *t=slot_texture(&G.tslot[tid],1);
         if(aspect(t->format)==VK_IMAGE_ASPECT_COLOR_BIT)comparison_image(t);
@@ -2859,7 +2865,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
            if(b->kind==11 && b->type!=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE && b->type!=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)die("image-bank query descriptor type",b->type);
            uint64_t handle=b->kind!=4?G.state.img[s->h.stage][b->slot]:G.state.tex[s->h.stage][b->slot];
            unsigned tid=(unsigned)handle&0xfffff;
-           if(!handle && (!G.texture_slots||!G.tslot[0].live)){
+           if(texture_binding_null(handle)){
                if(!G.null_descriptors){S.null_bindings[s->h.stage]|=1ull<<i;w[i].descriptorCount=0;plan_safe=0;continue;}
                if(!G.fetch_sampler){VkSamplerCreateInfo ci={.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,.magFilter=VK_FILTER_NEAREST,.minFilter=VK_FILTER_NEAREST,.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST,.addressModeU=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeV=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.maxLod=VK_LOD_CLAMP_NONE};CHECK(vkCreateSampler(G.device,&ci,NULL,&G.fetch_sampler));}
                ii[i]=(VkDescriptorImageInfo){.sampler=b->type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER?G.fetch_sampler:VK_NULL_HANDLE,
