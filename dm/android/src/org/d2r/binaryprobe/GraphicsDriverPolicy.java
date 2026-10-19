@@ -1,11 +1,13 @@
 package org.d2r.binaryprobe;
 
-/** Auto uses the bundled Turnip driver only on SoCs where it has been verified to render correctly; every other
- * device keeps the system driver. Explicit launcher choices always win. Shared with the optional offline installer.
- * Adreno 642L (SM7325): the system driver draws blocky white fog and shadow artifacts that Turnip does not. */
+/** Auto uses the bundled Turnip driver only on SoCs listed in VERIFIED_TURNIP_SOCS; every other device keeps the
+ * system driver. Explicit launcher choices always win. Shared with the optional offline installer.
+ * The list is empty: the Adreno 642L (SM7325) fog artifacts that once justified Turnip were a Qualcomm compiler
+ * miscompile of dynamic uniform component indexing, now lowered in vertex and fragment shaders, and the system
+ * driver is both correct and faster there. */
 final class GraphicsDriverPolicy {
     static final String AUTO="auto", SYSTEM="system", TURNIP="turnip";
-    private static final String[] VERIFIED_TURNIP_SOCS={"SM7325"};
+    private static final String[] VERIFIED_TURNIP_SOCS={};
     private GraphicsDriverPolicy() {}
     static String normalize(String mode){return SYSTEM.equals(mode)||TURNIP.equals(mode)?mode:AUTO;}
     /** SOC_MODEL exists from API 31; before that nothing can be verified. */

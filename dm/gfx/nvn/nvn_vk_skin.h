@@ -2,7 +2,7 @@
  * uniform-buffer array accesses (seen in character skinning shaders).
  * Read the vec4 element first, then extract the selected component.  The
  * transformation is exact, so it is applied to every uniform buffer variable of
- * a vertex shader on the Qualcomm proprietary driver; shaders without such
+ * a vertex or fragment shader on the Qualcomm proprietary driver; shaders without such
  * accesses are returned unchanged. */
 #include <stdint.h>
 #include <stdlib.h>

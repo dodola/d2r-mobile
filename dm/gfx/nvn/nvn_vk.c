@@ -2121,7 +2121,7 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         if(!adapted)die("compute ballot adaptation bounds/interface",0);bytes=adapted;
         if(ballots)fprintf(stderr,"[nvn-vulkan] COMPUTE_BALLOT_REDUCE shader=%s ballots=%u driver=Qualcomm bytes=%zu\n",key,ballots,size);
     }
-    if(stage==0&&nvn_vk_quirk_enabled(&G.quirks,NVN_VK_QUIRK_LOWER_SKIN_UBO)){
+    if((stage==0||stage==1)&&nvn_vk_quirk_enabled(&G.quirks,NVN_VK_QUIRK_LOWER_SKIN_UBO)){
         unsigned accesses=0;uint64_t skip_bindings=0;for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==8&&s->b[i].binding<64)skip_bindings|=1ull<<s->b[i].binding;
         uint8_t *adapted=dm_skin_ubo_apply(bytes,&size,&accesses,skip_bindings);
         if(!adapted)die("skin UBO adaptation bounds/interface",0);bytes=adapted;

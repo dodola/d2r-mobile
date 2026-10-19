@@ -22,7 +22,7 @@ typedef enum {
     NVN_VK_QUIRK_NONE = 0,
     /* Qualcomm's system compiler mishandles divergent subgroup ballot. */
     NVN_VK_QUIRK_LOWER_COMPUTE_BALLOT = 1u << 0,
-    /* Qualcomm's system compiler mishandles dynamic skin UBO components. */
+    /* Qualcomm's system compiler mishandles dynamic component indexing of uniform buffer arrays (vertex and fragment). */
     NVN_VK_QUIRK_LOWER_SKIN_UBO = 1u << 1
 } NvnVkQuirk;
 
