@@ -498,6 +498,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         });
     }
     private void fail(String title,Exception error){closeRendererSettings();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}failed=true;status.setVisibility(View.VISIBLE);status.setText(title+"\n"+error.getMessage());}
+    private boolean driverPending=true;
     private final Runnable poll=new Runnable(){public void run(){
         if(!launched||failed)return;
         try{String raw=nativeStatus();JSONObject s=new JSONObject(raw);
@@ -506,6 +507,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if(rendererSettings!=null)rendererSettings.updateApplied(appliedRendererFlags,appliedRenderScale);
             JSONObject scene=s.optJSONObject("scene");inGame=scene!=null&&scene.optInt("game",0)!=0;
             long frame=s.getLong("presented_frames");
+            if(frame>0&&driverPending){driverPending=false;GraphicsDriverSettings.confirmStarted(GameActivity.this);}
             if(frame>0&&touchControls!=null&&touchControls.refreshLanguage())refreshFrontendStrings();
             if(frame>0)status.setVisibility(View.GONE);else status.setText(t(s.getString("phase")));
             if(resumed){double current=fpsSampler.sample(frame,SystemClock.elapsedRealtime());
@@ -538,5 +540,5 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}
-    @Override public void onDestroy(){if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();closeRendererSettings();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
+    @Override public void onDestroy(){GraphicsDriverSettings.confirmStarted(this);if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();closeRendererSettings();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
 }

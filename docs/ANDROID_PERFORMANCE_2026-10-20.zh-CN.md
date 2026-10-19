@@ -100,6 +100,19 @@ Eden 的着色器路径同样没有快速数学开关，最终优化交给驱动
 
 **下一步**：对 pass 008 的输入逐个替换/检查（texel buffer 的视图范围与对齐、3D 纹理的格式与视图、4 层阴影图的数组视图），并用 `shader-override` 逐段裁剪该着色器确认是编译器缺陷还是我们的适配问题。
 
+## 驱动策略：已验证的 SoC 自动使用 Turnip（带崩溃回退）
+
+由于系统驱动在 Adreno 642L 上存在渲染错误，`GraphicsDriverPolicy` 的自动模式改为：`SM7325`（API 31 及以上）使用内置 Turnip，其他 SoC 仍用系统驱动；显式选择始终优先，ADB 的 `private-vulkan*` 标记优先级更高。
+
+自动选择 Turnip 之前先写 `files/d2r-mobile/driver-auto-pending`；首帧呈现或 Activity 正常销毁时删除。若下次启动时它仍在，说明上次没有走到首帧（崩溃或被划掉），记一次失败；**连续两次**才回退到系统驱动并持久化（`auto_turnip_failed`）。用户重新保存驱动选择会清除该状态。日志 `D2RDriver` 输出 `selection=… resolved=…`，回退时附带 `auto_fallback=1`。
+
+| 驱动（Adreno 642L，角色选择） | 100% | 0.75 | 画面 |
+| --- | ---: | ---: | --- |
+| 系统驱动 | 约 12.4 FPS | 约 15.2 FPS | 雾气块状伪影 |
+| Turnip（自动选择） | 约 11.0 FPS | 约 13.0 FPS | 干净 |
+
+已验证：自动选择、首帧后清除标记、注入遗留标记后第 1 次仍用 Turnip、第 2 次回退。尚未验证：其他 SoC 的白名单（目前只有 SM7325 实测过）、在设备上真实崩溃的路径（只用 force-stop 和注入标记模拟）。
+
 ## 后续
 
 - 剩余 GPU 空闲约 6 ms/帧，下一个瓶颈是彩色 pass 本身（片元受限）。
