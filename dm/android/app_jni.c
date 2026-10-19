@@ -55,6 +55,129 @@ extern int dm_padmode_busy(void) __attribute__((weak));
 extern int dm_touch_game_snapshot(dm_tg_snapshot *) __attribute__((weak));
 extern void dm_touch_game_diagnostics(dm_tg_diagnostics *) __attribute__((weak));
 
+/* The update transport lives in Java while the build-number/notice widgets
+ * remain in the shared title host. Keep one Activity reference for callbacks
+ * from the guest's UI thread and release it with the Activity. */
+static JavaVM *update_java_vm;
+static jobject update_activity;
+static pthread_mutex_t update_activity_lock = PTHREAD_MUTEX_INITIALIZER;
+extern void dm_update_init(int, void (*)(void), void (*)(void));
+extern void dm_update_offer(int, const char *, int);
+extern void dm_update_fail(int);
+extern void dm_update_foreground(void);
+extern void dm_update_safe_left(int);
+extern void dm_update_site(const char *);
+#if !defined(DM_ANDROID_D2R_UI) || !DM_ANDROID_D2R_UI
+/* The base 91738 package has no title-private update widgets. Keep the JNI
+ * contract stable while the verified 94012 UI bridge supplies the implementation. */
+void dm_update_init(int build, void (*select)(void), void (*click)(void)) {(void)build;(void)select;(void)click;}
+void dm_update_offer(int build, const char *note, int urgent) {(void)build;(void)note;(void)urgent;}
+void dm_update_fail(int kind) {(void)kind;}
+void dm_update_foreground(void) {}
+void dm_update_safe_left(int units) {(void)units;}
+void dm_update_site(const char *host) {(void)host;}
+#endif
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)reserved;
+    update_java_vm=vm;
+    return JNI_VERSION_1_6;
+}
+
+static JNIEnv *update_java_env(int *attached) {
+    if (!update_java_vm) return NULL;
+    JNIEnv *env=NULL;
+    jint status=(*update_java_vm)->GetEnv(update_java_vm,(void **)&env,JNI_VERSION_1_6);
+    if (status==JNI_OK) { *attached=0; return env; }
+    if (status!=JNI_EDETACHED) return NULL;
+    if ((*update_java_vm)->AttachCurrentThread(update_java_vm,&env,NULL)!=JNI_OK) return NULL;
+    *attached=1;
+    return env;
+}
+
+static void update_activity_call(const char *method_name) {
+    int attached=0;
+    JNIEnv *env=update_java_env(&attached);
+    if (!env) return;
+    jobject activity=NULL;
+    pthread_mutex_lock(&update_activity_lock);
+    if (update_activity) activity=(*env)->NewLocalRef(env,update_activity);
+    pthread_mutex_unlock(&update_activity_lock);
+    if (activity) {
+        jclass cls=(*env)->GetObjectClass(env,activity);
+        jmethodID method=cls?(*env)->GetMethodID(env,cls,method_name,"()V"):NULL;
+        if (method) (*env)->CallVoidMethod(env,activity,method);
+        if ((*env)->ExceptionCheck(env)) {
+            LOG("Android update callback %s failed",method_name);
+            (*env)->ExceptionClear(env);
+        }
+        if (cls) (*env)->DeleteLocalRef(env,cls);
+        (*env)->DeleteLocalRef(env,activity);
+    }
+    if (attached) (*update_java_vm)->DetachCurrentThread(update_java_vm);
+}
+
+static void update_on_select(void) { update_activity_call("requestUpdateCheck"); }
+static void update_on_click(void) { update_activity_call("openUpdatePage"); }
+
+static void update_host(const char *url, char *host, size_t capacity) {
+    host[0]='\0';
+    if (!url || strncmp(url,"https://",8) || capacity<2) return;
+    const char *start=url+8,*end=start;
+    while (*end && *end!='/' && *end!=':' && *end!='?' && *end!='#') end++;
+    size_t length=(size_t)(end-start);
+    if (length>=capacity) length=capacity-1;
+    memcpy(host,start,length);host[length]='\0';
+}
+
+JNIEXPORT void JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeUpdateInit(
+        JNIEnv *env,jobject self,jint own_build,jstring update_url) {
+    jobject replacement=(*env)->NewGlobalRef(env,self);
+    pthread_mutex_lock(&update_activity_lock);
+    jobject previous=update_activity;
+    update_activity=replacement;
+    pthread_mutex_unlock(&update_activity_lock);
+    if (previous) (*env)->DeleteGlobalRef(env,previous);
+    char host[128]={0};
+    const char *url=update_url?(*env)->GetStringUTFChars(env,update_url,NULL):NULL;
+    update_host(url,host,sizeof host);
+    if (update_url&&!url) return;
+    dm_update_site(host);
+    dm_update_safe_left(0);
+    dm_update_init((int)own_build,update_on_select,update_on_click);
+    if (update_url) (*env)->ReleaseStringUTFChars(env,update_url,url);
+    LOG("Android update UI: build=%d configured=%d",(int)own_build,host[0]!=0);
+}
+
+JNIEXPORT void JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeUpdateOffer(
+        JNIEnv *env,jclass cls,jint build,jstring note,jboolean urgent) {
+    (void)cls;
+    const char *text=note?(*env)->GetStringUTFChars(env,note,NULL):NULL;
+    if (note&&!text) return;
+    dm_update_offer((int)build,text?text:"",urgent?1:0);
+    if (note) (*env)->ReleaseStringUTFChars(env,note,text);
+}
+
+JNIEXPORT void JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeUpdateFail(
+        JNIEnv *env,jclass cls,jint kind) {
+    (void)env;(void)cls;dm_update_fail((int)kind);
+}
+
+JNIEXPORT void JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeUpdateForeground(
+        JNIEnv *env,jclass cls) {
+    (void)env;(void)cls;dm_update_foreground();
+}
+
+JNIEXPORT void JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeUpdateShutdown(
+        JNIEnv *env,jclass cls) {
+    (void)cls;
+    jobject previous=NULL;
+    pthread_mutex_lock(&update_activity_lock);
+    previous=update_activity;update_activity=NULL;
+    pthread_mutex_unlock(&update_activity_lock);
+    if (previous) (*env)->DeleteGlobalRef(env,previous);
+}
+
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Focus callbacks stay short. Save waits, filesystem work and shutdown
  * run on a dedicated worker; SurfaceView already owns a separate GPU worker. */

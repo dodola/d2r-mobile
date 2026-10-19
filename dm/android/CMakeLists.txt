@@ -230,6 +230,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
     endif()
     configure_file("${DM_ANDROID_VAULT_TABLE}" "${CMAKE_BINARY_DIR}/generated/dm_vault_tab.h" COPYONLY)
     target_sources(d2r_mobile_android PRIVATE d2r_ui_adapter.c d2r_hud_android.c d2r_custom_android.c d2r_world_overlay_android.c
+      ${DM_HOST}/dm_update.c
       ${DM_HOST}/dm_cursor.c ${DM_HOST}/dm_actions.c ${DM_HOST}/dm_world.c
       ${DM_HOST}/dm_cursor_item.c ${DM_HOST}/dm_uiscreen.c ${DM_HOST}/dm_prof.c
       ${DM_HOST}/dm_beltauto.c ${DM_HOST}/dm_elysium.c ${DM_HOST}/dm_freetp.c

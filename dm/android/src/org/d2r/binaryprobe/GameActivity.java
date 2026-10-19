@@ -52,6 +52,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static native String nativeKeyboardRequest();
     private static native void nativeKeyboardResult(long id,boolean accepted,String text);
     private static native void nativeKeyboardReady(boolean ready);
+    private native void nativeUpdateInit(int ownBuild,String updateUrl);
+    private static native void nativeUpdateOffer(int build,String note,boolean urgent);
+    private static native void nativeUpdateFail(int kind);
+    private static native void nativeUpdateForeground();
+    private static native void nativeUpdateShutdown();
     private android.app.AlertDialog keyboardDialog;
     private android.app.AlertDialog saveFailureDialog;
     private long keyboardId;
@@ -69,6 +74,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private int appliedRendererFlags=RendererOptions.DEFAULT_FLAGS;
     private float appliedRenderScale=RenderQuality.ORIGINAL;
     private GameUiStrings strings;
+    private AndroidUpdateChecker updateChecker;
     private final GameDisplayMetrics.FpsSampler fpsSampler=new GameDisplayMetrics.FpsSampler();
     private double displayedFps=Double.NaN;
     private TouchControlsView touchControls;
@@ -175,6 +181,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         status.setGravity(Gravity.CENTER);status.setBackgroundColor(0xe60d0d0f);
         status.setPadding(dp(28),dp(18),dp(28),dp(18));status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         status.setText(t("正在准备游戏文件"));root.addView(status,new FrameLayout.LayoutParams(-1,-1));setContentView(root);
+        initializeUpdates();
         new Thread(() -> {
             try { prepareModules();GraphicsDriverSettings.configure(this);ui.post(() -> {prepared=true;configureAndStart();}); }
             catch(Exception e){ui.post(() -> fail(t("游戏文件准备失败"),e));}
@@ -241,6 +248,56 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if(configured)nativeControllerCancel(0);
     }
     private boolean gameInputReady() { return configured && surfaceReady && inputReady && resumed && hasWindowFocus() && !failed && !destroyed; }
+    private void initializeUpdates(){
+        final int ownBuild;
+        String updateUrl="";
+        try{
+            android.content.pm.PackageInfo info=getPackageManager().getPackageInfo(getPackageName(),0);
+            ownBuild=info.versionCode;
+            Object configured=getPackageManager().getApplicationInfo(getPackageName(),
+                android.content.pm.PackageManager.GET_META_DATA).metaData
+                .get("org.d2r.binaryprobe.UPDATE_URL");
+            if(configured instanceof String)updateUrl=(String)configured;
+        }catch(android.content.pm.PackageManager.NameNotFoundException missing){
+            android.util.Log.w("D2RUpdate","Package identity is unavailable",missing);return;
+        }
+        if(!AndroidUpdateChecker.validHttpsUrl(updateUrl))updateUrl="";
+        nativeUpdateInit(ownBuild,updateUrl);
+        android.util.Log.i("D2RUpdate","checker configured build="+ownBuild+" transport="+!updateUrl.isEmpty());
+        if(ownBuild<=1||updateUrl.isEmpty())return;
+        updateChecker=AndroidUpdateChecker.create(ownBuild,updateUrl,
+            new AndroidUpdateChecker.Listener(){
+                @Override public void onUpdate(AndroidUpdateChecker.Update update){
+                    android.util.Log.i("D2RUpdate","available build="+update.build+" urgent="+update.urgent);
+                    ui.post(() -> {if(!destroyed){nativeUpdateFail(0);nativeUpdateOffer(update.build,update.note,update.urgent);}});
+                }
+                @Override public void onSameOrOlder(){
+                    android.util.Log.i("D2RUpdate","server is not newer");
+                    ui.post(() -> {if(!destroyed){nativeUpdateFail(0);nativeUpdateOffer(0,"",false);}});
+                }
+                @Override public void onFailure(int kind){
+                    android.util.Log.w("D2RUpdate","check failed kind="+kind);
+                    ui.post(() -> {if(!destroyed)nativeUpdateFail(kind);});
+                }
+            },this::openUpdateUrl);
+    }
+    private void requestUpdateCheck(){
+        ui.post(() -> {if(!destroyed&&updateChecker!=null){android.util.Log.i("D2RUpdate","request check");updateChecker.requestCheck();}});
+    }
+    private void openUpdatePage(){
+        ui.post(() -> {if(!destroyed&&updateChecker!=null){android.util.Log.i("D2RUpdate","open requested");boolean opened=updateChecker.open();if(!opened)android.util.Log.w("D2RUpdate","no update URL or browser available");}});
+    }
+    private boolean openUpdateUrl(String url){
+        if(!AndroidUpdateChecker.validHttpsUrl(url))return false;
+        try{
+            startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                android.net.Uri.parse(url)));
+            android.util.Log.i("D2RUpdate","opened HTTPS update URL");
+            return true;
+        }catch(RuntimeException unavailable){
+            android.util.Log.w("D2RUpdate","No HTTPS browser is available",unavailable);return false;
+        }
+    }
     private void closeRendererSettings(){if(rendererSettings!=null){rendererSettings.dismiss();rendererSettings=null;}}
     static void installDialogBack(android.app.Dialog dialog){
         dialog.setOnKeyListener((d,key,event) -> {
@@ -456,10 +513,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if(configured){nativeControllerCancel(0);nativeActions(0,0,0,0,0);}
         if(touchControls!=null)touchControls.cancel();
     }}
-    @Override public void onResume(){super.onResume();resumed=true;fpsSampler.reset();nativeKeyboardReady(true);if(configured)nativeAudioInterruption(false);if(configured)nativeLifecycle(2);configureAndStart();}
+    @Override public void onResume(){super.onResume();resumed=true;fpsSampler.reset();nativeKeyboardReady(true);nativeUpdateForeground();if(configured)nativeAudioInterruption(false);if(configured)nativeLifecycle(2);configureAndStart();}
     @Override public void onPause(){clearControllers();closeRendererSettings();if(configured){nativeLifecycle(0);nativeLifecycle(1);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}resumed=false;fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;controllerButtons=0;if(touchControls!=null)touchControls.cancel();if(configured){nativeActions(0,0,0,0,0);nativeControllerCancel(0);}if(configured&&surfaceReady)publishSurface();super.onPause();}
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}
-    @Override public void onDestroy(){if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();closeRendererSettings();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
+    @Override public void onDestroy(){if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();closeRendererSettings();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
 }

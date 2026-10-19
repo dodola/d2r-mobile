@@ -3,9 +3,11 @@
     android:versionCode="4" android:versionName="0.4-offline-installer">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
     <application android:label="D2R Mobile" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
         android:debuggable="true" android:allowBackup="false"
         android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.NoActionBar">
+        <meta-data android:name="org.d2r.binaryprobe.UPDATE_URL" android:value="" />
         <activity android:name="org.d2r.binaryprobe.InstallerActivity" android:exported="true">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
         </activity>

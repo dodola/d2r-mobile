@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 import re
 import struct
 import subprocess
+from urllib.parse import urlsplit
 from xml.sax.saxutils import escape
 from zipfile import ZipFile, ZIP_STORED
 
@@ -23,10 +24,29 @@ WORLD_MANIFEST = "d2r-world-assets-manifest.json"
 MODULE_MANIFEST = "module-manifest.json"
 TITLE_ID = "0100726014352000"
 BUILD_ID = "db0507f36b84200ac05f75d76ed5026f"
+APP_VERSION_CODE = 4
+APP_VERSION_NAME = "0.4-94012-parity"
 
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def checked_update_url(value):
+    value = value or ""
+    if not value:
+        return ""
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7f for ch in value):
+        raise ValueError("Update URL contains whitespace or control characters")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("Update URL is malformed") from error
+    if (parsed.scheme.lower() != "https" or not parsed.hostname or
+            parsed.username is not None or parsed.password is not None or port == 0):
+        raise ValueError("Update URL must be an absolute HTTPS URL without embedded credentials")
+    return value
 
 
 def unique_object(pairs):
@@ -163,7 +183,9 @@ def validate_inputs(native, images, assets):
     elf = ElfSymbols(native_data)
     if struct.unpack("<I", elf.datum("dm_android_hud_exp_table_entries", 4))[0] != 100:
         raise ValueError("Full D2R build requires the generated 100-entry HUD XP table")
-    for name in ("dm_ta_current_set", "dm_android_world_overlay_frame",
+    for name in ("dm_android_d2r_host_attach", "dm_android_title_host_call",
+                 "dm_android_tact_call", "dm_ta_current_set",
+                 "dm_android_world_overlay_frame",
                  "Java_org_d2r_binaryprobe_TouchControlsView_nativeHudFrame",
                  "Java_org_d2r_binaryprobe_TouchControlsView_nativeWorldFrame"):
         elf.datum(name)
@@ -270,9 +292,15 @@ def main(argv=None):
     parser.add_argument("--android-platform", default="android-35")
     parser.add_argument("--keystore", type=Path, default=Path.home() / ".android/debug.keystore",
                         help="Android debug keystore (password android); release signing is a separate step")
+    parser.add_argument("--update-url", default=os.environ.get("DM_UPDATE_URL", ""),
+                        help="Absolute HTTPS update manifest URL; DM_UPDATE_URL is used when omitted")
     parser.add_argument("--validate-only", action="store_true", help="Check prepared inputs without creating output or invoking SDK tools")
     args = parser.parse_args(argv)
     repo, out = args.repo.resolve(), args.out.resolve()
+    try:
+        update_url = checked_update_url(args.update_url)
+    except ValueError as error:
+        parser.error(str(error))
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", args.package):
         parser.error("--package must be an Android package name")
     native, images, assets = args.native.resolve(), args.images.resolve(), args.hud_assets.resolve()
@@ -287,6 +315,8 @@ def main(argv=None):
                    "native_sha256": sha(native_data),
                    "java_sources": {p.relative_to(repo).as_posix(): sha(p.read_bytes()) for p in sources},
                    "assets": {name: {"bytes": len(data), "sha256": sha(data)} for name, data in assets_data.items()},
+                   "requested_permissions": ["android.permission.INTERNET", "android.permission.VIBRATE"],
+                   "update_url_configured": bool(update_url),
                    "original_game_or_canvas_verified": False, "external_romfs_verified_by_packager": False})
     if args.validate_only:
         print(json.dumps({"validated": True, **report}, indent=2))
@@ -319,11 +349,13 @@ def main(argv=None):
     (out / "assets" / MODULE_MANIFEST).write_bytes(module_manifest_data)
     manifest = out / "AndroidManifest.xml"
     manifest.write_text(f'''<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{escape(args.package)}" android:versionCode="1" android:versionName="94012-parity-test">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{escape(args.package)}" android:versionCode="{APP_VERSION_CODE}" android:versionName="{APP_VERSION_NAME}">
  <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
  <uses-feature android:glEsVersion="0x00030000" android:required="false" />
+ <uses-permission android:name="android.permission.INTERNET" />
  <uses-permission android:name="android.permission.VIBRATE" />
  <application android:label="D2R 94012 Test" android:debuggable="true" android:allowBackup="false" android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+  <meta-data android:name="org.d2r.binaryprobe.UPDATE_URL" android:value="{escape(update_url, {'"': '&quot;'})}" />
   <activity android:name="org.d2r.binaryprobe.GameActivity" android:exported="true" android:screenOrientation="sensorLandscape" android:configChanges="orientation|screenSize|keyboardHidden">
    <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
   </activity>

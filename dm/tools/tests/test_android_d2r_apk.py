@@ -96,6 +96,17 @@ class ManifestTests(unittest.TestCase):
                 pack.checked_file(root, "link")
 
 
+class UpdateUrlTests(unittest.TestCase):
+    def test_only_absolute_https_urls_without_credentials_are_accepted(self):
+        self.assertEqual(pack.checked_update_url("https://updates.example.com/d2r.json"),
+                         "https://updates.example.com/d2r.json")
+        self.assertEqual(pack.checked_update_url(""), "")
+        for value in ("http://updates.example.com/d2r.json", "https://user:pass@example.com/x",
+                      "https://example.com:0/x", "https://example.com/a b", "itms-services://example.com/x"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                pack.checked_update_url(value)
+
+
 class ElfTests(unittest.TestCase):
     def test_exported_xp_and_fingerprint_are_read_without_execution(self):
         elf = pack.ElfSymbols(bytes(elf_fixture()))

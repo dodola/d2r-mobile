@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ import struct
 import argparse
 import sys
 import xml.etree.ElementTree as ET
+from urllib.parse import urlsplit
 
 SCRIPT_ROOT=Path(__file__).resolve().parents[2]
 ROOT=Path(os.environ.get('ANDROID_SWITCH_WORKSPACE',str(SCRIPT_ROOT))).resolve()
@@ -23,6 +25,15 @@ ART=ROOT/'analysis/d2r-mobile-port'
 SDK=Path(os.environ['LOCALAPPDATA'])/'Android/Sdk'
 JAVA=ROOT/'tools/strato-jdk17/jdk-17.0.20.1+1'
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+def checked_update_url(value):
+    value=(value or '').strip()
+    if not value:return ''
+    if any(ord(ch)<=0x20 or ord(ch)==0x7f for ch in value):raise ValueError('Update URL contains whitespace or control characters')
+    try: parsed=urlsplit(value)
+    except ValueError as error:raise ValueError('Update URL is malformed') from error
+    if parsed.scheme.lower()!='https' or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise ValueError('Update URL must be an absolute HTTPS URL without embedded credentials')
+    return value
 
 def elf_alignment(path):
     data=path.read_bytes()
@@ -37,7 +48,10 @@ def elf_alignment(path):
             loads.append({'offset':off,'vaddr':va,'alignment':align})
     if not loads: raise RuntimeError(f'ELF has no load segments: {path}')
     return loads
-def main(use_render_resolution=False,offline_manifest=None,output=None,package='org.d2r.binaryprobe'):
+def main(use_render_resolution=False,offline_manifest=None,output=None,package='org.d2r.binaryprobe',update_url=None,modules_dir=None):
+    update_url=checked_update_url(update_url or os.environ.get('DM_UPDATE_URL',''))
+    default_modules=ART/'android-images'
+    modules_dir=(Path(modules_dir) if modules_dir else default_modules).resolve()
     manifest=json.loads((ART/'build-manifest.json').read_text(encoding='utf-8'))
     driver=ART/'shader-private-driver/driver/vulkan.ad07xx.so'
     driver_selection=None
@@ -68,21 +82,38 @@ def main(use_render_resolution=False,offline_manifest=None,output=None,package='
         return p.stdout
     files=[]
     offline_entry=None
-    if (prepare_offline_entry.OUTPUT/'result.json').is_file():
-        _,offline_entry=prepare_offline_entry.verified_override()
     render_resolution=None
-    if use_render_resolution:
-        render_main,render_resolution=prepare_render_resolution.verified_override()
-    for name in ('main','sdk','subsdk0'):
-        for extension in ('patched.bin','fixups.tsv','gates.tsv'):
-            source=ART/'android-images'/f'{name}.{extension}'
-            if offline_entry and name=='main' and extension=='patched.bin':
-                source=prepare_offline_entry.OUTPUT/source.name
-            if render_resolution and name=='main' and extension=='patched.bin':
-                source=render_main
-            shutil.copyfile(source,build/'assets/modules'/source.name)
-            files.append({'name':source.name,'bytes':source.stat().st_size,'sha256':sha(source)})
-    (build/'assets/module-manifest.json').write_text(json.dumps({'files':files}),encoding='utf-8')
+    module_manifest=modules_dir/'module-manifest.json'
+    if module_manifest.is_file():
+        source_manifest=json.loads(module_manifest.read_text(encoding='utf-8'))
+        expected={f'{name}.{extension}' for name in ('main','sdk','subsdk0')
+            for extension in ('patched.bin','fixups.tsv','gates.tsv')}
+        entries=source_manifest.get('files')
+        if not isinstance(entries,list) or {entry.get('name') for entry in entries}!=expected:
+            raise RuntimeError('Module manifest does not list the exact Android module set')
+        for entry in entries:
+            name=entry['name'];source=modules_dir/name
+            if source.stat().st_size!=entry.get('bytes') or sha(source)!=entry.get('sha256'):
+                raise RuntimeError(f'Module manifest provenance mismatch: {source}')
+            shutil.copyfile(source,build/'assets/modules'/name)
+            files.append({'name':name,'bytes':entry['bytes'],'sha256':entry['sha256']})
+        packaged_module_manifest=source_manifest
+    else:
+        if modules_dir==default_modules.resolve() and (prepare_offline_entry.OUTPUT/'result.json').is_file():
+            _,offline_entry=prepare_offline_entry.verified_override()
+        if modules_dir==default_modules.resolve() and use_render_resolution:
+            render_main,render_resolution=prepare_render_resolution.verified_override()
+        for name in ('main','sdk','subsdk0'):
+            for extension in ('patched.bin','fixups.tsv','gates.tsv'):
+                source=modules_dir/f'{name}.{extension}'
+                if offline_entry and name=='main' and extension=='patched.bin':
+                    source=prepare_offline_entry.OUTPUT/source.name
+                if render_resolution and name=='main' and extension=='patched.bin':
+                    source=render_main
+                shutil.copyfile(source,build/'assets/modules'/source.name)
+                files.append({'name':source.name,'bytes':source.stat().st_size,'sha256':sha(source)})
+        packaged_module_manifest={'files':files}
+    (build/'assets/module-manifest.json').write_text(json.dumps(packaged_module_manifest),encoding='utf-8')
     sources=sorted((REPO/'dm/android/src').rglob('*.java'))
     run(JAVA/'bin/javac.exe','--release','8','-encoding','UTF-8','-cp',android,'-d',build/'classes',*sources)
     run(tools/'d8.bat','--min-api','29','--lib',android,'--output',build/'dex',*sorted((build/'classes').rglob('*.class')))
@@ -94,6 +125,15 @@ def main(use_render_resolution=False,offline_manifest=None,output=None,package='
     application=manifest_tree.getroot().find('application')
     if application is None:raise RuntimeError('Android manifest has no application')
     application.set('{http://schemas.android.com/apk/res/android}appCategory','game')
+    android_ns='{http://schemas.android.com/apk/res/android}'
+    update_metadata=None
+    for child in application.findall('meta-data'):
+        if child.get(android_ns+'name')=='org.d2r.binaryprobe.UPDATE_URL':
+            update_metadata=child
+            break
+    if update_metadata is None:
+        update_metadata=ET.SubElement(application,'meta-data',{android_ns+'name':'org.d2r.binaryprobe.UPDATE_URL'})
+    update_metadata.set(android_ns+'value',update_url)
     packaged_manifest=build/'AndroidManifest.xml'
     manifest_tree.write(packaged_manifest,encoding='utf-8',xml_declaration=True)
     resources=build/'resources.zip'
@@ -123,15 +163,18 @@ def main(use_render_resolution=False,offline_manifest=None,output=None,package='
     run(tools/'apksigner.bat','verify',apk)
     run(tools/'zipalign.exe','-c','-P','16','4',apk)
     badging=run(tools/'aapt2.exe','dump','badging',apk)
-    if 'uses-permission:' in badging: raise RuntimeError('Unexpected permission')
+    permissions=sorted(set(re.findall(r"uses-permission:\s+name='([^']+)'",badging)))
+    expected_permissions=['android.permission.INTERNET','android.permission.VIBRATE']
+    if permissions!=expected_permissions:raise RuntimeError(f'Unexpected permissions: {permissions!r}')
     (ART/'apk-badging.txt').write_text(badging,encoding='utf-8')
     report={'apk':str(apk),'bytes':apk.stat().st_size,'sha256':sha(apk),
-        'native_sha256':sha(native),'package':package,'requested_permissions':[],
+        'native_sha256':sha(native),'package':package,'requested_permissions':permissions,
         'private_driver_libraries':{p.name:sha(p) for p in private_libraries},
         'private_turnip_sha256':sha(driver),'private_driver_selection':driver_selection,
         'runtime_driver_policy':{'default':'auto','choices':['auto','system','turnip'],
             'auto_resolved':'system','auto_turnip_soc':[],'tested_turnip_sha256':tested_turnip},
-        'module_assets':files,'java_sources':{str(p.relative_to(REPO)):sha(p) for p in sources},
+        'module_assets':files,'modules_dir':str(modules_dir),'module_build_id':packaged_module_manifest.get('build_id'),
+        'java_sources':{str(p.relative_to(REPO)):sha(p) for p in sources},
         'manifest_sha256':sha(REPO/'dm/android/AndroidManifest.xml'),
         'launcher_resources':{str(p.relative_to(REPO)):sha(p) for p in sorted((REPO/'dm/android/res').rglob('*')) if p.is_file()},
         'packaged_manifest_sha256':sha(packaged_manifest),'application_category':'game',
@@ -142,6 +185,7 @@ def main(use_render_resolution=False,offline_manifest=None,output=None,package='
     report['render_resolution_policy']=render_resolution
     report['native_16kb_load_segments']=alignment
     report['apk_16kb_zip_alignment_verified']=True
+    report['update_url_configured']=bool(update_url)
     report_path=apk.with_suffix('.build.json') if output else ART/'apk-build.json'
     report_path.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     print(json.dumps({'apk':str(apk),'bytes':apk.stat().st_size,'sha256':sha(apk)}))
@@ -151,4 +195,6 @@ if __name__=='__main__':
     parser.add_argument('--offline-manifest',type=Path,help='Pinned manifest produced with the offline resource pack')
     parser.add_argument('--output',type=Path,help='Write a separate APK and build report without replacing the development APK')
     parser.add_argument('--package',default='org.d2r.binaryprobe',help='Separate application ID for isolated installer QA')
-    args=parser.parse_args();main(args.render_resolution,args.offline_manifest,args.output,args.package)
+    parser.add_argument('--update-url',help='Absolute HTTPS manifest URL for version information; DM_UPDATE_URL is used when omitted')
+    parser.add_argument('--modules-dir',type=Path,help='Module directory with a verified module-manifest.json when available')
+    args=parser.parse_args();main(args.render_resolution,args.offline_manifest,args.output,args.package,args.update_url,args.modules_dir)

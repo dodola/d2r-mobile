@@ -60,6 +60,7 @@ int dm_android_d2r_ui_attach(module_t *main) {
 void dm_android_d2r_ui_message(const char *category,const char *action,const char *argument) {
     if(!attached)return;
     dm_ui_on_uimsg(category,action,argument);
+    { void dm_update_on_uimsg(const char *,const char *,const char *); dm_update_on_uimsg(category,action,argument); }
     if(!strcmp(category,"PanelManager")){dm_android_hud_message(action,argument);dm_android_world_overlay_message(action,argument);}
     void dm_kills_on_uimsg(const char *,const char *,const char *);
     void dm_vault_on_uimsg(const char *,const char *,const char *);
