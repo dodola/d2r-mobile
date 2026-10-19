@@ -14,6 +14,7 @@ typedef enum {
 
 typedef struct {
     SubmissionPhase phase;
+    int slot_index; /* Render slot (0..3); -1 for the present slot. */
     uint64_t epoch,ticket;
     pthread_t recorder;
     VkCommandPool command_pool;

@@ -114,7 +114,7 @@ static void hz_note(int kind);
 #include "nvn_vk_memory.h"
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *map; uint64_t size,allocation_size;VkBufferUsageFlags usage;int cached;uint64_t dirty;unsigned memory_class; } VBuffer;
 enum { TEMP_OTHER,TEMP_DRIVER,TEMP_ALIGNED,TEMP_COMPARISON,TEMP_ROLES };
-typedef struct { const uint8_t *guest; uint64_t size,serial; VBuffer v; } VPool;
+typedef struct { const uint8_t *guest; uint64_t size,serial; VBuffer v; uint32_t *use_rd[4],*use_wr[4]; } VPool;
 typedef struct { uint64_t address,size,pool_serial,stamp,age; } PoolUpload;
 typedef struct { uint64_t epoch,ssbo,tex;VBuffer *table; } DriverCacheEntry;
 #define UPLOAD_BUCKETS 4096
@@ -229,7 +229,7 @@ static struct {
     VkFormatProperties format_properties[256];uint8_t format_known[256];
     int depth_order,depth_input_experiment,depth_input_profile,depth_input_calibrated_ties,fragment_stores;
     VkPipelineCache pipeline_cache;
-    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
+    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
     uint64_t profile_slot_wait_ns,profile_drain_wait_ns,profile_completion_wait_ns,profile_completion_waits;
     VBuffer support,zero,default_vertex; VPool pools[LIMIT_POOLS]; int npool;
     PoolUpload pool_uploads[UPLOAD_BUCKETS][UPLOAD_WAYS];uint64_t upload_age;
@@ -695,6 +695,7 @@ static void backend_init(void) {
     G.event_trace=getenv("DM_EVENT_TRACE")!=NULL;
     G.current_submission=&G.submission_slot;
     {const char *rs=getenv("DM_RENDER_SLOTS");int n=rs?atoi(rs):1;G.render_slots_n=n<1?1:n>4?4:n;G.render_ring_next=0;
+     G.submission_slot.slot_index=0;for(int i=1;i<4;i++)G.extra_render_slots[i-1].slot_index=i;G.submission_slot2.slot_index=-1;
      fprintf(stderr,"[nvn-vulkan] RENDER_SLOTS n=%d\n",G.render_slots_n);}
     S.desc_entries=calloc(DESC_ENTRIES,sizeof(*S.desc_entries));S.desc_arena=malloc(DESC_ARENA);G.control_cache=calloc(CONTROL_CACHE,sizeof(*G.control_cache));
     if(!S.desc_entries||!S.desc_arena||!G.control_cache)die("descriptor/control cache allocation",0);
@@ -759,6 +760,37 @@ static void pool_materialize(VPool *pool) {
     uint64_t logical=0,resident=0;for(int i=0;i<G.npool;i++){logical+=G.pools[i].size;resident+=G.pools[i].v.size;}
     fprintf(stderr,"[nvn-vulkan] POOL_MATERIALIZE bytes=%llu resident=%llu logical=%llu pools=%d\n",(unsigned long long)pool->size,(unsigned long long)resident,(unsigned long long)logical,G.npool);
 }
+/* Render-slot overlap guard. With several render slots in flight, CPU writes to a pool mirror (guest uploads, CPU snapshots)
+ * must not land on pages an earlier in-flight slot still reads or writes. Each slot keeps 4 KiB page bitmaps per pool; a
+ * real conflict waits for that slot's GPU fence and is counted, so a clean run shows slot_conflicts=0. */
+#define SLOT_PAGE_SHIFT 8
+static VkSubmission *render_slot_ptr(int i){return i?&G.extra_render_slots[i-1]:&G.submission_slot;}
+static void pool_use_alloc(VPool *p){
+    if(G.render_slots_n<2||p->use_rd[0])return;
+    size_t words=(size_t)(((p->size>>SLOT_PAGE_SHIFT)+1+31)/32);
+    for(int i=0;i<G.render_slots_n;i++){p->use_rd[i]=calloc(words,4);p->use_wr[i]=calloc(words,4);if(!p->use_rd[i]||!p->use_wr[i])die("slot use bitmap allocation",i);}
+}
+static void pool_use_mark(VPool *p,uint64_t off,uint64_t len,int write){
+    if(!p->use_rd[0]||!len||S.slot_index<0)return;
+    uint32_t *bm=write?p->use_wr[S.slot_index]:p->use_rd[S.slot_index];
+    for(uint64_t pg=off>>SLOT_PAGE_SHIFT,e=(off+len-1)>>SLOT_PAGE_SHIFT;pg<=e;pg++)bm[pg>>5]|=1u<<(pg&31);
+}
+static void pool_use_clear(int idx){
+    for(int i=0;i<G.npool;i++){VPool *p=&G.pools[i];if(!p->use_rd[0])continue;
+        size_t words=(size_t)(((p->size>>SLOT_PAGE_SHIFT)+1+31)/32);memset(p->use_rd[idx],0,words*4);memset(p->use_wr[idx],0,words*4);}
+}
+static int ctx_busy(const VkSubmission *c);
+static void pool_conflict_wait(VPool *p,uint64_t off,uint64_t len,int cpu_writes){
+    if(!p->use_rd[0]||!len||S.slot_index<0)return;
+    uint64_t first=off>>SLOT_PAGE_SHIFT,last=(off+len-1)>>SLOT_PAGE_SHIFT;
+    for(int j=0;j<G.render_slots_n;j++){
+        VkSubmission *c=render_slot_ptr(j);if(j==S.slot_index||c->phase!=SUBMISSION_INFLIGHT)continue;
+        int hit=0;
+        for(uint64_t pg=first;pg<=last&&!hit;pg++){uint32_t m=1u<<(pg&31);hit=(p->use_wr[j][pg>>5]&m)||(cpu_writes&&(p->use_rd[j][pg>>5]&m));}
+        if(!hit)continue;
+        G.slot_conflicts++;CHECK(cpu_work_wait_fences(G.device,1,&c->gpu_fence,VK_TRUE,UINT64_MAX));
+    }
+}
 static VPool *pool_find(uint64_t addr,uint64_t size,uint64_t *offset) {
     if(size>UINT64_MAX-addr) return NULL;
     for(int i=0;i<G.npool;i++) { uint64_t base=(uint64_t)(uintptr_t)G.pools[i].guest;
@@ -775,6 +807,7 @@ int mtl_gpu_addr(uint64_t addr,uint64_t len,void **buf,uint64_t *off,uint64_t *g
 void mtl_pool_del(const void *mem) {
     if(G.active) die("pool deleted during submission",(long long)(uintptr_t)mem);
     pthread_mutex_lock(&G.lock);async_drain_locked(); for(int i=0;i<G.npool;i++) if(G.pools[i].guest==mem) {
+        for(int k=0;k<4;k++){free(G.pools[i].use_rd[k]);free(G.pools[i].use_wr[k]);}
         buffer_free(&G.pools[i].v); G.pools[i]=G.pools[--G.npool];G.pool_revision++; pthread_mutex_unlock(&G.lock); return; }
     pthread_mutex_unlock(&G.lock); die("unknown memory pool delete",(long long)(uintptr_t)mem);
 }
@@ -796,6 +829,7 @@ static int cached_snapshot(Range range,VBuffer **buffer) {
     int i=S.nread_snapshots++;S.read_snapshots[i]=(ReadSnapshot){.range=range};return i;
 }
 static void pool_upload_guest_span(VPool *p,uint64_t base,uint64_t base_off,uint64_t addr,uint64_t len) {
+    pool_conflict_wait(p,base_off+(addr-base),len,1);
     G.profile_pool_uploaded_bytes+=nvn_vk_pool_copy_guest_span(p->v.map,base,base_off,addr,len,S.writes,S.nwrites);
 }
 static unsigned pool_range_bucket(uint64_t len) {
@@ -806,7 +840,7 @@ static VPool *pool_read_resolved(VPool *p,uint64_t addr,uint64_t len,uint64_t *o
     uint64_t started=prof_now();
     unsigned range_bucket=0;
     if(G.pool_range_stats){range_bucket=pool_range_bucket(len);G.pool_ranges[range_bucket].reads++;G.pool_ranges[range_bucket].read_bytes+=len;}
-    pool_materialize(p);
+    pool_materialize(p);pool_use_alloc(p);pool_use_mark(p,*off,len,0);
     /* The existing guest-span copier omits every byte in queued write ranges.
      * When their union covers this entire read, no CPU upload is possible.
      * Leave the upload cache untouched: a later uncovered read still needs
@@ -860,7 +894,7 @@ static VPool *pool_read(uint64_t addr,uint64_t len,uint64_t *off) {
     return pool_read_resolved(p,addr,len,off);
 }
 static void mark_write(uint64_t addr,uint64_t len) {
-    if(!pool_find(addr,len,NULL)) die("unmapped write range",addr);
+    uint64_t woff=0;VPool *wp=pool_find(addr,len,&woff);if(!wp) die("unmapped write range",addr);pool_use_alloc(wp);pool_use_mark(wp,woff,len,1);
     if(S.nwrites==LIMIT_WRITES) die("write range limit",S.nwrites);
     S.write_cpu[S.nwrites]=NULL;S.writes[S.nwrites++]=(Range){addr,len};
 }
@@ -1269,7 +1303,7 @@ static void sub_begin_ctx(VkSubmission *ctx) {
         uint64_t waited=dm_android_nvn_clock_ns()-w0;
         G.profile_wait_ns+=waited;G.profile_slot_wait_ns+=waited;
     }
-    G.current_submission=ctx;
+    G.current_submission=ctx;if(ctx->slot_index>=0&&G.render_slots_n>1)pool_use_clear(ctx->slot_index);
     if(G.active || (S.phase!=SUBMISSION_UNUSED && S.phase!=SUBMISSION_RETIRED))die("nested/unretired submission",S.epoch);
     if(S.phase==SUBMISSION_UNUSED)submission_pools_create(&S);
     else {
@@ -2763,7 +2797,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
                         * overlapping write has an exact CPU payload. Overlay
                         * those immutable command payloads in recording order
                         * to snapshot the value this draw would read on GPU. */
-                       memcpy(temp->map,p->v.map+offset,r.size);
+                       pool_conflict_wait(p,offset,r.size,0);memcpy(temp->map,p->v.map+offset,r.size);
                        for(int j=0;j<S.nwrites;j++)if(S.write_cpu[j]&&overlap(r.addr,r.size,S.writes[j].addr,S.writes[j].size)){
                            Range w=S.writes[j];uint64_t lo=r.addr>w.addr?r.addr:w.addr,hi=r.addr+r.size<w.addr+w.size?r.addr+r.size:w.addr+w.size;
                            memcpy(temp->map+(lo-r.addr),S.write_cpu[j]+(lo-w.addr),hi-lo);
@@ -4291,6 +4325,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         if(G.profile_frames>=60)fprintf(stderr,"[nvn-vulkan] RENDER_PHASE_CPU_PROFILE frame=%llu frames=%llu clock=thread_cpu writeback_prepare=%d replay_inclusive_ms=%.3f begin_ms=%.3f commit_prepare_ms=%.3f commit_wait_ms=%.3f retire_ms=%.3f writeback_subset_ms=%.3f present_body_inclusive_ms=%.3f replay_calls=%llu begin_calls=%llu commit_calls=%llu writeback_calls=%llu present_calls=%llu wb_global_faults=%llu wb_global_preps=%llu wb_global_mp_calls=%llu wb_global_mp_pages=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,G.enable_writeback_prepare,G.profile_replay_cpu_ns/1e6,G.profile_begin_cpu_ns/1e6,G.profile_commit_prepare_cpu_ns/1e6,G.profile_commit_wait_cpu_ns/1e6,G.profile_retire_cpu_ns/1e6,G.profile_writeback_cpu_ns/1e6,G.profile_present_cpu_ns/1e6,(unsigned long long)G.profile_replay_calls,(unsigned long long)G.profile_begin_calls,(unsigned long long)G.profile_commit_calls,(unsigned long long)G.profile_writeback_calls,(unsigned long long)G.profile_present_calls,(unsigned long long)G.profile_writeback_global_faults,(unsigned long long)G.profile_writeback_global_preps,(unsigned long long)G.profile_writeback_global_mp_calls,(unsigned long long)G.profile_writeback_global_mp_pages);
         if(G.profile_frames>=60){
             unsigned contexts=(G.submission_slot.phase!=SUBMISSION_UNUSED)+(G.submission_slot2.phase!=SUBMISSION_UNUSED);for(int i=1;i<G.render_slots_n;i++)contexts+=G.extra_render_slots[i-1].phase!=SUBMISSION_UNUSED;
+            fprintf(stderr,"[nvn-vulkan] RENDER_SLOT_PROFILE frame=%llu slots=%d conflicts=%llu\n",(unsigned long long)G.present_count+1,G.render_slots_n,(unsigned long long)G.slot_conflicts);
             fprintf(stderr,"[nvn-vulkan] RENDER_SUBMISSION_PROFILE frame=%llu contexts=%u epoch=%llu creates=%llu reuses=%llu publications=%llu context_struct_bytes=%zu descriptor_arena_bytes=%u descriptor_entry_bytes=%zu async=%d slot_wait_ms=%.3f drain_wait_ms=%.3f completion_fence_wait_ms=%.3f completion_waits=%llu\n",
                 (unsigned long long)G.present_count+1,contexts,(unsigned long long)S.epoch,
                 (unsigned long long)G.profile_submission_creates,(unsigned long long)G.profile_submission_reuses,
