@@ -793,6 +793,18 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_PASS_STATS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-stats");
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_STATS","1",1);
+    /* Diagnostic only: shader dump and texture LOD bias A/B. Absent markers leave both off. */
+    /* Render submission slots in flight (1 = previous behaviour). */
+    unsetenv("DM_RENDER_SLOTS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/render-slots.txt");
+    {FILE *rf=fopen(driver_option,"r");if(rf){char rv[8]={0};size_t rn=fread(rv,1,7,rf);fclose(rf);if(rn)setenv("DM_RENDER_SLOTS",rv,1);}}
+    unsetenv("DM_ADAPTED_SHADER_DIR");unsetenv("DM_DIAG_LOD_BIAS");unsetenv("DM_SHADER_OVERRIDE_DIR");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/shader-override");
+    if(access(driver_option,F_OK)==0)setenv("DM_SHADER_OVERRIDE_DIR",driver_option,1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/dump-shaders");
+    if(access(driver_option,F_OK)==0){char dir[1024];path(dir,sizeof dir,port_root,"diagnostics/shaders");mkdir(dir,0700);setenv("DM_ADAPTED_SHADER_DIR",dir,1);}
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/lod-bias.txt");
+    {FILE *lf=fopen(driver_option,"r");if(lf){char lv[16]={0};size_t ln=fread(lv,1,15,lf);fclose(lf);if(ln)setenv("DM_DIAG_LOD_BIAS",lv,1);}}
     /* Hint sessions are an explicit A/B experiment, off when the marker is absent. */
     unsetenv("DM_PERFORMANCE_HINTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/performance-hints");
