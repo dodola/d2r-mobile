@@ -557,6 +557,8 @@ static void backend_init(void) {
         has_draw_parameters|=!strcmp(name,VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME);
         has_depth_order|=!strcmp(name,VK_ARM_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME);
     }
+    {char line[6144];int n=0;int host=0;for(uint32_t i=0;i<extension_count&&n<(int)sizeof line-80;i++){const char *name=extension_properties[i].extensionName;host|=!strcmp(name,"VK_EXT_external_memory_host");n+=snprintf(line+n,sizeof line-n,"%s ",name);}
+     fprintf(stderr,"[nvn-vulkan] DEVICE_EXTENSIONS count=%u external_memory_host=%d %s\n",extension_count,host,line);}
     free(extension_properties);
     if(!has_swapchain)die("Vulkan swapchain extension required",0);
     for(uint32_t i=0;i<G.memory.memoryTypeCount;i++)fprintf(stderr,"[nvn-vulkan] MEMORY_TYPE %u flags=%#x heap=%u size=%llu\n",i,G.memory.memoryTypes[i].propertyFlags,G.memory.memoryTypes[i].heapIndex,(unsigned long long)G.memory.memoryHeaps[G.memory.memoryTypes[i].heapIndex].size);
