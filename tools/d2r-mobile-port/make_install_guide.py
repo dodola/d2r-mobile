@@ -25,7 +25,7 @@ REPO=Path(__file__).resolve().parents[2]
 SHOTS=ROOT/'build/offline-installer-tests'
 TEMP=ROOT/'tmp/pdfs/d2r-guide'
 OUT=ROOT/'output/pdf/D2R-Mobile-图文安装指南.pdf'
-RELEASE=ROOT/'analysis/d2r-mobile-port/offline-release'
+RELEASE=ROOT/'analysis/d2r-mobile-port/release-94012/pack'
 W,H=A4
 M=44
 CW=W-2*M
@@ -68,7 +68,7 @@ def main():
     from pypdf import PdfReader
     reader=PdfReader(str(OUT));assert len(reader.pages)==TOTAL
     text='\n'.join(page.extract_text() for page in reader.pages)
-    for expected in ['D2R-Mobile.apk','D2R-Offline-91738.d2rpack','20 GB','9.5 GB','校验失败','覆盖安装']:
+    for expected in ['D2R-Mobile.apk','D2R-Offline-94012.d2rpack','20 GB','9.5 GB','校验失败','覆盖安装']:
         assert expected in text,expected
     (TEMP/'text-extracted.txt').write_text(text,encoding='utf-8')
     (TEMP/'layout-boxes.json').write_text(json.dumps(BOXES,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
@@ -150,7 +150,7 @@ def cover():
     image(REPO/'dm/android/artwork/d2r-icon-preview.png',W-M-91,56,91,91)
     gap=14;card=(CW-gap)/2
     for x,label,name,detail in [(M,'文件 1 · 应用安装包','D2R-Mobile.apk','约 69 MB · 点击它开始安装'),
-                                (M+card+gap,'文件 2 · 完整离线资源包','D2R-Offline-91738.d2rpack','约 9.18 GB · 导入时选择它')]:
+                                (M+card+gap,'文件 2 · 完整离线资源包','D2R-Offline-94012.d2rpack','约 9.24 GB · 导入时选择它')]:
         box(x,201,card,103,colors.HexColor('#201d18'),colors.HexColor('#453b2d'))
         p(label,x+14,213,card-28,10,color=GOLD,bold=True)
         p(name,x+14,239,card-28,11.7,leading=17,color=PARCHMENT,bold=True,maxh=34)
@@ -230,8 +230,8 @@ def locate():
     box(rx-5,top+165,rw+10,90,colors.HexColor('#fbefdf'),RED,radius=6)
     box(rx+5,top+185,42,47,RED,radius=4)
     p('PACK',rx+5,top+200,42,9,color=WHITE,bold=True,align=1)
-    p('D2R-Offline-91738.d2rpack',rx+58,top+184,rw-68,11.4,bold=True,maxh=34)
-    p('完整离线资源包 · 约 9.18 GB',rx+58,top+217,rw-68,9.8,color=RED)
+    p('D2R-Offline-94012.d2rpack',rx+58,top+184,rw-68,11.4,bold=True,maxh=34)
+    p('完整离线资源包 · 约 9.24 GB',rx+58,top+217,rw-68,9.8,color=RED)
     p('选择这一项',rx+4,top+273,rw-8,11,color=RED,bold=True)
     p('文件路径示意：系统文件选择器的布局可能不同。',M,519,CW,9.2,color=MUTED)
     p('要选 .d2rpack，别再次选 .apk。',M,552,CW,16,bold=True)
@@ -261,7 +261,7 @@ def finished():
     top=182;height=image(SHOTS/'automatic-game-start.png',M,top,CW,crop=(0,80,2560,1520))
     p('实机截图：完整导入后，自动进入原游戏主菜单。',M,top+height+12,CW,9.2,color=MUTED)
     rows=[('以后从入口启动游戏','打开桌面图标，选择驱动并点击“启动游戏”。无需重复导入资源。'),
-          ('资源包可以删除','确认安装成功后，可以删除下载目录中的 .d2rpack，释放约 9.18 GB。'),
+          ('资源包可以删除','确认安装成功后，可以删除下载目录中的 .d2rpack，释放约 9.24 GB。'),
           ('更新请覆盖安装','保留应用本身再安装新版 APK；卸载应用会删除游戏数据和存档。')]
     for i,(title,body) in enumerate(rows):
         top=530+i*81;circle_number(i+1,M,top)

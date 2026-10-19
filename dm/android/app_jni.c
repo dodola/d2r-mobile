@@ -191,9 +191,9 @@ static uint64_t background_wait_epoch, background_done_epoch;
 static int foreground_pending;
 static ANativeWindow *native_window;
 static char app_files[PATH_MAX], port_root[PATH_MAX], locale_tag[32];
-/* The legacy package predates a resource manifest. New packages bind their
- * verified image size and installed add-on indices before guest startup. */
-static uint64_t content_romfs_bytes = 8973693207ULL;
+/* The verified image size and installed add-on indices are bound by
+ * nativeContentProfile before guest startup; there is no default image. */
+static uint64_t content_romfs_bytes;
 static int content_indices[64];
 static size_t content_index_count;
 static char phase[96] = "等待游戏文件";

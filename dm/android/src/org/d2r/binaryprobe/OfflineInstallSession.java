@@ -44,19 +44,22 @@ final class OfflineInstallSession {
         };
         return new OfflinePackageInstaller(context.getFilesDir(),manifest,listener,()->cancelled,()->context.getFilesDir().getUsableSpace());
     }
-    private void loadManifest()throws Exception {
+    /** The APK's pinned resource manifest; also used by the game to recognise a receipt-verified install. */
+    static OfflinePackageInstaller.Manifest readManifest(Context context)throws Exception {
         ByteArrayOutputStream bytes=new ByteArrayOutputStream();
         try(InputStream in=context.getAssets().open("offline-manifest.json")) {
             byte[] b=new byte[16384];int n;
             while((n=in.read(b))!=-1){if(bytes.size()+n>OfflinePackageInstaller.MAX_MANIFEST)throw new IOException("Manifest too large");bytes.write(b,0,n);}
         }
         byte[] json=bytes.toByteArray();JSONObject data=new JSONObject(new String(json,StandardCharsets.UTF_8));
-        if(data.getInt("format")!=1||data.getInt("game_build")!=91738)throw new IOException("Unsupported game build");
+        if(data.getInt("format")!=1||data.getInt("game_build")!=OfflinePackageInstaller.GAME_BUILD)throw new IOException("Unsupported game build");
         JSONArray list=data.getJSONArray("files");ArrayList<OfflinePackageInstaller.Entry> entries=new ArrayList<>();
         for(int i=0;i<list.length();i++){JSONObject e=list.getJSONObject(i);entries.add(new OfflinePackageInstaller.Entry(e.getString("path"),e.getLong("bytes"),e.getString("sha256")));}
-        manifest=new OfflinePackageInstaller.Manifest(json,entries);
-        if(data.getLong("total_bytes")!=manifest.total)throw new IOException("Manifest size mismatch");
+        OfflinePackageInstaller.Manifest result=new OfflinePackageInstaller.Manifest(json,entries);
+        if(data.getLong("total_bytes")!=result.total)throw new IOException("Manifest size mismatch");
+        return result;
     }
+    private void loadManifest()throws Exception {manifest=readManifest(context);}
     private void prepare() {
         try {
             loadManifest();OfflinePackageInstaller installer=installer();
@@ -105,7 +108,7 @@ final class OfflineInstallSession {
             OfflinePackageInstaller.Failure failure=(OfflinePackageInstaller.Failure)exception;
             switch(failure.reason) {
                 case "space": requiredBytes=failure.needed;message="手机存储空间不足。请清理空间后重新选择资源包。";break;
-                case "format": message="这不是配套的离线资源包。请选择 D2R-Offline-91738.d2rpack 文件，无需解压。";break;
+                case "format": message="这不是配套的离线资源包。请选择 D2R-Offline-94012.d2rpack 文件，无需解压。";break;
                 case "version": message="资源包与当前安装的 APK 版本不匹配。请使用同一发布目录中的 APK 和资源包。";break;
                 case "truncated": case "checksum": message="资源包不完整或校验失败。请重新下载完整资源包后再选择。";break;
                 default: message="安装文件无法通过检查。请重新下载配套 APK 和资源包。";

@@ -11,21 +11,36 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import struct
 import subprocess
+import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit
 from xml.sax.saxutils import escape
-from zipfile import ZipFile, ZIP_STORED
+from zipfile import ZipFile, ZIP_DEFLATED, ZIP_STORED
 
 from android_elf import elf_info
 
 HUD_MANIFEST = "d2r-hud-assets-manifest.json"
 WORLD_MANIFEST = "d2r-world-assets-manifest.json"
 MODULE_MANIFEST = "module-manifest.json"
+OFFLINE_MANIFEST = "offline-manifest.json"
+OVERLAY_MANIFEST = "overlay-manifest.json"
 TITLE_ID = "0100726014352000"
 BUILD_ID = "db0507f36b84200ac05f75d76ed5026f"
+GAME_BUILD = 94012
 APP_VERSION_CODE = 4
 APP_VERSION_NAME = "0.4-94012-parity"
+RELEASE_PACKAGE = "org.d2r.mobile"
+# The bundled Turnip build is selectable at runtime and must be the verified binary.
+TESTED_TURNIP_SHA256 = "c2dc3ff00a1016bfc96e1513a7b0e21b92ea79d33fc8076b34e5fa70b0af8e9e"
+DRIVER_LIBRARIES = ("libd2r_turnip.so", "libadrenotools.so", "libc++_shared.so", "libfile_redirect_hook.so",
+                    "libgsl_alloc_hook.so", "libhook_impl.so", "libmain_hook.so")
+OVERLAY_BASE_FILES = ("ctrl_touch", "touch_strings.tsv", "data/.build.config", "data/00-00000007.data")
+OVERLAY_VARIANT_FILES = OVERLAY_BASE_FILES + ("dm_textbox_plain.tsv", "features.txt")
+OVERLAY_BASE_ROOT, OVERLAY_VARIANT_ROOT = "romfs-overlay", "romfs-overlay-variants/item_notes"
+# Paths the on-device installer accepts (OfflinePackageInstaller.Manifest).
+OFFLINE_PATH = re.compile(r"game\.romfs|d2r-mobile/shaders/(shader_index\.bin|[0-9a-f]{16}\.(spv\.gz|vkmeta))")
 
 
 def sha(data):
@@ -266,15 +281,113 @@ def validate_inputs(native, images, assets):
     }
 
 
+def validate_offline_manifest(path, module_manifest):
+    """The APK-pinned resource manifest must describe exactly the image the modules were built against."""
+    raw = path.read_bytes()
+    manifest = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+    if manifest.get("format") != 1 or manifest.get("game_build") != GAME_BUILD:
+        raise ValueError(f"Offline manifest must be format 1 for game build {GAME_BUILD}")
+    files = manifest.get("files")
+    if not isinstance(files, list) or len(files) < 2 or len(raw) > 4 * 1024 * 1024:
+        raise ValueError("Offline manifest requires a bounded nonempty files array")
+    seen, total = set(), 0
+    for entry in files:
+        name, size, digest = entry.get("path"), entry.get("bytes"), entry.get("sha256")
+        if (not isinstance(name, str) or not OFFLINE_PATH.fullmatch(name) or name in seen or type(size) is not int or
+                size < 0 or not isinstance(digest, str) or not re.fullmatch("[0-9a-f]{64}", digest)):
+            raise ValueError(f"Invalid offline manifest entry: {entry!r}")
+        seen.add(name)
+        total += size
+    if manifest.get("total_bytes") != total:
+        raise ValueError("Offline manifest total_bytes does not match its files")
+    if "game.romfs" not in seen or "d2r-mobile/shaders/shader_index.bin" not in seen:
+        raise ValueError("Offline manifest must list game.romfs and shader_index.bin")
+    romfs = next(e for e in files if e["path"] == "game.romfs")
+    expected = module_manifest["romfs"]
+    if romfs["bytes"] != expected["bytes"] or romfs["sha256"] != expected["sha256"]:
+        raise ValueError("Offline manifest game.romfs differs from the RomFS the modules were built against")
+    return raw, {"game_build": GAME_BUILD, "files": len(files), "total_bytes": total,
+                 "game_romfs_sha256": romfs["sha256"], "manifest_sha256": sha(raw)}
+
+
+def validate_overlay(base, variant):
+    """Touch-UI overlay: exactly the files the native host requires, nothing else."""
+    result = {}
+    for root, prefix, expected in ((base, OVERLAY_BASE_ROOT, OVERLAY_BASE_FILES),
+                                   (variant, OVERLAY_VARIANT_ROOT, OVERLAY_VARIANT_FILES)):
+        actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+        if actual != set(expected):
+            raise ValueError(f"Overlay {root} must contain exactly {sorted(expected)}; found {sorted(actual)}")
+        for name in expected:
+            data = checked_file(root, name).read_bytes()
+            if not data:
+                raise ValueError(f"Overlay file is empty: {root / name}")
+            result[f"{prefix}/{name}"] = data
+    return result
+
+
+def validate_driver_libraries(root):
+    """Bundled private driver set: the verified Turnip binary plus its loader, all 16 KiB compatible."""
+    actual = {p.name for p in root.iterdir() if p.is_file()}
+    if actual != set(DRIVER_LIBRARIES):
+        raise ValueError(f"Driver directory must contain exactly {sorted(DRIVER_LIBRARIES)}; found {sorted(actual)}")
+    libraries = {}
+    for name in DRIVER_LIBRARIES:
+        data = checked_file(root, name).read_bytes()
+        if not elf_info(data, name)["elf_pt_load_16k_compatible"]:
+            raise ValueError(f"Driver library is not 16 KiB compatible: {name}")
+        libraries[name] = data
+    if sha(libraries["libd2r_turnip.so"]) != TESTED_TURNIP_SHA256:
+        raise ValueError("Bundled Turnip is not the verified build")
+    return libraries
+
+
+def read_signing_properties(path):
+    """keytool-style key=value file; returns keystore path, alias and the two passwords."""
+    values = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip() and not line.lstrip().startswith("#"):
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    for key in ("storeFile", "alias", "storePassword", "keyPassword"):
+        if not values.get(key):
+            raise ValueError(f"Signing properties missing {key}: {path}")
+    store = Path(values["storeFile"])
+    if not store.is_file():
+        raise ValueError(f"Signing keystore is missing: {store}")
+    return store, values["alias"], values["storePassword"], values["keyPassword"]
+
+
+def release_manifest(repo, destination, package, version_code, version_name, update_url):
+    """The repository manifest (installer launcher, icons) with release identity; never debuggable."""
+    android = "{http://schemas.android.com/apk/res/android}"
+    ET.register_namespace("android", "http://schemas.android.com/apk/res/android")
+    tree = ET.parse(repo / "dm/android/AndroidManifest.xml")
+    root = tree.getroot()
+    root.set("package", package)
+    root.set(android + "versionCode", str(version_code))
+    root.set(android + "versionName", version_name)
+    application = root.find("application")
+    if application is None:
+        raise ValueError("Android manifest has no application")
+    application.set(android + "debuggable", "false")
+    application.set(android + "appCategory", "game")
+    for child in application.findall("meta-data"):
+        if child.get(android + "name") == "org.d2r.binaryprobe.UPDATE_URL":
+            child.set(android + "value", update_url)
+    tree.write(destination, encoding="utf-8", xml_declaration=True)
+
+
 def command_runner(out, env):
     commands = []
     def run(*argv):
         result = subprocess.run([str(a) for a in argv], capture_output=True, env=env)
-        commands.append({"argv": [str(a) for a in argv], "exit_code": result.returncode,
-                         "output": (result.stdout + result.stderr).decode("utf-8", errors="replace")})
+        output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+        commands.append({"argv": [str(a) for a in argv], "exit_code": result.returncode, "output": output})
         (out / "commands.json").write_text(json.dumps(commands, indent=2) + "\n", encoding="utf-8")
         if result.returncode:
             raise RuntimeError(f"Packaging failed: {argv[0]}; see {out / 'commands.json'}")
+        return output
     return run
 
 
@@ -287,17 +400,32 @@ def main(argv=None):
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--hud-assets", type=Path, required=True)
     parser.add_argument("--out", "--output", type=Path, required=True)
-    parser.add_argument("--package", default="org.d2r.newprobe")
+    parser.add_argument("--package", default=None,
+                        help=f"Application ID; {RELEASE_PACKAGE} for an offline release, org.d2r.newprobe otherwise")
     parser.add_argument("--build-tools", default="35.0.0")
     parser.add_argument("--android-platform", default="android-35")
     parser.add_argument("--keystore", type=Path, default=Path.home() / ".android/debug.keystore",
-                        help="Android debug keystore (password android); release signing is a separate step")
+                        help="Android debug keystore (password android); used only without --keystore-properties")
+    parser.add_argument("--keystore-properties", type=Path,
+                        help="Release signing: key=value file with storeFile, alias, storePassword, keyPassword")
+    parser.add_argument("--expect-cert-sha256", help="Fail unless the APK signer certificate has this SHA-256")
     parser.add_argument("--update-url", default=os.environ.get("DM_UPDATE_URL", ""),
                         help="Absolute HTTPS update manifest URL; DM_UPDATE_URL is used when omitted")
     parser.add_argument("--pipeline-cache", type=Path,
                         help="Optional Turnip pipeline-cache seed directory (driver-keyed cache and pso_user.vkbin)")
+    parser.add_argument("--offline-manifest", type=Path,
+                        help=f"Offline release: pinned {OFFLINE_MANIFEST} written by build_offline_package.py. Builds the "
+                             "installer-launched APK (requires --overlay-base, --overlay-item-notes, --driver-libs)")
+    parser.add_argument("--overlay-base", type=Path, help="Touch-UI overlay directory (romfs_overlay)")
+    parser.add_argument("--overlay-item-notes", type=Path, help="Touch-UI item-notes overlay variant directory")
+    parser.add_argument("--driver-libs", type=Path, help="Directory with the verified bundled private driver libraries")
+    parser.add_argument("--version-code", type=int, default=1, help="Offline release versionCode")
+    parser.add_argument("--version-name", default="1.0.0-94012", help="Offline release versionName")
     parser.add_argument("--validate-only", action="store_true", help="Check prepared inputs without creating output or invoking SDK tools")
     args = parser.parse_args(argv)
+    release = args.offline_manifest is not None
+    if args.package is None:
+        args.package = RELEASE_PACKAGE if release else "org.d2r.newprobe"
     repo, out = args.repo.resolve(), args.out.resolve()
     try:
         update_url = checked_update_url(args.update_url)
@@ -305,11 +433,26 @@ def main(argv=None):
         parser.error(str(error))
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", args.package):
         parser.error("--package must be an Android package name")
+    if release:
+        if not (args.overlay_base and args.overlay_item_notes and args.driver_libs):
+            parser.error("--offline-manifest requires --overlay-base, --overlay-item-notes and --driver-libs")
+        if args.version_code < 1:
+            parser.error("--version-code must be positive")
+    elif any((args.overlay_base, args.overlay_item_notes, args.driver_libs)):
+        parser.error("--overlay-*/--driver-libs are only valid with --offline-manifest")
     native, images, assets = args.native.resolve(), args.images.resolve(), args.hud_assets.resolve()
-    if (out == repo or repo in out.parents or any(out == p or out in p.parents or p in out.parents for p in (native, images, assets)) or
+    extra_inputs = [p.resolve() for p in (args.offline_manifest, args.overlay_base, args.overlay_item_notes, args.driver_libs) if p]
+    if (out == repo or repo in out.parents or any(out == p or out in p.parents or p in out.parents for p in (native, images, assets, *extra_inputs)) or
             (out.exists() and (not out.is_dir() or any(out.iterdir())))):
         parser.error("Use a fresh output directory outside the checkout and all input directories")
     native_data, modules, assets_data, report = validate_inputs(native, images, assets)
+    offline_manifest = overlay = driver_libraries = None
+    if release:
+        offline_manifest, offline_report = validate_offline_manifest(args.offline_manifest.resolve(), report["module_manifest"])
+        overlay = validate_overlay(args.overlay_base.resolve(), args.overlay_item_notes.resolve())
+        driver_libraries = validate_driver_libraries(args.driver_libs.resolve())
+        report.update({"offline_manifest": offline_report, "overlay": {n: sha(d) for n, d in overlay.items()},
+                       "driver_libraries": {n: sha(d) for n, d in driver_libraries.items()}})
     pipeline_seed = {}
     if args.pipeline_cache is not None:
         seed_root = args.pipeline_cache.resolve()
@@ -345,7 +488,11 @@ def main(argv=None):
     windows = os.name == "nt"
     tool = lambda base: bt / (base + (".bat" if base in ("d8", "apksigner") else ".exe") if windows else base)
     javac = java / "bin" / ("javac.exe" if windows else "javac")
-    for required in (javac, android, args.keystore, *(tool(name) for name in ("d8", "aapt2", "zipalign", "apksigner"))):
+    signing = read_signing_properties(args.keystore_properties.resolve()) if args.keystore_properties else None
+    if release and signing is None:
+        parser.error("An offline release must be signed with --keystore-properties; it is never debug-signed")
+    required_tools = (javac, android, signing[0] if signing else args.keystore, *(tool(name) for name in ("d8", "aapt2", "zipalign", "apksigner")))
+    for required in required_tools:
         if not required.is_file():
             raise ValueError(f"Missing build tool/input: {required}")
     out.mkdir(parents=True, exist_ok=True)
@@ -363,8 +510,17 @@ def main(argv=None):
         destination.write_bytes(data)
     module_manifest_data = (json.dumps(report["module_manifest"], indent=2) + "\n").encode("utf-8")
     (out / "assets" / MODULE_MANIFEST).write_bytes(module_manifest_data)
+    # The overlay is written into the archive directly: asset packaging tools skip dot-files such as .build.config.
+    overlay_manifest_data = None
+    if release:
+        (out / "assets" / OFFLINE_MANIFEST).write_bytes(offline_manifest)
+        overlay_manifest_data = (json.dumps({"files": [{"path": n, "bytes": len(d), "sha256": sha(d)}
+                                                       for n, d in sorted(overlay.items())]}, indent=2) + "\n").encode("utf-8")
     manifest = out / "AndroidManifest.xml"
-    manifest.write_text(f'''<?xml version="1.0" encoding="utf-8"?>
+    if release:
+        release_manifest(repo, manifest, args.package, args.version_code, args.version_name, update_url)
+    else:
+        manifest.write_text(f'''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{escape(args.package)}" android:versionCode="{APP_VERSION_CODE}" android:versionName="{APP_VERSION_NAME}">
  <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
  <uses-feature android:glEsVersion="0x00030000" android:required="false" />
@@ -380,6 +536,9 @@ def main(argv=None):
 ''', encoding="utf-8")
     env = dict(os.environ, JAVA_HOME=str(java))
     env["PATH"] = str(java / "bin") + os.pathsep + env.get("PATH", "")
+    if signing:
+        # Passwords reach apksigner through the environment so they never appear in commands.json.
+        env["D2R_KS_PASS"], env["D2R_KEY_PASS"] = signing[2], signing[3]
     run = command_runner(out, env)
     run(javac, "--release", "8", "-encoding", "UTF-8", "-cp", android, "-d", out / "classes", *sources)
     classes = sorted((out / "classes").rglob("*.class"))
@@ -388,16 +547,42 @@ def main(argv=None):
     run(tool("d8"), "--min-api", "29", "--lib", android, "--output", out / "dex", *classes)
     if not (out / "dex/classes.dex").is_file():
         raise ValueError("D8 emitted no classes.dex")
-    run(tool("aapt2"), "link", "-o", out / "base.apk", "--manifest", manifest, "-I", android, "-A", out / "assets")
+    if release:
+        run(tool("aapt2"), "compile", "--dir", repo / "dm/android/res", "-o", out / "resources.zip")
+        run(tool("aapt2"), "link", "-o", out / "base.apk", "--manifest", manifest, "-I", android, "--min-sdk-version", "29",
+            "--target-sdk-version", "33", "-A", out / "assets", out / "resources.zip")
+    else:
+        run(tool("aapt2"), "link", "-o", out / "base.apk", "--manifest", manifest, "-I", android, "-A", out / "assets")
     with ZipFile(out / "base.apk", "a") as archive:
         for dex in sorted((out / "dex").glob("classes*.dex")):
             archive.write(dex, dex.name, compress_type=ZIP_STORED)
         archive.writestr("lib/arm64-v8a/libd2r_mobile_android.so", native_data, compress_type=ZIP_STORED)
+        for name, data in (driver_libraries or {}).items():
+            archive.writestr("lib/arm64-v8a/" + name, data, compress_type=ZIP_STORED)
+        if release:
+            archive.writestr("assets/" + OVERLAY_MANIFEST, overlay_manifest_data, compress_type=ZIP_DEFLATED)
+            for name, data in overlay.items():
+                archive.writestr("assets/overlay/" + name, data, compress_type=ZIP_DEFLATED)
     run(tool("zipalign"), "-f", "-P", "16", "4", out / "base.apk", out / "aligned.apk")
-    apk = out / "d2r-94012-test.apk"
-    run(tool("apksigner"), "sign", "--ks", args.keystore, "--ks-pass", "pass:android", "--key-pass", "pass:android", "--out", apk, out / "aligned.apk")
-    run(tool("apksigner"), "verify", "--verbose", apk)
+    apk = out / ("D2R-Mobile.apk" if release else "d2r-94012-test.apk")
+    if signing:
+        sign = ["--ks", signing[0], "--ks-key-alias", signing[1], "--ks-pass", "env:D2R_KS_PASS", "--key-pass", "env:D2R_KEY_PASS"]
+    else:
+        sign = ["--ks", args.keystore, "--ks-pass", "pass:android", "--key-pass", "pass:android"]
+    run(tool("apksigner"), "sign", *sign, "--out", apk, out / "aligned.apk")
+    verification = run(tool("apksigner"), "verify", "--verbose", "--print-certs", apk)
+    certificate = re.search(r"Signer #1 certificate SHA-256 digest: ([0-9a-f]{64})", verification)
+    if not certificate:
+        raise ValueError("apksigner did not report a signer certificate digest")
+    if args.expect_cert_sha256 and certificate.group(1) != args.expect_cert_sha256.lower().replace(":", ""):
+        raise ValueError("APK signer certificate differs from --expect-cert-sha256")
     run(tool("zipalign"), "-c", "-P", "16", "4", apk)
+    badging = run(tool("aapt2"), "dump", "badging", apk)
+    permissions = sorted(set(re.findall(r"uses-permission:\s+name='([^']+)'", badging)))
+    if permissions != ["android.permission.INTERNET", "android.permission.VIBRATE"]:
+        raise ValueError(f"Unexpected permissions: {permissions!r}")
+    if release and ("application-debuggable" in badging or f"package: name='{args.package}'" not in badging):
+        raise ValueError("Release APK is debuggable or has the wrong package")
     with ZipFile(apk) as archive:
         names = archive.namelist()
         if len(names) != len(set(names)):
@@ -406,14 +591,24 @@ def main(argv=None):
         expected.update({"assets/modules/" + name: data for name, data in modules.items()})
         expected["assets/" + MODULE_MANIFEST] = module_manifest_data
         expected["lib/arm64-v8a/libd2r_mobile_android.so"] = native_data
+        if release:
+            expected["assets/" + OFFLINE_MANIFEST] = offline_manifest
+            expected["assets/" + OVERLAY_MANIFEST] = overlay_manifest_data
+            expected.update({"assets/overlay/" + name: data for name, data in overlay.items()})
+            expected.update({"lib/arm64-v8a/" + name: data for name, data in driver_libraries.items()})
+            if any("VkLayer" in name or name.startswith("lib/arm64-v8a/libVk") for name in names):
+                raise ValueError("A validation layer must not ship in a release APK")
         for name, data in expected.items():
             if archive.read(name) != data:
                 raise ValueError(f"Final APK payload mismatch: {name}")
     report.update({"apk": str(apk), "apk_sha256": sha(apk.read_bytes()), "final_payloads_verified": len(expected),
                    "sdk": str(sdk), "java": str(java), "build_tools": args.build_tools, "android_platform": args.android_platform,
-                   "debug_signed": True})
+                   "debug_signed": signing is None, "release": release, "signer_certificate_sha256": certificate.group(1),
+                   "version_code": args.version_code if release else APP_VERSION_CODE,
+                   "version_name": args.version_name if release else APP_VERSION_NAME})
     (out / "build-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"apk": str(apk), "apk_sha256": report["apk_sha256"], "native_sha256": sha(native_data), "verified_payloads": len(expected)}))
+    print(json.dumps({"apk": str(apk), "apk_sha256": report["apk_sha256"], "native_sha256": sha(native_data),
+                      "signer_certificate_sha256": certificate.group(1), "verified_payloads": len(expected)}))
     return 0
 
 

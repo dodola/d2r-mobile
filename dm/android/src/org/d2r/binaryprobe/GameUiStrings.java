@@ -57,6 +57,10 @@ final class GameUiStrings {
             case "游戏资源校验失败":return "Game resource checksum mismatch";
             case "追加内容清单无效":return "Invalid add-on content manifest";
             case "缺少游戏图形缓存":return "Game graphics cache missing";
+            case "覆盖层清单无效":return "Invalid touch overlay manifest";
+            case "不能创建覆盖层目录":return "Could not create the touch overlay directory";
+            case "覆盖层校验失败":return "Touch overlay checksum mismatch";
+            case "不能保存覆盖层":return "Could not save the touch overlay";
             case "输入内容":return "Enter text";
             case "设置":return "Settings";
             default:return zh;

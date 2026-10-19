@@ -12,6 +12,8 @@ import java.util.function.LongSupplier;
 /** Streaming, pinned-content installer. Independent of Activity and Android APIs. */
 public final class OfflinePackageInstaller {
     public static final byte[] MAGIC="D2RPKG1\n".getBytes(StandardCharsets.US_ASCII);
+    /** The only game build this installer and the APK's offline manifest are paired with. */
+    public static final int GAME_BUILD=94012;
     public static final long RESERVE=256L*1024*1024;
     public static final int MAX_MANIFEST=4*1024*1024;
     public interface Progress {
@@ -101,6 +103,13 @@ public final class OfflinePackageInstaller {
             out.flush();file.getFD().sync();
         }
         move(temp,checked(root,"d2r-offline-ready"));
+    }
+    /** True when a completed import's receipt covers this exact payload: same manifest, and every installed file
+     * still has its imported length and modification time. Lets the game skip re-hashing a multi-GB image that the
+     * installer already verified byte for byte. */
+    public boolean receiptCovers(String path,long bytes,String hash)throws IOException {
+        for(Entry entry:manifest.entries)if(entry.path.equals(path))return entry.bytes==bytes&&entry.hash.equals(hash)&&receiptMatches();
+        return false;
     }
     public boolean hasInterruptedImport() { return stage.isDirectory(); }
     /** Recover a fully verified pending commit, or adopt a pre-existing installation. */

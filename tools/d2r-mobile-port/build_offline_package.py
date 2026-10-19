@@ -1,4 +1,4 @@
-"""Build the pinned, streamable offline resource pack paired with the APK."""
+"""Build the pinned, streamable game 94012 offline resource pack paired with the APK."""
 import argparse
 import hashlib
 import json
@@ -9,10 +9,13 @@ import os
 
 ROOT = Path(os.environ.get('ANDROID_SWITCH_WORKSPACE', str(Path(__file__).resolve().parents[2]))).resolve()
 ART = ROOT / 'analysis/d2r-mobile-port'
-DEFAULT_OUTPUT = ART / 'offline-release'
+INPUTS = ROOT / 'analysis/parity-20261019/d2r-new'
+DEFAULT_OUTPUT = ART / 'release-94012/pack'
+GAME_BUILD = 94012
+PACK_NAME = 'D2R-Offline-94012.d2rpack'
 MAGIC = b'D2RPKG1\n'
-ROMFS_SHA = 'cafcece5f3e7f8ae4c63471143684e53e57b555c6f5ac731bcc802c94c6a3153'
-ROMFS_BYTES = 8973693207
+ROMFS_SHA = 'f5f3bcfbf95abef4ca778f6fa141f54d5ff1028a7f50e25ee0984acf31f12785'
+ROMFS_BYTES = 8973550584
 CHUNK = 4 * 1024 * 1024
 
 
@@ -35,6 +38,17 @@ def sources(image, cache):
         if path.name.endswith('.spv.gz') and not (cache / (path.name[:-7] + '.vkmeta')).is_file():
             raise ValueError('Shader payload has no metadata: ' + path.name)
         yield 'd2r-mobile/shaders/' + path.name, path
+
+
+def recorded_checksums(path):
+    # sha256sum-format list of every shader cache file, written when the cache was prepared.
+    recorded = {}
+    for line in path.read_text(encoding='utf-8').splitlines():
+        digest, _, name = line.partition('  ')
+        if not re.fullmatch('[0-9a-f]{64}', digest) or not name or name in recorded:
+            raise ValueError('Malformed shader cache checksum list')
+        recorded[name] = digest
+    return recorded
 
 
 def verify(pack, manifest):
@@ -67,13 +81,15 @@ def verify(pack, manifest):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--image', type=Path, default=ROOT / 'analysis/binary-rehosting-feasibility/resources/game.romfs')
-    parser.add_argument('--cache', type=Path, default=ART / 'shader-cache')
+    parser.add_argument('--image', type=Path, default=INPUTS / 'romfs.bin')
+    parser.add_argument('--cache', type=Path, default=INPUTS / 'shader-full-cache/cache')
+    parser.add_argument('--checksums', type=Path, default=INPUTS / 'shader-full-cache/cache-checksums.sha256',
+                        help='Recorded per-file hashes of the prepared shader cache')
     parser.add_argument('--output', type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument('--verify-only', action='store_true')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    pack = args.output / 'D2R-Offline-91738.d2rpack'
+    pack = args.output / PACK_NAME
     manifest_path = args.output / 'offline-manifest.json'
     if args.verify_only:
         print(json.dumps({'sha256': verify(pack, manifest_path.read_bytes())}))
@@ -82,8 +98,13 @@ def main():
     print('Hashing original game and shader cache...', flush=True)
     entries = [{'path': name, 'bytes': path.stat().st_size, 'sha256': sha(path)} for name, path in paths]
     if entries[0]['bytes'] != ROMFS_BYTES or entries[0]['sha256'] != ROMFS_SHA:
-        raise ValueError('The game image is not the pinned original build 91738')
-    data = {'format': 1, 'game_build': 91738, 'total_bytes': sum(e['bytes'] for e in entries), 'files': entries}
+        raise ValueError(f'The game image is not the pinned original build {GAME_BUILD}')
+    recorded = recorded_checksums(args.checksums)
+    cached = {name.rsplit('/', 1)[1]: e['sha256'] for name, e in ((e['path'], e) for e in entries[1:])}
+    if cached != recorded:
+        raise ValueError('Shader cache differs from its recorded checksum list: %s' %
+                         sorted(set(cached.items()) ^ set(recorded.items()))[:4])
+    data = {'format': 1, 'game_build': GAME_BUILD, 'total_bytes': sum(e['bytes'] for e in entries), 'files': entries}
     manifest = json.dumps(data, ensure_ascii=True, separators=(',', ':')).encode('utf-8')
     if len(manifest) > 4 * 1024 * 1024:
         raise ValueError('Manifest exceeds installer limit')
@@ -109,8 +130,9 @@ def main():
     manifest_path.write_bytes(manifest)
     report = {'pack': str(pack), 'bytes': pack.stat().st_size, 'sha256': digest,
               'manifest_sha256': hashlib.sha256(manifest).hexdigest(), 'files': len(entries),
-              'payload_bytes': data['total_bytes'], 'game_build': 91738, 'fully_verified': True,
-              'shader_cache': str(args.cache.resolve()), 'game_playability_verified_by_packaging': False}
+              'payload_bytes': data['total_bytes'], 'game_build': GAME_BUILD, 'fully_verified': True,
+              'shader_cache': str(args.cache.resolve()), 'shader_cache_checksums_verified': True,
+              'game_romfs_sha256': ROMFS_SHA, 'game_playability_verified_by_packaging': False}
     (args.output / 'offline-pack-build.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(report, ensure_ascii=False), flush=True)
 

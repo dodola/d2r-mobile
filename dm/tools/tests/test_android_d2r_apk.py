@@ -155,5 +155,77 @@ class ModuleProfileTests(unittest.TestCase):
         self.reject_modules(empty_binary=True)
 
 
+class OfflineReleaseTests(unittest.TestCase):
+    ROMFS = {"bytes": 123, "sha256": "a" * 64}
+
+    def offline(self, root, **changes):
+        files = [{"path": "game.romfs", "bytes": 123, "sha256": "a" * 64},
+                 {"path": "d2r-mobile/shaders/shader_index.bin", "bytes": 7, "sha256": "b" * 64}]
+        manifest = {"format": 1, "game_build": 94012, "total_bytes": 130, "files": files}
+        manifest.update(changes)
+        path = root / "offline-manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def test_offline_manifest_must_match_the_module_romfs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw, report = pack.validate_offline_manifest(self.offline(root), {"romfs": self.ROMFS})
+            self.assertEqual(report["game_build"], 94012)
+            self.assertEqual(raw, (root / "offline-manifest.json").read_bytes())
+            with self.assertRaisesRegex(ValueError, "differs from the RomFS"):
+                pack.validate_offline_manifest(self.offline(root), {"romfs": {"bytes": 123, "sha256": "c" * 64}})
+
+    def test_offline_manifest_rejects_other_builds_paths_and_totals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for changes, message in (({"game_build": 91738}, "game build"), ({"total_bytes": 1}, "total_bytes"),
+                                     ({"files": [{"path": "../x", "bytes": 1, "sha256": "a" * 64}] * 2}, "Invalid offline")):
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, message):
+                    pack.validate_offline_manifest(self.offline(root, **changes), {"romfs": self.ROMFS})
+
+    def test_overlay_must_contain_exactly_the_required_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for prefix, names in (("base", pack.OVERLAY_BASE_FILES), ("variant", pack.OVERLAY_VARIANT_FILES)):
+                for name in names:
+                    target = root / prefix / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"x" + name.encode())
+            result = pack.validate_overlay(root / "base", root / "variant")
+            self.assertIn("romfs-overlay/data/.build.config", result)
+            self.assertIn("romfs-overlay-variants/item_notes/features.txt", result)
+            (root / "base" / "stray.bin").write_bytes(b"x")
+            with self.assertRaisesRegex(ValueError, "exactly"):
+                pack.validate_overlay(root / "base", root / "variant")
+
+    def test_signing_properties_require_every_field_and_an_existing_keystore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = root / "release.keystore"
+            properties = root / "release.properties"
+            properties.write_text(f"storeFile={store}" + chr(10) + chr(10).join(['alias=a', 'storePassword=p', 'keyPassword=k']) + chr(10), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing"):
+                pack.read_signing_properties(properties)
+            store.write_bytes(b"k")
+            self.assertEqual(pack.read_signing_properties(properties), (store, "a", "p", "k"))
+            properties.write_text(f"storeFile={store}" + chr(10) + chr(10).join(['alias=a', 'storePassword=p']) + chr(10), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "keyPassword"):
+                pack.read_signing_properties(properties)
+
+    def test_release_manifest_is_not_debuggable_and_uses_the_new_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "AndroidManifest.xml"
+            repo = Path(__file__).resolve().parents[3]
+            pack.release_manifest(repo, destination, "org.d2r.mobile", 3, "1.2.3", "https://example.org/u.json")
+            text = destination.read_text(encoding="utf-8")
+            self.assertIn('package="org.d2r.mobile"', text)
+            self.assertIn('android:debuggable="false"', text)
+            self.assertNotIn('debuggable="true"', text)
+            self.assertIn('android:versionCode="3"', text)
+            self.assertIn("InstallerActivity", text)
+            self.assertIn('android:value="https://example.org/u.json"', text)
+
+
 if __name__ == "__main__":
     unittest.main()

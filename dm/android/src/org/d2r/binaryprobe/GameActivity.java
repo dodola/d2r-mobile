@@ -81,7 +81,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private TouchControlsView touchControls;
     private final java.util.ArrayList<View> menuControls=new java.util.ArrayList<>();
     private boolean prepared, configured, surfaceReady, launched, resumed, failed;
-    private long romfsBytes=8973693207L;
+    private long romfsBytes;
     private int[] addOnIndices=new int[0];
     private boolean touchMode;
     private boolean inGame;
@@ -435,9 +435,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         }
         if(!remaining.isEmpty())throw new java.io.IOException(t("游戏模块清单不完整"));
         if(!new File(getFilesDir(),"game.romfs").isFile())throw new java.io.IOException(t("缺少原游戏资源"));
-        // Legacy/offline build91738 manifests omit the extended resource profile.
-        romfsBytes=new File(getFilesDir(),"game.romfs").length();
-        if(manifest.has("romfs")){
+        // The module manifest binds the exact game build and image; there is no size-only fallback.
+        if(!manifest.has("romfs"))throw new java.io.IOException(t("游戏资源版本不受支持"));
+        {
             if(!"0100726014352000".equals(manifest.getString("title_id"))||
                 !"db0507f36b84200ac05f75d76ed5026f".equals(manifest.getString("build_id")))
                 throw new java.io.IOException(t("游戏资源版本不受支持"));
@@ -447,7 +447,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if(!matched)throw new java.io.IOException(t("游戏模块与资源版本不匹配"));
             JSONObject resource=manifest.getJSONObject("romfs");romfsBytes=resource.getLong("bytes");
             String hash=resource.getString("sha256");File romfs=new File(getFilesDir(),"game.romfs");
-            if(romfsBytes<0x50||romfs.length()!=romfsBytes||!hash.matches("[0-9a-f]{64}")||!digest(romfs).equals(hash))
+            if(romfsBytes<0x50||romfs.length()!=romfsBytes||!hash.matches("[0-9a-f]{64}"))
+                throw new java.io.IOException(t("游戏资源校验失败"));
+            // The offline installer already hashed this image while importing it and recorded a receipt. Re-reading
+            // ~9 GB on every launch is only needed for an image that was placed without the installer.
+            if(!installerReceiptCovers(romfsBytes,hash)&&!digest(romfs).equals(hash))
                 throw new java.io.IOException(t("游戏资源校验失败"));
             JSONArray addOns=manifest.optJSONArray("add_on_content_indices");
             if(addOns!=null){
@@ -461,6 +465,38 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         }
         if(!new File(getFilesDir(),"d2r-mobile/shaders/shader_index.bin").isFile())throw new java.io.IOException(t("缺少游戏图形缓存"));
         installPipelineSeed();
+        installOverlay();
+    }
+    private boolean installerReceiptCovers(long bytes,String hash){
+        try{
+            OfflinePackageInstaller installer=new OfflinePackageInstaller(getFilesDir(),OfflineInstallSession.readManifest(this),
+                (phase,done,total)->{},()->false,()->0L);
+            return installer.receiptCovers("game.romfs",bytes,hash);
+        }catch(Exception absent){return false;}
+    }
+    /** Copies the verified touch-UI overlay shipped in the APK to where the native host looks for it. */
+    private void installOverlay()throws Exception {
+        String json;
+        try(InputStream in=getAssets().open("overlay-manifest.json")){
+            java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();byte[] b=new byte[4096];int n;
+            while((n=in.read(b))!=-1)out.write(b,0,n);json=new String(out.toByteArray(),StandardCharsets.UTF_8);
+        }catch(java.io.FileNotFoundException none){return;}
+        JSONArray list=new JSONObject(json).getJSONArray("files");File base=new File(getFilesDir(),"d2r-mobile");
+        for(int i=0;i<list.length();i++){
+            JSONObject entry=list.getJSONObject(i);String path=entry.getString("path"),hash=entry.getString("sha256");
+            if(!path.matches("romfs-overlay(-variants/item_notes)?/(ctrl_touch|touch_strings\\.tsv|dm_textbox_plain\\.tsv|features\\.txt|data/\\.build\\.config|data/00-00000007\\.data)")||
+                !hash.matches("[0-9a-f]{64}"))throw new java.io.IOException(t("覆盖层清单无效"));
+            File target=new File(base,path);long bytes=entry.getLong("bytes");
+            if(target.isFile()&&target.length()==bytes&&digest(target).equals(hash))continue;
+            File parent=target.getParentFile();
+            if(!parent.isDirectory()&&!parent.mkdirs())throw new java.io.IOException(t("不能创建覆盖层目录"));
+            File temporary=new File(parent,target.getName()+".new");
+            try(InputStream in=getAssets().open("overlay/"+path);FileOutputStream out=new FileOutputStream(temporary)){
+                byte[] b=new byte[65536];int n;while((n=in.read(b))!=-1)out.write(b,0,n);out.getFD().sync();
+            }
+            if(temporary.length()!=bytes||!digest(temporary).equals(hash)){temporary.delete();throw new java.io.IOException(t("覆盖层校验失败"));}
+            if(!temporary.renameTo(target))throw new java.io.IOException(t("不能保存覆盖层"));
+        }
     }
     private void configureAndStart(){
         if(!prepared||failed||destroyed)return;

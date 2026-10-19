@@ -32,13 +32,20 @@ public final class OfflinePackageInstallerTest {
         root.mkdirs();return new OfflinePackageInstaller(root,m,(phase,done,total)->{},()->false,()->Long.MAX_VALUE);
     }
     public static String runAll(File base)throws Exception {
-        checks=0;new Random(91738).nextBytes(IMAGE);OfflinePackageInstaller.Manifest m=manifest();byte[] pack=pack(m);
+        checks=0;new Random(94012).nextBytes(IMAGE);OfflinePackageInstaller.Manifest m=manifest();byte[] pack=pack(m);
         File clean=new File(base,"success");OfflinePackageInstaller i=installer(clean,m);
         check(!i.prepareExisting(),"Fresh install was ready");write(clean,"d2r-mobile/save/hero.d2s",INDEX);
         i.install(new ByteArrayInputStream(pack));check(i.prepareExisting(),"Successful install not ready");
         check(Arrays.equals(read(clean,"game.romfs"),IMAGE),"Image changed");check(Arrays.equals(read(clean,INDEX_PATH),INDEX),"Index changed");
         check(Arrays.equals(read(clean,"d2r-mobile/save/hero.d2s"),INDEX),"Save changed");
         i.install(new ByteArrayInputStream(pack));check(i.prepareExisting(),"Repeated import failed");
+        check(i.receiptCovers("game.romfs",IMAGE.length,hash(IMAGE)),"Receipt did not cover the installed image");
+        check(!i.receiptCovers("game.romfs",IMAGE.length,hash(INDEX)),"Receipt covered a different hash");
+        check(!i.receiptCovers("game.romfs",IMAGE.length-1,hash(IMAGE)),"Receipt covered a different size");
+        check(!i.receiptCovers("other.bin",1,hash(INDEX)),"Receipt covered an unlisted path");
+        File receiptImage=new File(clean,"game.romfs");long receiptTime=receiptImage.lastModified();receiptImage.setLastModified(receiptTime+5000);
+        check(!i.receiptCovers("game.romfs",IMAGE.length,hash(IMAGE)),"Receipt covered a modified image");receiptImage.setLastModified(receiptTime);
+        check(i.receiptCovers("game.romfs",IMAGE.length,hash(IMAGE)),"Receipt did not cover the restored image");
         write(clean,"d2r-offline-ready",new byte[]{0,2,(byte)255,(byte)255});check(i.prepareExisting(),"Damaged receipt did not revalidate existing resources");
         byte[] corrupt=pack.clone();corrupt[corrupt.length-1]^=1;
         File protectedRoot=new File(base,"corrupt");OfflinePackageInstaller protectedInstall=installer(protectedRoot,m);
