@@ -35,6 +35,22 @@ int main(void){
     assert(dm_android_input_publish_controller_buttons(1ull<<20)==EINVAL);assert(buttons()==0);
     ready=0;assert(dm_android_input_publish_controller_buttons(2)==ENODEV);assert(!dm_android_input_publish_controller_buttons(0));
     ready=1;assert(buttons()==0);
+    // Removing one controller must preserve another device's analog stick,
+    // even when no buttons remain held. Cancellation must not take touch mode.
+    assert(!dm_android_input_publish_controller_actions(2,20000,0,0,0));
+    assert(!dm_android_input_cancel_controller_actions(0,20000,0,0,0));
+    dm_android_npad_state state;
+    assert(!dm_android_input_read_npad(&state,0,1));assert(state.buttons==0 && state.lx==20000);
+    assert(!dm_android_input_cancel_controller_actions(0,0,0,0,0));
+    assert(!dm_android_input_read_npad(&state,0,1));assert(state.buttons==0 && state.lx==0);
+    dm_android_input_touch_activity();assert(!dm_android_input_controller_mode());
+    assert(!dm_android_input_cancel_controller_actions(2,20000,0,0,0));
+    assert(!dm_android_input_controller_mode());
+    assert(!dm_android_input_cancel_controller_actions(0,0,0,0,0));assert(buttons()==0);
+    assert(dm_android_input_cancel_controller_actions(1ull<<20,0,0,0,0)==EINVAL);
+    assert(dm_android_input_cancel_controller_actions(0,32768,0,0,0)==EINVAL);
+    assert(dm_android_input_cancel_controller_actions(0,0,0,0,-32768)==EINVAL);
+    assert(buttons()==0);
     puts("Controller B: tap latch, held keys, touch coexistence, cancellation and invalid input passed.");
     return 0;
 }

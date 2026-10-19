@@ -6,6 +6,8 @@
 #include "nvn_present_policy.h"
 #include "nvn_translation_queue.h"
 #include "nvn_translation_sync.h"
+#include "scale3d_android.h"
+#include "../gfx/nvn/nvn_vk_memory.h"
 static pthread_mutex_t android_suspend_mu=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t android_suspend_cv=PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t android_lifecycle_mu=PTHREAD_MUTEX_INITIALIZER;
@@ -38,6 +40,7 @@ static void android_xrun(void *payload) {
     case ANDROID_X_PRESENT: {
         dm_android_nvn_work_check_thread();
         mtl_present(j->texture,j->period,j->crop);
+        dm_android_scale3d_present(now_ns(),(uint64_t)(j->period*1e9));
         uint64_t frame=atomic_fetch_add(&android_nvn_frame,1)+1;
         mtl_set_frame(frame);dm_android_nvn_presented(frame);
         dm_android_nvn_work_end(frame);break;
@@ -117,11 +120,19 @@ void dm_gfx_suspend(int on) {
     pthread_mutex_lock(&android_lifecycle_mu);
     /* Publish the new workload epoch before waking a resumed acquire caller.
      * Hint service calls never hold android_suspend_mu. */
-    if(!on)dm_android_nvn_work_reset(1);
+    if(!on) {void dm_3d_scale_resumed(void);dm_3d_scale_resumed();dm_android_nvn_work_reset(1);}
     pthread_mutex_lock(&android_suspend_mu);android_suspended=on!=0;
     if(on)while(android_inflight)pthread_cond_wait(&android_suspend_cv,&android_suspend_mu);
     else pthread_cond_broadcast(&android_suspend_cv);
-    pthread_mutex_unlock(&android_suspend_mu);if(on){x_drain();dm_android_nvn_work_reset(0);mtl_drain();dm_vk_pipeline_cache_save();}
+    pthread_mutex_unlock(&android_suspend_mu);if(on){
+        x_drain();dm_android_nvn_work_reset(0);mtl_drain();dm_vk_pipeline_cache_save();
+        DmVkMemoryStats memory;
+        int error=dm_vk_memory_trim_caches(DM_VK_TRIM_ALL,&memory);
+        if(!error)LOG("ANDROID_GPU_CACHE_TRIM freed=%llu remaining=%llu count=%llu",
+            (unsigned long long)memory.last_trim_freed_bytes,
+            (unsigned long long)memory.total_bytes,(unsigned long long)memory.trim_count);
+        else LOG("ANDROID_GPU_CACHE_TRIM skipped errno=%d",error);
+    }
     pthread_mutex_unlock(&android_lifecycle_mu);
 }
 uint64_t dm_nvn_frame_count(void) {return atomic_load(&android_nvn_frame);}
@@ -167,17 +178,27 @@ NVN(nvnWindowSetPresentInterval,void,NVNwindow *window,int interval) {
     win_t *w=(void *)window;
     if(w->interval!=interval){w->interval=interval;android_present_log(w);}
 }
+NVN(nvnWindowGetPresentInterval,int,const NVNwindow *window) {return ((const win_t *)window)->interval;}
 NVN(nvnWindowSetCrop,void,NVNwindow *window,int x,int y,int width,int height) {
     if(x<0 || y<0 || width<0 || height<0)die("NVN crop bounds %d %d %d %d",x,y,width,height);
     int crop[4]={x,y,width,height};memcpy(((win_t *)window)->crop,crop,sizeof(crop));
 }
 static int android_present_hz=-1,android_display_intervals,android_present_fixed_60=-1;
+/* The graphics OBJECT library is shared by generic titles and D2R. Only the
+ * D2R target defines this policy callback; target defines do not propagate
+ * into the independently compiled graphics objects. */
+extern int dm_android_d2r_fps_setting(void) __attribute__((weak));
 void nvn_present_config(int hz,int display_intervals) {if(hz<0 || hz>1000)die("NVN pacing hz=%d",hz);android_present_hz=hz;android_display_intervals=display_intervals;}
 static uint64_t android_present_period(const win_t *w) {
     if(android_present_hz<0) {const char *e=getenv("DM_PRESENT_HZ");android_present_hz=e?atoi(e):60;
         android_display_intervals=mtl_has_window();}
     if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL;
-    return dm_android_present_period_ns(android_present_hz,android_display_intervals,w->interval,android_present_fixed_60);
+    uint64_t period=dm_android_present_period_ns(android_present_hz,android_display_intervals,w->interval,android_present_fixed_60);
+    /* Read applied settings on every frame. Apply/Discard keep their shared
+     * semantics; the explicit fixed60 diagnostic retains precedence. */
+    if(!android_present_fixed_60 && dm_android_d2r_fps_setting)
+        period=dm_android_present_power_period_ns(period,dm_android_d2r_fps_setting()==30);
+    return period;
 }
 static void android_present_log(const win_t *w) {
     uint64_t period=android_present_period(w);

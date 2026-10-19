@@ -23,7 +23,9 @@
 #include "dm_custom.h"
 #include "dm_input.h"
 #include "dm_hud.h"
+#ifndef __ANDROID__
 #include <TargetConditionals.h>
+#endif
 #include <unistd.h>
 #include "dm_uiscreen.h"
 #include "hle.h"

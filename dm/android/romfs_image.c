@@ -144,8 +144,10 @@ static int parse_image(image_context *context) {
     uint8_t header[80]; if (exact_read(context->fd, header, sizeof header, 0)) return -1;
     uint64_t h[10]; for (size_t i = 0; i < 10; i++) h[i] = u64(header + i * 8);
     uint64_t total = (uint64_t)context->identity.st_size;
-    if (h[0] != 80 || h[1] < h[0] || h[3] < h[1] || h[5] < h[3] || h[7] < h[5] || h[9] > total ||
-        h[2] > h[3] - h[1] || h[4] > h[5] - h[3] || h[6] > h[7] - h[5] || h[7] > h[9] || h[8] > h[9] - h[7] ||
+    /* Original RomFS images may put metadata after the payload. Repacked D2R
+     * images put it before the payload; both use the same absolute offsets. */
+    if (h[0] != 80 || h[1] < h[0] || h[3] < h[1] || h[5] < h[3] || h[7] < h[5] || h[7] > total || h[9] < h[0] || h[9] > total ||
+        h[2] > h[3] - h[1] || h[4] > h[5] - h[3] || h[6] > h[7] - h[5] || h[8] > total - h[7] ||
         h[4] < 24 || h[4] > MAX_TABLE || h[8] > MAX_TABLE || h[2] > MAX_TABLE || h[6] > MAX_TABLE ||
         !h[2] || !h[6] || h[2] % 4 || h[6] % 4 || (h[8] && h[8] < 32)) { errno = EINVAL; return -1; }
     uint8_t *dirs = malloc((size_t)h[4]), *files = malloc(h[8] ? (size_t)h[8] : 1);
@@ -177,6 +179,9 @@ static int parse_image(image_context *context) {
         uint64_t relative = u64(p + 8); file->size = u64(p + 16);
         if (relative > total - h[9] || file->size > total - h[9] - relative) { errno = EINVAL; goto done; }
         file->data = h[9] + relative;
+        for (unsigned j = 1; j < 9; j += 2) {
+            if (file->size && file->data < h[j] + h[j+1] && h[j] < file->data + file->size) { errno = EINVAL; goto done; }
+        }
         file->name = record_name(p + 32, length, 0); if (!file->name) goto done;
         position += step;
     }

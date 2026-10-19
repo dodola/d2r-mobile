@@ -505,7 +505,8 @@ static void skill_cluster_clearance(void) {
             dm_tc_target main=l.target[0],portal=l.target[DM_TC_PORTAL];
             NEAR(hypotf(l.swap.x-main.x,l.swap.y-main.y),hypotf(portal.x-main.x,portal.y-main.y),.001);
         }
-        for(int i=0;i<6;i++)group[i]=l.target[i];group[6]=l.swap;
+        for(int i=0;i<6;i++)group[i]=l.target[i];
+        group[6]=l.swap;
         for(int i=0;i<7;i++) {
             dm_tc_target t=group[i];CHECK(t.x-t.r>=sizes[n][2]);CHECK(t.x+t.r<=w-sizes[n][3]);
             CHECK(t.y-t.r>=0);CHECK(t.y+t.r<=h-fmaxf(24*k,bottom+8*k)+.001f);

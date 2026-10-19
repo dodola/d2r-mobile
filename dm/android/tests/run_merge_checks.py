@@ -35,8 +35,9 @@ def main():
         ('thread-lifetime', ['dm/android/tests/t_thread_lifetime.c'],
          ['-D__ANDROID__', '-I' + str(include.parent)], [[]]),
         ('save-recovery', ['dm/android/tests/t_fs_host.c', 'dm/host/hle_fs.c',
-                           'dm/android/services_fs_probe.c', 'dm/android/services_fs.c', 'dm/android/romfs_image.c'],
-         ['-D__ANDROID__', '-Wno-format', '-Wno-unused-function', '-Wno-format-truncation'],
+                           'dm/android/services_fs_probe.c', 'dm/android/services_fs.c', 'dm/android/romfs_image.c',
+                           'dm/android/lifecycle_android.c', 'dm/android/save_notice_android.c'],
+         ['-D__ANDROID__', '-DDM_ANDROID_HOST_FS_TEST', '-Wno-format', '-Wno-unused-function', '-Wno-format-truncation'],
          [[str(out / 'save-recovery.json')]]),
     ]
     results = []

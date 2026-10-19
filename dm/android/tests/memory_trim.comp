@@ -1,0 +1,11 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0) uniform sampler2D sampled_copy;
+layout(set=0,binding=1) uniform sampler2D comparison_copy;
+layout(set=0,binding=2,std430) buffer Pixels { float values[]; } result;
+void main() {
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+    uint i=uint(p.y*8+p.x)*2;
+    result.values[i]=texelFetch(sampled_copy,p,0).r;
+    result.values[i+1]=texelFetch(comparison_copy,p,0).r;
+}

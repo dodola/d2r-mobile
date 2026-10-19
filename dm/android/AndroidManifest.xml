@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.d2r.binaryprobe"
     android:versionCode="4" android:versionName="0.4-offline-installer">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <application android:label="D2R Mobile" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
         android:debuggable="true" android:allowBackup="false"
         android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.NoActionBar">

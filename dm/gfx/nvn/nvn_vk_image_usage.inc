@@ -2,21 +2,21 @@
  * without the guest IMAGE hint can start without STORAGE; the first actual
  * storage binding upgrades them before either shader stage gets descriptors. */
 static void texture_image_allocate(const VTexture *t,VkImageUsageFlags usage,
-    VkImage *image,VkDeviceMemory *memory,VkImageView *view) {
+    VkImage *image,VkDeviceMemory *memory,VkImageView *view,uint64_t *allocation_size) {
     const tex_t *source=&t->source;
     int one=source->d.target==NVN_TEXTURE_TARGET_1D||source->d.target==NVN_TEXTURE_TARGET_1D_ARRAY;
     int layered=source->d.target==NVN_TEXTURE_TARGET_1D_ARRAY||source->d.target==NVN_TEXTURE_TARGET_2D_ARRAY;
     int volume=source->d.target==NVN_TEXTURE_TARGET_3D;
     int cube=source->d.target==NVN_TEXTURE_TARGET_CUBEMAP||source->d.target==NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
     VkImageCreateInfo ii={.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,.imageType=volume?VK_IMAGE_TYPE_3D:one?VK_IMAGE_TYPE_1D:VK_IMAGE_TYPE_2D,
-        .format=t->format,.flags=cube?VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0,
+        .format=t->format,.flags=(cube||(layered&&!one&&t->width==t->height&&source->L.layers>=6&&t->width<=G.properties.limits.maxImageDimensionCube))?VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0,
         .extent={t->width,t->height,t->depth},.mipLevels=source->d.levels,.arrayLayers=source->L.layers,
         .samples=VK_SAMPLE_COUNT_1_BIT,.tiling=VK_IMAGE_TILING_OPTIMAL,.usage=usage,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
     CHECK(vkCreateImage(G.device,&ii,NULL,image));VkMemoryRequirements requirements;
     vkGetImageMemoryRequirements(G.device,*image,&requirements);
     VkMemoryAllocateInfo allocation={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=requirements.size,
         .memoryTypeIndex=memory_type(requirements.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
-    CHECK(vkAllocateMemory(G.device,&allocation,NULL,memory));CHECK(vkBindImageMemory(G.device,*image,*memory,0));
+    *allocation_size=requirements.size;*memory=memory_allocate(&allocation,DM_VK_MEMORY_TEXTURE);CHECK(vkBindImageMemory(G.device,*image,*memory,0));
     VkImageViewType view_type=volume?VK_IMAGE_VIEW_TYPE_3D:one?(layered?VK_IMAGE_VIEW_TYPE_1D_ARRAY:VK_IMAGE_VIEW_TYPE_1D):
         cube?(source->L.layers==6?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY):layered?VK_IMAGE_VIEW_TYPE_2D_ARRAY:VK_IMAGE_VIEW_TYPE_2D;
     VkImageViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=*image,.viewType=view_type,.format=t->format,
@@ -31,7 +31,7 @@ static void texture_require_storage(VTexture *t) {
         die("storage image format unsupported",t->format);
     if(t->before_storage)die("repeated image storage promotion",t->serial);
     VTexture upgraded=*t;upgraded.usage|=VK_IMAGE_USAGE_STORAGE_BIT;
-    texture_image_allocate(t,upgraded.usage,&upgraded.image,&upgraded.memory,&upgraded.view);
+    texture_image_allocate(t,upgraded.usage,&upgraded.image,&upgraded.memory,&upgraded.view,&upgraded.allocation_size);
     upgraded.layout=VK_IMAGE_LAYOUT_UNDEFINED;upgraded.mixed=0;memset(upgraded.lvl,0,sizeof upgraded.lvl);
     all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     texture_transition(&upgraded,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -46,6 +46,7 @@ static void texture_require_storage(VTexture *t) {
      * Keep their allocation with this texture; only Finalize frees it, after
      * the same drain/cache invalidation used for every texture destruction.
      * Promotion is one-way, so this is bounded to one old image per texture. */
+    t->before_storage_allocation_size=t->allocation_size;t->allocation_size=upgraded.allocation_size;
     t->before_storage=t->image;t->before_storage_memory=t->memory;t->before_storage_view=t->view;
     t->image=upgraded.image;t->memory=upgraded.memory;t->view=upgraded.view;t->usage=upgraded.usage;
     t->layout=upgraded.layout;t->mixed=upgraded.mixed;memcpy(t->lvl,upgraded.lvl,sizeof t->lvl);

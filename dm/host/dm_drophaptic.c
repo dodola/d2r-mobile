@@ -20,6 +20,7 @@
 //   - The remaining tiers are a merge of the two above: on the ground there is never any way to tell which unique it is (unidentified), so uniques as a whole go into the medium tier; a 'popular uniques' subdivision would need to read the unique table index and is left to be added later
 // Items are read the same way as in dm_dropfilter.c: code main+0x570260, type (including parent types) main+0x574bc0, quality = data block +0, stat main+0x5b9290 (194 = socket count).
 #include "dm_custom.h"
+#include "dm_drophaptic.h"
 #include "hle.h"
 #include <stdatomic.h>
 #include <stdint.h>
@@ -44,6 +45,17 @@ static const dh_rule k_rules[] = {
 
 static _Atomic int g_pending;   // 待震的最高档（1 最重）；0 = 没有 | Highest tier pending vibration (1 is the heaviest); 0 = none
 
+int dm_drop_haptic_enabled(void) {
+    static _Atomic int force = -2;
+    int value = atomic_load(&force);
+    if (value == -2) {
+        const char *e = getenv("DM_DROP_HAPTIC");
+        value = e ? e[0] != '0' : -1;
+        atomic_store(&force, value);
+    }
+    return value >= 0 ? value : dm_custom_get("drop_haptic");
+}
+
 static int tier_of(uint8_t *b, uint64_t u, const char **why) {
     int (*is)(uint64_t, int) = (int (*)(uint64_t, int))(b + 0x574bc0);
     uint32_t code = ((uint32_t (*)(uint64_t))(b + 0x570260))(u);
@@ -61,8 +73,7 @@ static int tier_of(uint8_t *b, uint64_t u, const char **why) {
 // 掉落音剪口里调（物品刚落地，模式 5）
 // Called in the drop sound cut (the item has just landed, mode 5)
 void dm_drop_haptic_land(uint8_t *b, uint64_t u) {
-    static int env = -2; if (env == -2) { const char *e = getenv("DM_DROP_HAPTIC"); env = e ? e[0] != '0' : -1; }   // 测试强制：0 关 / 其余开 | Test override: 0 off / anything else on
-    if (!b || !u || *(uint32_t *)u != 4 || !(env >= 0 ? env : dm_custom_get("drop_haptic"))) return;
+    if (!b || !u || *(uint32_t *)u != 4 || !dm_drop_haptic_enabled()) return;
     uint32_t id = *(uint32_t *)(u + 8);
     const char *why = NULL; int t = tier_of(b, u, &why); if (!t) return;
     int cur = atomic_load(&g_pending); while ((!cur || t < cur) && !atomic_compare_exchange_weak(&g_pending, &cur, t)) {}

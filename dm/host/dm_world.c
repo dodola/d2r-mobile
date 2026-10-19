@@ -19,7 +19,9 @@
 #include "dm_unit.h"
 #include "dm_hud.h"
 #include "dm_prof.h"
+#ifndef __ANDROID__
 #include <TargetConditionals.h>
+#endif
 
 static uint8_t *wb(void) { static uint8_t *b; if (!b) for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint8_t *)g_mod[i].base; return b; }
 static uint64_t w_player(void) { uint8_t *b = wb(); return b ? ((uint64_t (*)(uint32_t))(b + 0x45f9d0))(*(uint32_t *)(b + 0x2d20e4c)) : 0; }

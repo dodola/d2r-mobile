@@ -33,11 +33,18 @@
 #include "dm.h"
 #include "dm_custom.h"
 #include <dirent.h>
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__ANDROID__)
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 #define T_MISSILE 47   // 物品类型表行号：miss（弓、弩、亚马逊弓的父类型） | item type table row: miss (parent type of bows, crossbows, Amazon bows)
 int dm_diag_difficulty(void);
@@ -49,8 +56,19 @@ int dm_diag_difficulty(void);
 // Heavy also hides: the third tier of Healing and Mana potions; normal-tier white items (socketed / ethereal ones are kept, circlets have no tiers and are kept as a whole); normal-tier magic items (jewelry, circlets and class-specific items are kept).
 // Never hidden at any tier: Rejuvenation potions, keys, Unique, Set, Rare, runes, gems, charms, jewels, quest items and all kinds of materials, gold. The rules simply never mention them.
 static void write_fltr(const char *dir, const char *name, int heavy, int ammo) {
-    char p[1300], t[1320]; snprintf(p, sizeof p, "%s/%s.fltr", dir, name); snprintf(t, sizeof t, "%s.tmp", p);
+    char p[1300], t[1320]; snprintf(p, sizeof p, "%s/%s.fltr", dir, name);
+#if defined(__ANDROID__)
+    /* Android's initial migration seeds only missing built-in names.
+     * Preserve an existing user-edited rule, including an empty file or
+     * symlink. renameat2 publishes without replacing a concurrently created
+     * destination; the unfinished file is always a unique private sibling. */
+    struct stat existing;if(!lstat(p,&existing)||errno!=ENOENT)return;
+    snprintf(t,sizeof t,"%s.tmp.XXXXXX",p);int fd=mkstemp(t);
+    FILE *f=fd<0?NULL:fdopen(fd,"w");if(!f){if(fd>=0){close(fd);unlink(t);}LOG("【红】掉落过滤：规则文件写不了 %s",p);return;}
+#else
+    snprintf(t, sizeof t, "%s.tmp", p);
     FILE *f = fopen(t, "w"); if (!f) { LOG("【红】掉落过滤：规则文件写不了 %s", p); return; }
+#endif
     fprintf(f, "{\n \"name\": \"%s\",\n \"rules\": [\n", name);
     fprintf(f, "  {\"name\": \"HIDE consumables\", \"enabled\": true, \"ruleType\": \"hide\", \"filterEtherealSocketed\": false, \"itemCode\": [\"vps\", \"yps\", \"wms\", \"hp1\", \"hp2\", \"mp1\", \"mp2\", %s\"tsc\", \"isc\", \"tbk\", \"ibk\"]},\n", heavy ? "\"hp3\", \"mp3\", " : "");
     fprintf(f, "  {\"name\": \"HIDE throwing potions\", \"enabled\": true, \"ruleType\": \"hide\", \"filterEtherealSocketed\": false, \"equipmentItemCode\": [\"gps\", \"gpm\", \"gpl\", \"ops\", \"opm\", \"opl\"]},\n");
@@ -63,12 +81,26 @@ static void write_fltr(const char *dir, const char *name, int heavy, int ammo) {
         fprintf(f, "  {\"name\": \"SHOW magic class items\", \"enabled\": true, \"ruleType\": \"show\", \"filterEtherealSocketed\": false, \"equipmentRarity\": [\"magic\"], \"equipmentCategory\": [\"barbh\", \"druid\", \"palad\", \"necro\", \"warlo\", \"amazo\", \"assas\", \"sorce\"]},\n");
         fprintf(f, "  {\"name\": \"HIDE normal-tier white and magic\", \"enabled\": true, \"ruleType\": \"hide\", \"filterEtherealSocketed\": false, \"equipmentRarity\": [\"normal\", \"hiQuality\", \"magic\"], \"equipmentQuality\": [\"normal\"]},\n"); }
     fprintf(f, "  {\"name\": \"HIDE low quality\", \"enabled\": true, \"ruleType\": \"hide\", \"filterEtherealSocketed\": false, \"equipmentRarity\": [\"lowQuality\"]}\n ]\n}\n");
-    int ok = fclose(f) == 0 && rename(t, p) == 0; if (!ok) LOG("【红】掉落过滤：规则文件没写成 %s", p);
+    int ok=!ferror(f);ok=fclose(f)==0&&ok;
+#if defined(__ANDROID__)
+    /* Android SELinux can forbid hard links even inside the app's files.
+     * RENAME_NOREPLACE keeps publication atomic without replacing a rule. */
+    if(ok && syscall(__NR_renameat2,AT_FDCWD,t,AT_FDCWD,p,RENAME_NOREPLACE)!=0 && errno!=EEXIST)ok=0;
+    unlink(t);
+#else
+    if(ok)ok=rename(t,p)==0;
+#endif
+    if (!ok) LOG("【红】掉落过滤：规则文件没写成 %s errno=%d", p,errno);
 }
 // 四份：轻 / 重 ×（藏箭矢 / 身上有弓弩不藏箭矢）。挂存档时调（hle_fs.c），内容是固定的，每次启动重写一遍（规则改了老存档也跟上）
 // Four files: lite / heavy × (hide arrows / do not hide arrows with a bow or crossbow equipped). Called on save mount (hle_fs.c); the contents are fixed and rewritten on every launch (so old saves follow rule changes)
 void dm_lootfilter_seed(const char *save_dir) {
-    char d[1100]; snprintf(d, sizeof d, "%s/Settings", save_dir); mkdir(d, 0755);
+    char d[1100]; snprintf(d, sizeof d, "%s/Settings", save_dir);
+#if defined(__ANDROID__)
+    struct stat st;if(lstat(save_dir,&st)||!S_ISDIR(st.st_mode))return;
+    if(lstat(d,&st)){if(errno!=ENOENT)return;}else if(!S_ISDIR(st.st_mode))return;
+#endif
+    mkdir(d,0755);
     write_fltr(d, "DmLite", 0, 1); write_fltr(d, "DmLiteBow", 0, 0); write_fltr(d, "DmHeavy", 1, 1); write_fltr(d, "DmHeavyBow", 1, 0);
 }
 __attribute__((constructor)) static void lootfilter_hook_install(void) { extern void (*g_dm_mount_seed_hook)(const char *); g_dm_mount_seed_hook = dm_lootfilter_seed; }

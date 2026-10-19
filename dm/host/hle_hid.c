@@ -5,9 +5,10 @@
 #include "hle.h"
 #ifdef __ANDROID__
 #include "../android/input_backend.h"
-// This Android branch contains only SDK service bindings and the actual host
-// input backend. No game-version UI pumps, scripted taps, or fixed entry calls
-// from the Apple branch are compiled into it.
+#include "../android/touch_controls_android.h"
+// This Android branch contains SDK service bindings, the actual host input
+// backend, and an optional callback-only touch bridge. It has no game-version
+// offsets, scripted taps, or fixed entry calls from the Apple branch.
 static void input_require(int error, const char *operation) {
     if (error) die("Android input %s failed error=%d (real host binding required)", operation, error);
 }
@@ -34,10 +35,12 @@ HLE_FORCE("_ZN2nn3hid15GetNpadStyleSetERKj", "Return only a bound/allowed logica
 }
 HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", "Sample bound Android logical actions with press-edge latch", void, h_hid_GetFullKey, dm_android_npad_state *out, const uint32_t *id) {
     if (!id) die("GetNpadState null ID");
+    dm_android_touch_game_tick();
     input_require(dm_android_input_read_npad(out, *id, 1), "GetNpadFullKeyState");
 }
 HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", "Sample bound Android logical actions with attachment/style filters", void, h_hid_GetHandheld, dm_android_npad_state *out, const uint32_t *id) {
     if (!id) die("GetNpadState null ID");
+    dm_android_touch_game_tick();
     input_require(dm_android_input_read_npad(out, *id, 2), "GetNpadHandheldState");
 }
 HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "No Android vibration backend registered", unsigned, h_hid_VibPermit, void) { return 0; }
@@ -53,6 +56,7 @@ HLE_FORCE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14
     (void)handle; (void)value; die("SendVibrationValue called without an Android vibration backend");
 }
 HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm16EEEiPNS0_16TouchScreenStateIXT_EEEi", "Read real Android multi-pointer input with Start/End latch", int, h_hid_GetTouch, void *out, int capacity) {
+    dm_android_touch_game_tick();
     int received = dm_android_input_read_touch(out, capacity);
     if (received < 0) input_require(-received, "GetTouchScreenStates");
     return received;

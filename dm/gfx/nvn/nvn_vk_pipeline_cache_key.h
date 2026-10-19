@@ -18,7 +18,7 @@
 
 #define NVN_VK_PIPELINE_CACHE_KEY_VERSION 2u
 /* Bump when shader rewriting or pipeline interpretation changes incompatibly. */
-#define NVN_VK_PIPELINE_SHADER_ABI 2u
+#define NVN_VK_PIPELINE_SHADER_ABI 3u
 
 typedef struct {
     uint32_t version;

@@ -21,7 +21,8 @@ static inline int nvn_vk_pool_fully_gpu_owned(uint64_t addr,uint64_t len,
             if(w.size>UINT64_MAX-w.addr)return 0;
             if(w.addr<=cursor&&w.addr+w.size>next)next=w.addr+w.size;
         }
-        if(next==cursor)return 0;cursor=next<end?next:end;
+        if(next==cursor)return 0;
+        cursor=next<end?next:end;
     }
     return 1;
 }

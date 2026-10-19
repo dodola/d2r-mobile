@@ -54,12 +54,21 @@ static class SwshXlate
         {
             (int off0, _, _) = TextureHandle.UnpackOffsets(handle);
             int bytes = off0 * 4;
+            if ((string)_job["texture_handles"] == "nvn_combined_v1")
+                return (cbufSlot < 0 || cbufSlot == 2) && bytes >= 0x20 && bytes < 0x120 && (bytes - 0x20) % 8 == 0 ? (bytes - 0x20) / 8 : -1;
             return (cbufSlot < 0 || (cbufSlot & 0xffff) == 2) && bytes >= TexBase && bytes < SampBase && (bytes - TexBase) % 8 == 0 ? (bytes - TexBase) / 8 : -1;
         }
         public SamplerType QuerySamplerType(int handle, int cbufSlot = -1)
         {
             int slot = TexSlot(handle, cbufSlot);
             string t = slot >= 0 ? Get("tex", slot) ?? Get("img", slot) : null;
+            if ((string)_job["texture_handles"] == "nvn_combined_v1")
+            {
+                (int offset, _, _) = TextureHandle.UnpackOffsets(handle);
+                int bytes = offset * 4;
+                if ((cbufSlot < 0 || cbufSlot == 2) && bytes >= 0x120 && bytes < 0x168 && (bytes - 0x120) % 8 == 0)
+                { slot = (bytes - 0x120) / 8; t = Get("img", slot); }
+            }
             if (t == null) { Notes.Add($"贴图句柄 {handle:X}（常量段 {cbufSlot}，槽 {slot}）无 PC 类型，按 2D"); return SamplerType.Texture2D; }
             return t switch
             {
@@ -67,7 +76,7 @@ static class SwshXlate
                 "buffer" => SamplerType.TextureBuffer, "2d" => SamplerType.Texture2D, "2darray" => SamplerType.Texture2D | SamplerType.Array,
                 "2dms" => SamplerType.Texture2D | SamplerType.Multisample, "2dmsarray" => SamplerType.Texture2D | SamplerType.Multisample | SamplerType.Array,
                 "3d" => SamplerType.Texture3D, "cube" => SamplerType.TextureCube, "cubearray" => SamplerType.TextureCube | SamplerType.Array,
-                _ => SamplerType.Texture2D,
+                _ => throw new InvalidDataException($"Unknown sampler fact type: {t}"),
             };
         }
         public TextureFormat QueryTextureFormat(int handle, int cbufSlot = -1)

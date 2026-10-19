@@ -36,7 +36,16 @@
 #include "dm_custom.h"
 #include "dm_hud.h"
 #include "dm_unit.h"
+#if defined(__APPLE__)
 #include <TargetConditionals.h>
+#else
+/* Android/Bionic has no Darwin TargetConditionals.h.  The source only uses
+ * TARGET_OS_IPHONE as a build-policy switch, so provide the same value used
+ * by the Android host profile without pulling in a title-specific header. */
+#ifndef TARGET_OS_IPHONE
+#define TARGET_OS_IPHONE 0
+#endif
+#endif
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,7 +108,16 @@ static int skipped(int skill) { if (getenv("DM_TEST_BUFF_NOSKIP")) return 0;   /
 uint32_t dm_cur_tick(void);
 
 static int enabled(void) { static int env = -2; if (env == -2) { const char *e = getenv("DM_AUTOBUFF"); env = e ? e[0] != '0' : -1; }
-    return env >= 0 ? env : (TARGET_OS_IPHONE && dm_custom_get("auto_buff")); }
+    if (env >= 0) return env;
+#if defined(DM_ANDROID_HOST)
+    /* Only the reviewed D2R adapter opts the Android product into this
+     * private gameplay feature. Generic/Echoes hosts never provide it. */
+    int dm_android_title_custom_settings(void) __attribute__((weak));
+    return dm_android_title_custom_settings && dm_android_title_custom_settings() && dm_custom_get("auto_buff");
+#else
+    return TARGET_OS_IPHONE && dm_custom_get("auto_buff");
+#endif
+}
 static int cfg(const char *nm, int def) { const char *e = getenv(nm); return e && atoi(e) > 0 ? atoi(e) : def; }
 static int has_state(uint64_t u, int st) {
     uint64_t sl = *(uint64_t *)(u + 0x88); if (!sl || !(*(uint32_t *)(sl + 0x1c) >> 31)) return 0;

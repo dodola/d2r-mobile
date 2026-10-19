@@ -20,7 +20,16 @@
 //   everything else.
 #include "dm_i18n.h"
 #include "dm_i18n_tab.h"
+#if defined(__APPLE__)
 #include <TargetConditionals.h>
+#else
+/* Android/Bionic has no Darwin TargetConditionals.h.  Keep the same
+ * preprocessor contract as the Apple build; CMake passes TARGET_OS_IPHONE=0
+ * for Android and this fallback also makes standalone host probes robust. */
+#ifndef TARGET_OS_IPHONE
+#define TARGET_OS_IPHONE 0
+#endif
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,8 +95,16 @@ const char *dm_ui(const char *key) {
 }
 
 const char *dm_str(uint8_t *b, const char *key) {
+#if defined(DM_ANDROID_HOST)
+    /* Echoes has no reviewed string-table observer yet.  Returning the
+     * generated fallback is safe and avoids a D2R-private offset. */
+    (void)b;
+    return dm_ui(key);
+#else
     if (!b) return dm_ui(key);
     struct { const char *k; uint64_t n; } s = { key, strlen(key) };
     const char *r = ((const char *(*)(void *))(b + 0x7f5630))(&s);
     return r && *r && strcmp(r, key) ? r : dm_ui(key);   // 覆盖层里没有这个键（不该发生）就退回编译期表 | if the overlay lacks this key (should not happen), fall back to the compile-time table
+
+#endif
 }

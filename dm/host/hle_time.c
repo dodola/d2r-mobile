@@ -121,10 +121,14 @@ static int tz_site(uint64_t lr) {   // 只在强制期间才判，每次读返�
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "用户时钟 → 宿主 time()；首领连战强制地带时恐怖地带那几处另返回", int64_t, h_time_now, void) {
 #ifdef __ANDROID__
     // No main offsets are approved for the Android build. Time is read from the
-    // real system clock; Apple-only game modifications cannot redirect it here.
+    // A title-specific override is allowed only after its own build identity
+    // and caller validation. Other Android titles use the real system clock.
     if (!atomic_load(&g_time_initialized)) die("Android time backend is not initialized");
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts)) die("Android CLOCK_REALTIME failed");
+    int dm_android_title_clock_override(uint64_t,int64_t *) __attribute__((weak));
+    int64_t title_time;
+    if(dm_android_title_clock_override && dm_android_title_clock_override((uintptr_t)__builtin_return_address(0),&title_time))return title_time;
     int64_t ft = fixed_time(); return ft >= 0 ? ft : ts.tv_sec;
 #else
     int64_t tz = atomic_load(&g_dm_tz_time);

@@ -123,7 +123,11 @@ typedef struct {
 } NVNtexture;
 
 typedef struct {
+#ifdef __ANDROID__
+    char reserved[0x10];
+#else
     char reserved[0x28];
+#endif
 } NVNtextureView;
 
 typedef struct {

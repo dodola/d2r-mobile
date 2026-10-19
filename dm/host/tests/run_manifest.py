@@ -30,7 +30,10 @@ try:
  assert len(blocks)==4
  fixheaders={}
  for line in (D/'main.fixups.tsv').read_text().splitlines():
-  if line.startswith('# '):k,v=line[2:].split('\t');fixheaders[k]=int(v,0)
+  if line.startswith('# '):
+   k,v=line[2:].split('\t')
+   if k=='BUILD_ID':assert v==headers['BUILD_ID']
+   else:fixheaders[k]=int(v,0)
  po=fixheaders['PATCH_OFF'];seen=set()
  for off,raw,sha,why in blocks:
   off=int(off,16);body=bytes.fromhex(raw);assert po<=off<len(b) and off+len(body)<=len(b);assert b[off:off+len(body)]==body;assert hashlib.sha256(body).hexdigest()==sha

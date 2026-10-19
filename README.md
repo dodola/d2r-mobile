@@ -10,14 +10,18 @@ Platforms: Android (experimental, arm64-v8a, API 29+, Vulkan) · iPhone / iPad (
 
 中文: [README.zh-CN.md](README.zh-CN.md)
 
-The `codex/zelda-echoes-of-wisdom-android` branch also starts Android bring-up for
-**The Legend of Zelda: Echoes of Wisdom**. Pinned title profiles, executable
-extraction/auditing, and Android instruction rewriting are available; validation
-of version 1.1.0 now covers four-module loading, SDK OS initialization,
-thread/event checks, and SDK startup with temporary fixtures on PPG-AN00.
-Resource and graphics adaptation remain in progress, with **no playable APK
-yet**. See the [Android title notes](dm/android/titles/README.md) for status,
-commands, and remaining work. Android gameplay measurements below refer to D2R.
+D2R Android work is consolidated on `main`. The offline installer remains
+pinned to build **91738**; build **94012** has a separate diagnostic package and
+explicitly enabled, version-checked private adapters. Android controller input,
+transactional saves and the iOS touch/UI bridge have different validation scopes;
+see the [parity record](docs/ANDROID_IOS_PARITY.md) and
+[main integration notes](docs/ANDROID_MAIN_INTEGRATION_2026-10-19.zh-CN.md).
+The integrated main build still needs original-game acceptance testing.
+
+Zelda: Echoes of Wisdom porting is paused. Historical standalone probe profiles
+remain in the [Android title notes](dm/android/titles/README.md); no Zelda app
+entry point is included in this integration. Gameplay measurements below refer
+to D2R.
 
 ## Android support — experimental
 
@@ -45,6 +49,8 @@ Work implemented in this fork:
 - Validation includes **16 GPU fixtures on both the Qualcomm system and pinned Turnip drivers (32 checks)**, plus six pass/chunk timing configurations and the gameplay smoke checks above. This does not establish full-game compatibility with both drivers. Dynamic-uniform descriptors were tested and reverted because their FPS benefit did not reproduce.
 
 **Remaining work:** broader GPU/device coverage, dungeon/act/waypoint transitions, larger fights and skill effects, controlled 30-minute thermal testing, and further performance optimization. iOS feature parity has not been established.
+
+The 2026-10-19 isolated D2R 3.3.94012 package was tested on ROD-W09 for touch movement, menu/options UI input, iOS-derived button art and HUD, and a paused background game save followed by a forced-stop cold load. Physical gamepad hardware and complete rift runs remain untested. This scene runs at about 12–15 fps; dynamic 3D scaling and other remaining differences are recorded in the parity document.
 
 **Build status:** Android source and its [CMake entry point](dm/android/CMakeLists.txt) are checked in. The current APK packaging, game-data preparation and device-regression scripts live in a separate development workspace and are not included here, so a fresh clone is **not yet a complete Android APK build/install workflow**. The iOS setup and IPA instructions below do not build an Android APK. You must supply your own game files; no game assets, shaders or saves are provided by this repository.
 

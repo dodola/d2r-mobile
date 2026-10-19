@@ -15,9 +15,14 @@ static struct {
     _Atomic uint64_t background_creates,background_ns;
     _Atomic unsigned warm_pending;
 } PW={.lock=PTHREAD_MUTEX_INITIALIZER,.store_lock=PTHREAD_MUTEX_INITIALIZER,.changed=PTHREAD_COND_INITIALIZER};
-static VkSpecializationInfo pipeline_specialization(const VShader *s,const uint32_t *values,VkSpecializationMapEntry *entries) {
+typedef struct {uint32_t bias[LIMIT_BINDINGS];int32_t draw[3];} PipelineSpecialization;
+static VkSpecializationInfo pipeline_specialization(const VShader *s,const uint32_t *bias,const int32_t draw[3],
+    PipelineSpecialization *values,VkSpecializationMapEntry *entries) {
+    memcpy(values->bias,bias,sizeof values->bias);memset(values->draw,0,sizeof values->draw);
     uint32_t n=0;for(unsigned i=0;i<s->h.nb;i++)if(s->storage_bias.mask&(1ull<<i))entries[n++]=(VkSpecializationMapEntry){s->storage_bias.spec_id[i],i*4,4};
-    return (VkSpecializationInfo){n,entries,LIMIT_BINDINGS*4,values};
+    if(draw)for(unsigned f=0;f<3;f++)if(s->draw_parameter_mask&(1u<<f)){
+        values->draw[f]=draw[f];entries[n++]=(VkSpecializationMapEntry){NVN_DRAW_SPEC_BASE+f,offsetof(PipelineSpecialization,draw)+f*4,4};}
+    return (VkSpecializationInfo){n,entries,sizeof *values,values};
 }
 /* This is the single factory for demand compilation and manifest warm-up.
  * Its only inputs are immutable key bytes, shader objects and device handles. */
@@ -25,9 +30,10 @@ static VkResult pipeline_build(const PsoKey *k,VShader *v,VShader *f,Pso *out) {
     memset(out,0,sizeof *out);VkDescriptorSetLayout layouts[]={v->layout,f?f->layout:VK_NULL_HANDLE};
     VkPipelineLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,.setLayoutCount=f?2u:1u,.pSetLayouts=layouts};
     VkResult result=vkCreatePipelineLayout(G.device,&li,NULL,&out->layout);if(result!=VK_SUCCESS)return result;
-    VkSpecializationMapEntry maps[2][LIMIT_BINDINGS];VkSpecializationInfo spec[]={pipeline_specialization(v,k->storage_bias[0],maps[0]),{0}};
-    if(f)spec[1]=pipeline_specialization(f,k->storage_bias[1],maps[1]);
-    VkShaderModule vertex=v->module;
+    VkSpecializationMapEntry maps[2][LIMIT_BINDINGS+3];PipelineSpecialization values[2];
+    VkSpecializationInfo spec[]={pipeline_specialization(v,k->storage_bias[0],k->compute?NULL:k->draw_parameters,&values[0],maps[0]),{0}};
+    if(f)spec[1]=pipeline_specialization(f,k->storage_bias[1],NULL,&values[1],maps[1]);
+    VkShaderModule vertex=k->compute?shader_module(v,k->null_bindings[0]):v->module;
     if(!k->compute){
         NvnVkVertexAdapt plan={.split=k->vertex_split};uint32_t locations=0;
         for(unsigned l=0;l<16;l++){
@@ -40,28 +46,30 @@ static VkResult pipeline_build(const PsoKey *k,VShader *v,VShader *f,Pso *out) {
             if(tail>=32){vkDestroyPipelineLayout(G.device,out->layout,NULL);memset(out,0,sizeof *out);return VK_ERROR_INITIALIZATION_FAILED;}
             locations|=1u<<tail;plan.tail[l]=tail;
         }
-        vertex=vertex_module(v,&plan);
+        vertex=vertex_module(v,&plan,k->null_bindings[0]);
     }
     VkPipelineShaderStageCreateInfo stages[2]={
         {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=k->compute?VK_SHADER_STAGE_COMPUTE_BIT:VK_SHADER_STAGE_VERTEX_BIT,.module=vertex,.pName="main",.pSpecializationInfo=spec[0].mapEntryCount?&spec[0]:NULL},
-        {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_FRAGMENT_BIT,.module=f?f->module:VK_NULL_HANDLE,.pName="main",.pSpecializationInfo=spec[1].mapEntryCount?&spec[1]:NULL}};
+        {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_FRAGMENT_BIT,.module=f?shader_module(f,k->null_bindings[1]):VK_NULL_HANDLE,.pName="main",.pSpecializationInfo=spec[1].mapEntryCount?&spec[1]:NULL}};
     VkRenderPass pass=VK_NULL_HANDLE;
     if(k->compute){
         VkComputePipelineCreateInfo ci={.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,.stage=stages[0],.layout=out->layout};
         pthread_mutex_lock(&PC.cache_lock);result=vkCreateComputePipelines(G.device,G.pipeline_cache,1,&ci,NULL,&out->pipeline);if(result==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);pthread_mutex_unlock(&PC.cache_lock);
     }else{
         const PassKey *p=&k->pass;
-        VkSubpassDescription sub={.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS,.colorAttachmentCount=p->color_count,.pColorAttachments=p->color,.pDepthStencilAttachment=p->has_depth?&p->depth:NULL};
-        VkRenderPassCreateInfo ri={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,.attachmentCount=p->count,.pAttachments=p->attachments,.subpassCount=1,.pSubpasses=&sub,.dependencyCount=p->dependency_count,.pDependencies=p->dependencies};
+        VkSubpassDescription sub={.flags=p->subpass_flags,.inputAttachmentCount=p->input_count,.pInputAttachments=p->input_count?&p->input:NULL,.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS,.colorAttachmentCount=p->color_count,.pColorAttachments=p->color,.pDepthStencilAttachment=p->has_depth?&p->depth:NULL};
+        VkInputAttachmentAspectReference input_aspect={.subpass=0,.inputAttachmentIndex=0,.aspectMask=p->input_aspect};
+        VkRenderPassInputAttachmentAspectCreateInfo input_info={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO,.aspectReferenceCount=1,.pAspectReferences=&input_aspect};
+        VkRenderPassCreateInfo ri={.pNext=p->input_count?&input_info:NULL,.sType=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,.attachmentCount=p->count,.pAttachments=p->attachments,.subpassCount=1,.pSubpasses=&sub,.dependencyCount=p->dependency_count,.pDependencies=p->dependencies};
         result=vkCreateRenderPass(G.device,&ri,NULL,&pass);if(result!=VK_SUCCESS)goto done;
         VkPipelineVertexInputStateCreateInfo vi={.sType=VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,.vertexBindingDescriptionCount=k->binding_count,.pVertexBindingDescriptions=k->bindings,.vertexAttributeDescriptionCount=k->attribute_count,.pVertexAttributeDescriptions=k->attributes};
         VkPipelineInputAssemblyStateCreateInfo ai={.sType=VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,.topology=k->topology};
         VkPipelineViewportStateCreateInfo vp={.sType=VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,.viewportCount=1,.scissorCount=1};
-        VkPipelineRasterizationStateCreateInfo rs={.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,.polygonMode=VK_POLYGON_MODE_FILL,.cullMode=k->cull,.frontFace=k->front,.lineWidth=1,
+        VkPipelineRasterizationStateCreateInfo rs={.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,.polygonMode=VK_POLYGON_MODE_FILL,.depthClampEnable=k->depth_clamp,.cullMode=k->cull,.frontFace=k->front,.lineWidth=1,
             .depthBiasEnable=k->depth_bias.enabled,.depthBiasConstantFactor=k->depth_bias.constant,
             .depthBiasSlopeFactor=k->depth_bias.slope,.depthBiasClamp=k->depth_bias.clamp};
         VkPipelineMultisampleStateCreateInfo ms={.sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT};
-        VkPipelineDepthStencilStateCreateInfo ds={.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,.depthTestEnable=k->depth_test,.depthWriteEnable=k->depth_write,.depthCompareOp=k->depth_compare,.stencilTestEnable=k->stencil_test,.front=k->stencil[0],.back=k->stencil[1]};
+        VkPipelineDepthStencilStateCreateInfo ds={.flags=k->depth_flags,.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,.depthTestEnable=k->depth_test,.depthWriteEnable=k->depth_write,.depthCompareOp=k->depth_compare,.stencilTestEnable=k->stencil_test,.front=k->stencil[0],.back=k->stencil[1]};
         VkPipelineColorBlendStateCreateInfo cb={.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,.attachmentCount=k->color_count,.pAttachments=k->blend};
         VkDynamicState dynamic[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS};
         VkPipelineDynamicStateCreateInfo dy={.sType=VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,.dynamicStateCount=3,.pDynamicStates=dynamic};
@@ -80,15 +88,16 @@ static int pipeline_stable_valid(const StablePso *s) {
     if((k->vertex_split|k->vertex_unsigned|k->vertex_signed)&~0xffffu)return 0;
     if(k->vertex_unsigned&k->vertex_signed)return 0;
     if(k->depth_bias.enabled>1||!isfinite(k->depth_bias.constant)||!isfinite(k->depth_bias.slope)||!isfinite(k->depth_bias.clamp))return 0;
-    if(k->compute)return !s->shader[1][0];
-    const PassKey *p=&k->pass;if(!p->count||p->count>9||p->color_count!=k->color_count||p->color_count>8||p->has_depth>1||p->dependency_count>3)return 0;
+    if(k->shader_variant[0]||k->shader_variant[1]>1||k->depth_clamp>1)return 0;
+    if(k->compute)return !s->shader[1][0]&&!k->shader_variant[1];
+    const PassKey *p=&k->pass;if(!p->count||p->count>9||p->color_count!=k->color_count||p->color_count>8||p->has_depth>1||p->dependency_count>3||p->input_count>1||(p->input_count&&(!p->has_depth||p->input.attachment>=p->count)))return 0;
     for(unsigned i=0;i<p->color_count;i++)if(p->color[i].attachment!=VK_ATTACHMENT_UNUSED&&p->color[i].attachment>=p->count)return 0;
     if(p->has_depth&&p->depth.attachment>=p->count)return 0;
     return 1;
 }
 static StablePso pipeline_stable(const PsoKey *key) {
     StablePso s={0};s.key=*key;
-    for(unsigned i=0;i<2;i++){if(key->shader[i])memcpy(s.shader[i],G.shaders[key->shader[i]-1].key,17);s.key.shader[i]=0;}
+    for(unsigned i=0;i<2;i++){if(key->shader[i])memcpy(s.shader[i],G.shaders[(key->shader[i]&0x7fffffffu)-1].key,17);s.key.shader[i]=0;}
     return s;
 }
 static int pipeline_find(const StablePso *s) {for(unsigned i=0;i<PW.count;i++)if(!memcmp(&PW.jobs[i].stable,s,sizeof *s))return (int)i;return -1;}
@@ -123,13 +132,13 @@ static void pipeline_cache_init(void) {
 }
 typedef struct WarmShader {struct WarmShader *next;VShader shader;} WarmShader;
 static WarmShader *pipeline_shaders;
-static VShader *pipeline_shader(const char *key,unsigned stage) {
+static VShader *pipeline_shader(const char *key,unsigned stage,unsigned variant) {
     if(!*key)return NULL;
-    for(WarmShader *p=pipeline_shaders;p;p=p->next)if(!strcmp(p->shader.key,key)&&p->shader.h.stage==stage)return &p->shader;
+    for(WarmShader *p=pipeline_shaders;p;p=p->next)if(!strcmp(p->shader.key,key)&&p->shader.h.stage==stage)return variant?depth_input_shader(&p->shader):&p->shader;
     char path[1200];snprintf(path,sizeof path,"%s/%s.vkmeta",G.shader_root,key);FILE *f=fopen(path,"rb");if(!f)return NULL;
     RHeader h;int ok=fread(&h,1,sizeof h,f)==sizeof h&&h.magic==0x4d4b5644&&h.version==1&&h.stage==stage;fclose(f);if(!ok)return NULL;
     snprintf(path,sizeof path,"%s/%s.spv%s",G.shader_root,key,h.reserved?".gz":"");if(access(path,R_OK))return NULL;
-    WarmShader *p=calloc(1,sizeof *p);if(!p)return NULL;shader_load_into(&p->shader,key,stage,1);p->next=pipeline_shaders;pipeline_shaders=p;return &p->shader;
+    WarmShader *p=calloc(1,sizeof *p);if(!p)return NULL;shader_load_into(&p->shader,key,stage,1);p->next=pipeline_shaders;pipeline_shaders=p;return variant?depth_input_shader(&p->shader):&p->shader;
 }
 static void pipeline_checkpoint(void) {
     pthread_mutex_lock(&PW.store_lock);
@@ -155,8 +164,8 @@ static void *pipeline_worker(void *unused) {
         if(at<0&&!save){struct timespec deadline;clock_gettime(CLOCK_REALTIME,&deadline);deadline.tv_sec++;pthread_cond_timedwait(&PW.changed,&PW.lock,&deadline);pthread_mutex_unlock(&PW.lock);continue;}
         pthread_mutex_unlock(&PW.lock);
         if(at>=0){PipelineJob *j=&PW.jobs[at];uint64_t t=dm_android_nvn_clock_ns();
-            VShader *v=pipeline_shader(j->stable.shader[0],j->stable.key.compute?5u:0u);
-            VShader *f=pipeline_shader(j->stable.shader[1],1);
+            VShader *v=pipeline_shader(j->stable.shader[0],j->stable.key.compute?5u:0u,j->stable.key.shader_variant[0]);
+            VShader *f=pipeline_shader(j->stable.shader[1],1,j->stable.key.shader_variant[1]);
             Pso pso={0};VkResult result=v&&(!j->stable.shader[1][0]||f)?pipeline_build(&j->stable.key,v,f,&pso):VK_ERROR_INITIALIZATION_FAILED;
             uint64_t elapsed=dm_android_nvn_clock_ns()-t;
             atomic_fetch_add(&PW.background_ns,elapsed);if(result==VK_SUCCESS)atomic_fetch_add(&PW.background_creates,1);

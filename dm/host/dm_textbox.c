@@ -30,9 +30,27 @@ static void load(void) {
     g_loaded = 1; LOG("文字框颜色码：读入对照表 %d 条（%s）", n, path);
 }
 int dm_textbox_ensure_loaded(void) { if (!g_loaded) load(); return g_loaded > 0; }   // 不经门直接用对照表的（符文之语清单等）先调它：门不挂（DM_TEXTBOX_OFF、rules 产物）或还没触发过时表也读得到；读过直接返回 | Users of the mapping table that do not go through the gate (runeword list etc.) call this first: the table can be read even when the gate is not hooked (DM_TEXTBOX_OFF, rules build output) or has not fired yet; returns immediately if already read
+/* clock_gettime_nsec_np is Darwin-only.  The textbox observer is also useful
+ * to Android title adapters, so keep one monotonic source on every platform.
+ * CLOCK_MONOTONIC_RAW is preferred on Linux when available; plain
+ * CLOCK_MONOTONIC is the portable fallback. */
+static uint64_t tb_now_ns(void) {
+#if defined(__APPLE__)
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#else
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC_RAW)
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+
 static void tb_obs(const uint64_t *regs) {
     if (!g_loaded) load(); if (g_loaded < 0) return;
-    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); if (!g_t0) g_t0 = t0;
+    uint64_t t0 = tb_now_ns(); if (!g_t0) g_t0 = t0;
     uint64_t w = regs[0]; const char *s = w ? *(const char **)(uintptr_t)(w + 0x88) : NULL; size_t n = w ? *(const size_t *)(uintptr_t)(w + 0x90) : 0;
     g_calls++; char *o = NULL; size_t on = 0; int k = 0;
     // 样式里 "options": { "pipeCharacterBehavior": "handle" } 的文字框认颜色码（+0xfc = 1，宿主同一控件开 / 不开逐字节差分）：
@@ -47,10 +65,13 @@ static void tb_obs(const uint64_t *regs) {
     if (k) { static int lg = -1; if (lg < 0) lg = getenv("DM_TEXTBOX_LOG") != NULL;   // 测试开关 DM_TEXTBOX_LOG=1：每次替换记一行（前 200 次） | Test switch DM_TEXTBOX_LOG=1: log one line per replacement (first 200)
         if (lg && g_hits < 200) { const char *nm = *(const char **)(uintptr_t)(w + 8); LOG("文字框颜色码：%s 控件「%s」→「%s」", k == 1 ? "整串" : "子串", nm ? nm : "?", o); }
         g_hits++; ((void *(*)(uint64_t, const char *, uint64_t))(g_b + 0x136e5c))(w + 0x88, o, on); free(o); }   // 同 dm_update.c set_text 的赋值 | Same assignment as set_text in dm_update.c
-    uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; g_ns += dt; if (dt > g_max_ns) g_max_ns = dt;
+    uint64_t dt = tb_now_ns() - t0; g_ns += dt; if (dt > g_max_ns) g_max_ns = dt;
     static uint64_t last; static int stat = -1; if (stat < 0) stat = getenv("DM_TEXTBOX_STAT") != NULL;   // 测试开关 DM_TEXTBOX_STAT=1：每 10 秒记一行门的次数与耗时 | Test switch DM_TEXTBOX_STAT=1: log one line of gate hit count and time spent every 10 seconds
     if (stat && t0 - last > 10000000000ull) { last = t0; double sec = (t0 - g_t0) / 1e9;
-        LOG("文字框颜色码：%.0f 秒内门触发 %llu 次（%.1f 次 / 秒），替换 %llu 次，平均 %.2f 微秒、最长 %.1f 微秒", sec, g_calls, sec > 0 ? g_calls / sec : 0, g_hits, g_calls ? g_ns / 1e3 / g_calls : 0, g_max_ns / 1e3); }
+        LOG("文字框颜色码：%.0f 秒内门触发 %llu 次（%.1f 次 / 秒），替换 %llu 次，平均 %.2f 微秒、最长 %.1f 微秒", sec,
+            (unsigned long long)g_calls, sec > 0 ? g_calls / sec : 0,
+            (unsigned long long)g_hits, g_calls ? g_ns / 1e3 / g_calls : 0,
+            g_max_ns / 1e3); }
 }
 void dm_textbox_install(uint8_t *main_base) {
     g_b = main_base; if (!gate_obs_present(OBS_TEXTBOX)) { LOG("文字框颜色码：产物没有观测门 14（r33 起），不处理"); return; }

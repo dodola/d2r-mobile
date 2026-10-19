@@ -34,7 +34,13 @@
 //   Known not covered: when a chunk read fails (bytes read not equal to bytes requested) the game leaves the loop early and the deferred ctx stays in its initial state -- this only happens on an I/O error, in which case the segment read itself has already failed.
 // DM_GRANNY_PROF=1 (needs DM_BOOTPROF=1 to fix the character select moment): accumulates call count, input bytes and time per guest thread, in two phases "boot → character select main menu" and "after character select".
 #include "hle.h"
+#ifdef __ANDROID__
+#include <sys/resource.h>
+void crash_thread_init(void);
+void guest_thread_init(void);
+#else
 #include <pthread/qos.h>
+#endif
 #include <stdatomic.h>
 uint32_t thr_cur_handle(void);
 
@@ -45,6 +51,11 @@ static void (*g_init)(uint64_t, uint64_t);                // 0x11f4c70(ctx + 0x8
 static void g_fns(void) {
     if (g_dec) return;
     module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
+#ifdef __ANDROID__
+    if (!m || !m->base || strcmp(m->build_id,"db0507f36b84200ac05f75d76ed5026f") ||
+        m->text_end < 0x11f4c74 || m->size < 0x11f4c74)
+        die("Android Granny decoder requires verified D2R 3.3.94012 main");
+#endif
     g_init = (void (*)(uint64_t, uint64_t))(m->base + 0x11f4c70);
     g_dec = (uint64_t (*)(uint64_t, uint64_t, uint64_t))(m->base + 0x11f4af0);
 }
@@ -151,7 +162,13 @@ static void selftest_report(void) {
 }
 
 static void *g_worker(void *arg) {
-    (void)arg; pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+    (void)arg;
+#ifdef __ANDROID__
+    crash_thread_init(); guest_thread_init();
+    setpriority(PRIO_PROCESS,0,10);
+#else
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
     for (;;) {
         pthread_mutex_lock(&g_gl);
         while (!g_qhead && !atomic_load(&g_gstop)) pthread_cond_wait(&g_gc, &g_gl);
@@ -190,7 +207,14 @@ static void *g_worker(void *arg) {
 static void granny_init(void) {
     if (g_gmode >= 0) return;
     const char *e = getenv("DM_GRANNY_PRE"), *v = getenv("DM_GRANNY_VERIFY"), *mb = getenv("DM_GRANNY_PRE_MB");
+#ifdef __ANDROID__
+    /* Android's image mount does not offer TACT-prefetched files yet.
+     * Keep the real per-chunk decoder enabled; candidate pre-decoding is
+     * opt-in until a producer can supply authenticated Granny segments. */
+    g_gmode = v ? 2 : (e && strcmp(e,"0")) ? 1 : 0;
+#else
     g_gmode = v ? 2 : (e && !strcmp(e, "0")) ? 0 : 1;
+#endif
     g_gself = getenv("DM_GRANNY_SELFTEST") != NULL;
     g_gcap = (mb ? atoll(mb) : 192) << 20;
     const char *nt = getenv("DM_GRANNY_THREADS"); int th = nt ? atoi(nt) : 2;

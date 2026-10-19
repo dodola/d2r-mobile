@@ -1,5 +1,7 @@
 #include "../host/hle.h"
 #include "services_fs.h"
+#include "lifecycle_android.h"
+#include "save_notice_android.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -7,6 +9,8 @@
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+
+extern uint64_t dm_fs_commit_count(void);
 
 static void *force(const char *name) {
     extern const hle_force_ent __start_dm_force[], __stop_dm_force[];
@@ -31,6 +35,16 @@ typedef Result (*create_fn)(const char *, int64_t);
 typedef Result (*rename_fn)(const char *, const char *);
 typedef struct { char name[0x301]; uint8_t pad0[3]; int8_t type; uint8_t pad1[3]; int64_t size; } probe_entry;
 typedef Result (*read_directory_fn)(int64_t *, probe_entry *, uint64_t, int64_t);
+
+/* The lifecycle probe deliberately asks the real HLE Commit entry through a
+ * title-like adapter. This verifies that dm_save_wait observes a commit made
+ * by the original nn::fs path, rather than merely testing a counter setter. */
+static Result (*probe_commit)(const char *);
+static int probe_in_game(void *opaque) { (void)opaque; return 1; }
+static int probe_request_save(void *opaque) {
+    (void)opaque;
+    return probe_commit && probe_commit("fsprobe_save") == 0;
+}
 
 static int host_put(const char *path, const char *contents) {
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -146,7 +160,16 @@ int dm_android_fs_verify(const char *fixture_parent, const char *result_json) {
     close_file(handle);
     snprintf(path, PATH_MAX, "%s/old.bin", save);
     CHECK(host_equals(path, "old committed fixture"));
-    CHECK(!commit("fsprobe_save"));
+    uint64_t save_commits = dm_fs_commit_count();
+    probe_commit = commit;
+    dm_android_save_adapter adapter = {.title="filesystem-probe",.is_in_game=probe_in_game,
+        .request_save=probe_request_save,.opaque=NULL};
+    CHECK(!dm_android_save_bind(&adapter));
+    uint64_t waited_commits = 0; double waited_ms = 0;
+    CHECK(dm_save_wait(1.0, &waited_commits, NULL, &waited_ms) == 1 && waited_commits == 1 && waited_ms >= 0);
+    dm_android_save_unbind();
+    probe_commit = NULL;
+    CHECK(dm_fs_commit_count() == save_commits + 1);
     CHECK(host_equals(path, "new committed fixture"));
     unmount("fsprobe_save");
     CHECK(!mount_save("fsprobe_save", NULL));
@@ -159,18 +182,23 @@ int dm_android_fs_verify(const char *fixture_parent, const char *result_json) {
     CHECK(!open_file(&handle, "fsprobe_save:/old.bin", 1));
     CHECK(!read_file(&received, handle, 0, buffer, sizeof buffer) && received == strlen("new committed fixture") && !memcmp(buffer, "new committed fixture", received));
     // Real EBADF on a read-only save descriptor must poison the transaction.
+    CHECK(dm_android_save_failure_take() == 0);
     CHECK(write_file(handle, 0, "rejected fixture", strlen("rejected fixture"), NULL) != 0);
     close_file(handle);
     CHECK(commit("fsprobe_save") != 0);
+    CHECK(dm_android_save_failure_take() == EBADF);
+    CHECK(dm_android_save_failure_take() == 0);
     CHECK(host_equals(path, "new committed fixture"));
     CHECK(!open_file(&handle, "fsprobe_save:/old.bin", 2));
     CHECK(!set_size(handle, strlen("recovered fixture")));
     CHECK(!write_file(handle, 0, "recovered fixture", strlen("recovered fixture"), NULL));
     close_file(handle);
     CHECK(!commit("fsprobe_save") && host_equals(path, "recovered fixture"));
+    CHECK(dm_android_save_failure_take() == 0);
     snprintf(path, PATH_MAX, "%s.work/forbidden-link", save);
     CHECK(!symlink(rom, path));
     CHECK(commit("fsprobe_save") != 0); // Real snapshot refusal, not a fake write hook.
+    CHECK(dm_android_save_failure_take() != 0);
     CHECK(!unlink(path));
     snprintf(path, PATH_MAX, "%s/old.bin", save);
     CHECK(host_equals(path, "recovered fixture"));

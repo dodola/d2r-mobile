@@ -109,6 +109,10 @@ int dm_ui_bind_slot(void);   /* 绑定目标位 1..8（F1–F8），不在绑定
 void dm_ui_safe_left(int units);    /* 左安全区，布局单位（2160 高）；左上角佣兵 / 队友头像栏按它内移 | Left safe area, in layout units (2160 high); the mercenary / party member portrait bar in the top-left corner is moved inward by it */
 void dm_ui_safe_right(int units);   /* 右安全区，布局单位（2160 高）；右上角小地图与信息栏按它内移 | Right safe area, in layout units (2160 high); the minimap and info bar in the top-right corner are moved inward by it */
 uint32_t dm_ui_hit_id(void);   /* 最近一次命中的加点类按钮：属性「+」1..4（力量 / 敏捷 / 体力 / 精力），技能图标 = 最高位置 1 的标识；没命中 0 | The most recently hit point-spending button: attribute '+' 1..4 (strength / dexterity / vitality / energy), skill icon = an identifier with the top bit set to 1; 0 if nothing was hit */
+/* Game thread only: actual selected skill when focus is on this exact hit
+ * widget in the current UI generation; -1 while the cursor/focus is elsewhere.
+ * hit_id is an opaque widget identity, never a skill number. */
+int dm_ui_hit_selected_skill(uint32_t hit_id);
 int dm_ui_bind_active(void); uint64_t dm_ui_auto_release(void);   /* 取手柄处用：此刻要从玩家输入里松开的键 | Used where the controller is read: the keys to release from the player's input right now */ int dm_ui_bind_skill_hit(float *nx, float *ny);   /* 最近一次命中（吸附后）落在加点类按钮上：1 = 技能树的技能图标，2 = 属性页的「+」；带归一化坐标 | The most recent hit (after snapping) landed on a point-spending button: 1 = a skill icon in the skill tree, 2 = a '+' on the attributes page; comes with normalized coordinates */
 void dm_ui_bind_cancel(void);
 void dm_ui_map_full(int on);

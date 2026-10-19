@@ -28,6 +28,7 @@
 #include <math.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <errno.h>
 #include "../../android/nvn_platform_backend.h"
 
 void dm_guest_write_prepare(void *address,size_t length);
@@ -102,7 +103,16 @@ static void hz_note(int kind);
 #include "nvn_vk_depth_bias.h"
 #include "nvn_vk_vertex.h"
 #include "nvn_vk_vertex_spv.h"
-typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *map; uint64_t size,allocation_size;VkBufferUsageFlags usage;int cached;uint64_t dirty; } VBuffer;
+#include "nvn_vk_null_shader.h"
+#include "nvn_vk_draw_parameters.h"
+#include "nvn_vk_distance_capabilities.h"
+#include "nvn_vk_redundant_clip.h"
+#include "nvn_vk_unused_distance.h"
+#include "nvn_vk_image_type.h"
+#include "nvn_vk_depth_input.h"
+#include "nvn_vk_ui_ghost.h"
+#include "nvn_vk_memory.h"
+typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *map; uint64_t size,allocation_size;VkBufferUsageFlags usage;int cached;uint64_t dirty;unsigned memory_class; } VBuffer;
 enum { TEMP_OTHER,TEMP_DRIVER,TEMP_ALIGNED,TEMP_COMPARISON,TEMP_ROLES };
 typedef struct { const uint8_t *guest; uint64_t size,serial; VBuffer v; } VPool;
 typedef struct { uint64_t address,size,pool_serial,stamp,age; } PoolUpload;
@@ -112,20 +122,28 @@ typedef struct { uint64_t epoch,ssbo,tex;VBuffer *table; } DriverCacheEntry;
 typedef struct { uint32_t set,binding,type,kind; int32_t slot,sampler; uint32_t count,flags; } RBinding;
 typedef struct { uint32_t magic,version,stage,nb,na,c1n,ncap,local[3],fout,reserved; } RHeader;
 #include "nvn_vk_binding_plan.h"
-typedef struct VertexModule { NvnVkVertexAdapt plan; VkShaderModule module; struct VertexModule *next; } VertexModule;
-typedef struct {
+typedef struct VertexModule { NvnVkVertexAdapt plan; uint64_t null_bindings;VkShaderModule module; struct VertexModule *next; } VertexModule;
+typedef struct NvnNullModule {uint64_t mask;VkShaderModule module;struct NvnNullModule *next;} NvnNullModule;
+typedef struct VShader VShader;
+struct VShader {
     char key[17]; RHeader h; RBinding b[LIMIT_BINDINGS]; uint32_t attr[32][2],caps[32];
-    VBuffer c1; VkShaderModule module; VkDescriptorSetLayout layout; uint64_t fetch_bindings,dref_bindings,large_bindings_seen;
+    VBuffer c1; VkShaderModule module; VkDescriptorSetLayout layout; uint64_t fetch_bindings,dref_bindings,large_bindings_seen,texture_layout_logged;
     SBInfo storage_bias;
     BindingPlan *plan;
     uint8_t *vertex_spv;size_t vertex_bytes;NvnVkVertexInput vertex_inputs[16];VertexModule *vertex_modules;
-} VShader;
+    uint32_t *spirv;size_t spirv_words;NvnNullModule *null_modules;unsigned null_module_count;
+    int vertex_layout_logged,requires_native_depth_clip;
+    uint32_t draw_parameter_mask;
+    NvnVkImageType image_types[LIMIT_BINDINGS];uint64_t image_type_mask,typed_view_logged;
+    uint32_t identity;int depth_input;VShader *depth_input_variant;
+};
 typedef struct { uint64_t serial,incarnation; tex_t source; VkImage image; VkDeviceMemory memory;
     VkImageView view; VkFormat format; VkImageLayout layout; VkImageUsageFlags usage; uint32_t width,height,depth,bpp; int cpu_owned; uint64_t upload_stamp,version;
     /* At most one lazy STORAGE promotion. Prior commands and slot caches keep
      * the old allocation alive until texture finalization drains both slots. */
     VkImage before_storage;VkDeviceMemory before_storage_memory;VkImageView before_storage_view;
     uint8_t *cpu_snapshot;
+    uint64_t allocation_size,before_storage_allocation_size,sample_allocation_size,shadow_allocation_size,cpu_snapshot_size;
     VkImage sample_copy;VkDeviceMemory sample_memory;VkImageView sample_view;VkImageLayout sample_layout;
     VkImage shadow;VkDeviceMemory shadow_memory;VkImageView shadow_view;VkFormat shadow_format;VkImageLayout shadow_layout;uint64_t shadow_version;uint64_t other_version,sample_other;uint32_t dirty_levels,sc_valid,sc_level,sc_levels,sc_layer,sc_layers;
     VkImageLayout lvl[16];int mixed; /* per-mip layouts, valid only while mixed (then layout is stale) */ } VTexture;
@@ -156,8 +174,9 @@ typedef struct { VBuffer *buffer;uint64_t bytes,offset;char path[1400]; } TraceC
  * framebuffer size or Vulkan render-pass handle allocation. */
 typedef struct {
     uint32_t count,color_count,has_depth,dependency_count;
+    uint32_t input_count,subpass_flags,input_aspect;
     VkAttachmentDescription attachments[9];
-    VkAttachmentReference color[8],depth;
+    VkAttachmentReference color[8],depth,input;
     VkSubpassDependency dependencies[3];
 } PassKey;
 
@@ -177,35 +196,42 @@ typedef struct {
     uint32_t vertex_split,vertex_unsigned,vertex_signed;
     VkVertexInputAttributeDescription attributes[32];
     VkVertexInputBindingDescription bindings[16];
-    uint32_t depth_test,depth_write,depth_compare,stencil_test;
+    uint32_t depth_test,depth_write,depth_compare,stencil_test,depth_flags,depth_clamp;
     NvnVkDepthBias depth_bias;
+    uint32_t shader_variant[2];
     VkStencilOpState stencil[2];
     VkPipelineColorBlendAttachmentState blend[8];
     uint32_t storage_bias[2][LIMIT_BINDINGS];
+    uint64_t null_bindings[2];
+    int32_t draw_parameters[3];
     PassKey pass;
 } PsoKey;
 typedef struct { VkPipeline pipeline; VkPipelineLayout layout; } Pso;
 typedef struct { PsoKey key;Pso pso;uint64_t hash; } CachedPso;
 typedef struct {
-    const prog_t *program; p_set_rt rt; va_st attributes[16]; vs_st streams[16]; NVNbufferRange vbuf[16];
+    const prog_t *programs[6]; p_set_rt rt; va_st attributes[16]; vs_st streams[16]; NVNbufferRange vbuf[16];
     Range uniform[6][16],storage[6][16]; uint64_t tex[6][128],samp[6][128],img[6][32];
     color_st color; chmask_st mask; blend_st blend[8]; poly_st polygon; p_poly_offset polygon_offset; ds_st ds; ms_st ms;
     VkViewport viewport; VkRect2D scissor; int scissor_set; float blend_color[4]; int64_t copy_stride,copy_image_stride;
     const dpool_t *texture_pool,*sampler_pool; Range scratch; uint32_t stencil_compare[2],stencil_write[2],stencil_ref[2];
+    uint32_t dispatch[3],depth_clamp;
 } ReplayState;
 #include "nvn_vk_writeback_plan.h"
 #include "nvn_vk_command_state.h"
 #include "nvn_vk_submission.h"
 #include "nvn_vk_command_stream.h"
+#include "nvn_vk_shader_index.h"
+#include "nvn_vk_zcull.h"
 static struct {
     VkInstance instance; VkPhysicalDevice physical; VkDevice device; VkQueue queue; uint32_t family; VkSampler fetch_sampler;
     VkPhysicalDeviceMemoryProperties memory; VkPhysicalDeviceProperties properties;
     VkPhysicalDeviceFeatures enabled_features;
     VkFormatProperties format_properties[256];uint8_t format_known[256];
+    int depth_order,depth_input_experiment,depth_input_profile,depth_input_calibrated_ties,fragment_stores;
     VkPipelineCache pipeline_cache;
     VkSubmission submission_slot,submission_slot2;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
     uint64_t profile_slot_wait_ns,profile_drain_wait_ns,profile_completion_wait_ns,profile_completion_waits;
-    VBuffer support,zero; VPool pools[LIMIT_POOLS]; int npool;
+    VBuffer support,zero,default_vertex; VPool pools[LIMIT_POOLS]; int npool;
     PoolUpload pool_uploads[UPLOAD_BUCKETS][UPLOAD_WAYS];uint64_t upload_age;
     int disable_dirty_uploads,enable_writeback_prepare,enable_writeback_coalesce,event_trace;
     uint64_t profile_pool_uploaded_bytes,profile_pool_reused_ranges,profile_pool_reused_bytes;
@@ -214,6 +240,7 @@ static struct {
     uint64_t texture_incarnation,registry_revision,pool_revision,binding_revision[6],ssbo_revision[6],texbind_revision[6],driver_revision[6][2];DriverCacheEntry driver_cache[6][2];
     int disable_binding_plans,enable_command_cache;
     int force_vertex_split;
+    int depth_bias_clamp,depth_clamp_available;
     uint64_t profile_cmd_issued[NVN_VK_CMD_STATE_COUNT],profile_cmd_skipped[NVN_VK_CMD_STATE_COUNT];
     NvnDirtyQueryStats profile_dirty_base;
     uint64_t profile_plan_hits,profile_plan_misses,profile_plan_fallbacks,profile_plan_buffers,profile_plan_images,profile_driver_revision_hits;
@@ -236,16 +263,18 @@ static struct {
     uint64_t image_usage_omitted,image_usage_storage,image_promotions,image_retired_live;
     uint64_t resource_flushes,resource_kept,resource_views,resource_passes,resource_hits;
     uint64_t profile_view_hits,profile_view_misses,profile_framebuffer_hits,profile_framebuffer_misses;
-    int active,feedback_layout,shader_draw_parameters;
+    int active,feedback_layout,shader_draw_parameters,shader_image_gather_extended,mirror_clamp,null_descriptors,portable_draw_parameters;
+    int shader_clip_distance,shader_cull_distance;
     ReplayState state; VkPhysicalDeviceSubgroupProperties subgroup;
     NvnVkGpuProfile profile; NvnVkQuirkRegistry quirks;
     NvnVkPipelineCacheKey pipeline_cache_key;
-    uint8_t *shader_index; size_t index_bytes; char shader_root[1024]; ANativeWindow *window;
+    uint8_t *shader_index; size_t index_bytes;uint32_t shader_index_version;int shader_code_identity; char shader_root[1024]; ANativeWindow *window;int vi_crop[4];
     ShaderEntry *shader_entries;size_t shader_entry_capacity;
     VkSurfaceKHR surface; VkSwapchainKHR swapchain; VkImage *swap_images; VkImageLayout *swap_layouts;
     uint32_t nswap; VkFormat swap_format; VkExtent2D swap_extent; int display_hz;
+    VTexture present_encoding_bridge;
     _Atomic uint64_t fence,completed,present_count,frame; uint64_t draws,pass_count,uploads,pool_adds;
-    int trace_frame,trace_ui;_Atomic int window_origin;
+    int trace_frame,trace_ui,capture_feedback;_Atomic int window_origin,depth_mode;
     uint64_t profile_pipeline_ns,profile_wait_ns,profile_decode_ns,profile_submits,profile_start_ns,profile_draws,profile_frames;
     uint64_t profile_t2t_copies,profile_t2t_scaled,profile_t2t_texels;
     uint64_t profile_submit_candidates,profile_candidate_wait_ns,profile_writeback_bytes,profile_events,profile_reports;
@@ -296,6 +325,17 @@ static VkFormatProperties format_properties(VkFormat format) {
 /* Recording helpers access the selected slot; completion receives its owner explicitly. */
 #define S (*G.current_submission)
 #include "nvn_vk_resource_runtime.inc"
+typedef struct {int on,dim;float origin[2],dest[2],grid[4];uint64_t serial,token;const _Atomic uint64_t *live;} GhostRequest;
+typedef struct {Range range;VPool pool;} GhostBuffer;
+typedef struct {unsigned id,sid;uint64_t revision,serial,incarnation,version;VkSampler sampler;} GhostTexture;
+typedef struct {ReplayState state;p_draw draw;uint64_t tex;float rect[4];unsigned nb,nt;uint64_t bytes;GhostBuffer buffer[34];GhostTexture texture[16];} GhostCandidate;
+static pthread_mutex_t ghost_lock=PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int ghost_on;static GhostRequest ghost_request;static uint64_t ghost_serial,ghost_found_serial;
+static float ghost_found[4];static int ghost_found_valid;
+static struct {uint64_t pass,epoch,serial;unsigned n,nt;int busy;float area;GhostCandidate *c[4],*replaying;uint64_t texture[128];unsigned count[128];} ghost;
+static VPool *ghost_pool_override(uint64_t,uint64_t,uint64_t *);
+static void ghost_flush(void);
+static void ghost_note(const p_draw *,const p_draw_idx *,int,int,VShader *,VShader *);
 static void command_state_profile(const char *tag,uint64_t frame,uint64_t frames) {
     uint64_t issued=0,skipped=0;
     for(unsigned i=0;i<NVN_VK_CMD_STATE_COUNT;i++){issued+=G.profile_cmd_issued[i];skipped+=G.profile_cmd_skipped[i];}
@@ -346,8 +386,40 @@ static uint32_t memory_type(uint32_t mask,VkMemoryPropertyFlags properties) {
         (G.memory.memoryTypes[i].propertyFlags&properties)==properties) return i;
     die("memory type",properties);
 }
-static VBuffer buffer_create(uint64_t size,VkBufferUsageFlags usage,int zero) {
-    uint64_t started=prof_now();VBuffer b={.size=size,.usage=usage}; if(!size || size>SIZE_MAX) die("buffer size",size);
+/* A separate short-held ledger mutex also covers startup allocations, before
+ * the recorder starts owning G.lock. No driver call runs under this mutex. */
+static pthread_mutex_t memory_mu=PTHREAD_MUTEX_INITIALIZER;
+static DmVkMemoryStats memory_stats={.abi_version=1,.class_count=DM_VK_MEMORY_CLASS_COUNT};
+static VkDeviceMemory memory_allocate(const VkMemoryAllocateInfo *info,unsigned kind) {
+    if(kind>=DM_VK_MEMORY_CLASS_COUNT)die("allocation class",kind);
+    VkDeviceMemory memory;CHECK(vkAllocateMemory(G.device,info,NULL,&memory));
+    pthread_mutex_lock(&memory_mu);
+    uint64_t size=info->allocationSize;
+    if(size>UINT64_MAX-memory_stats.total_bytes)die("allocation ledger overflow",size);
+    memory_stats.bytes[kind]+=size;memory_stats.allocations[kind]++;memory_stats.total_bytes+=size;
+    if(memory_stats.bytes[kind]>memory_stats.peak_bytes[kind])memory_stats.peak_bytes[kind]=memory_stats.bytes[kind];
+    if(memory_stats.total_bytes>memory_stats.peak_total_bytes)memory_stats.peak_total_bytes=memory_stats.total_bytes;
+    pthread_mutex_unlock(&memory_mu);return memory;
+}
+static void memory_release(VkDeviceMemory memory,uint64_t size,unsigned kind) {
+    if(!memory)return;
+    if(kind>=DM_VK_MEMORY_CLASS_COUNT)die("release class",kind);
+    vkFreeMemory(G.device,memory,NULL);
+    pthread_mutex_lock(&memory_mu);
+    if(!memory_stats.allocations[kind]||size>memory_stats.bytes[kind]||size>memory_stats.total_bytes)die("allocation ledger underflow",size);
+    memory_stats.bytes[kind]-=size;memory_stats.allocations[kind]--;memory_stats.total_bytes-=size;
+    pthread_mutex_unlock(&memory_mu);
+}
+static void texture_snapshot_set(VTexture *t,uint8_t *snapshot,uint64_t size) {
+    pthread_mutex_lock(&memory_mu);
+    if(t->cpu_snapshot_size>memory_stats.cpu_baseline_bytes)die("CPU baseline ledger underflow",t->cpu_snapshot_size);
+    memory_stats.cpu_baseline_bytes-=t->cpu_snapshot_size;memory_stats.cpu_baseline_bytes+=size;
+    if(memory_stats.cpu_baseline_bytes>memory_stats.cpu_baseline_peak_bytes)memory_stats.cpu_baseline_peak_bytes=memory_stats.cpu_baseline_bytes;
+    pthread_mutex_unlock(&memory_mu);
+    free(t->cpu_snapshot);t->cpu_snapshot=snapshot;t->cpu_snapshot_size=size;
+}
+static VBuffer buffer_create_kind(uint64_t size,VkBufferUsageFlags usage,int zero,unsigned kind) {
+    uint64_t started=prof_now();VBuffer b={.size=size,.usage=usage,.memory_class=kind}; if(!size || size>SIZE_MAX) die("buffer size",size);
     VkBufferCreateInfo info={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=size,.usage=usage,
         .sharingMode=VK_SHARING_MODE_EXCLUSIVE}; CHECK(vkCreateBuffer(G.device,&info,NULL,&b.b));
     VkMemoryRequirements r; vkGetBufferMemoryRequirements(G.device,b.b,&r);
@@ -355,14 +427,15 @@ static VBuffer buffer_create(uint64_t size,VkBufferUsageFlags usage,int zero) {
     VkMemoryAllocateInfo a={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=r.size,
         .memoryTypeIndex=memory_type(r.memoryTypeBits,G.want_cached?(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_CACHED_BIT):(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))};
     b.cached=G.want_cached&&!(G.memory.memoryTypes[a.memoryTypeIndex].propertyFlags&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    CHECK(vkAllocateMemory(G.device,&a,NULL,&b.m)); CHECK(vkBindBufferMemory(G.device,b.b,b.m,0));
+    b.m=memory_allocate(&a,kind); CHECK(vkBindBufferMemory(G.device,b.b,b.m,0));
     void *mapped=NULL; CHECK(vkMapMemory(G.device,b.m,0,size,0,&mapped)); b.map=mapped;if(zero)memset(b.map,0,size);
     G.profile_buffer_allocs++;G.profile_buffer_bytes+=size;G.profile_buffer_allocate_ns+=prof_now()-started;return b;
 }
+static VBuffer buffer_create(uint64_t size,VkBufferUsageFlags usage,int zero) {return buffer_create_kind(size,usage,zero,DM_VK_MEMORY_SUPPORT);}
 static VBuffer buffer_make(uint64_t size,VkBufferUsageFlags usage) { return buffer_create(size,usage,1); }
 static void buffer_free(VBuffer *b) {
     if(b->map) vkUnmapMemory(G.device,b->m); if(b->b) vkDestroyBuffer(G.device,b->b,NULL);
-    if(b->m) vkFreeMemory(G.device,b->m,NULL); memset(b,0,sizeof(*b));
+    memory_release(b->m,b->allocation_size,b->memory_class); memset(b,0,sizeof(*b));
 }
 static VBuffer *retired_take(unsigned index) {
     VBuffer *b=G.retired_buffers[index];G.retired_bytes-=b->allocation_size;
@@ -395,7 +468,7 @@ static VBuffer *temporary_named(uint64_t size,VkBufferUsageFlags usage,unsigned 
         /* Bytes at or beyond b->dirty are still zero from the previous use. */
         memset(b->map,0,b->dirty<size?b->dirty:size);G.profile_temp_clear_ns+=prof_now()-started;break;
     }
-    if(!b){b=malloc(sizeof(*b));if(!b)die("temporary buffer allocation",size);*b=buffer_make(size,usage);}
+    if(!b){b=malloc(sizeof(*b));if(!b)die("temporary buffer allocation",size);*b=buffer_create_kind(size,usage,1,DM_VK_MEMORY_TEMP);}
     b->dirty=role==TEMP_DRIVER?DRIVER_TABLE_BYTES:size;
     S.temporaries[S.ntemporary++]=b;return b;
 }
@@ -425,6 +498,10 @@ void mtl_set_window_origin_mode(int mode) {
 static void pipeline_cache_init(void);
 static void pipeline_worker_start(void);
 static void pipeline_frame(uint64_t frame);
+void dm_vk_set_depth_mode(int mode) {
+    if(mode!=NVN_DEPTH_MODE_NEAR_IS_MINUS_W&&mode!=NVN_DEPTH_MODE_NEAR_IS_ZERO)die("NVN depth mode",mode);
+    atomic_store(&G.depth_mode,mode);
+}
 static void backend_init(void) {
     void *loader=NULL;
     const char *private_driver=getenv("DM_PRIVATE_VULKAN");
@@ -468,13 +545,17 @@ static void backend_init(void) {
     if(!extension_properties)die("device extension allocation",extension_count);
     CHECK(enumerate_extensions(G.physical,NULL,&extension_count,extension_properties));
     int has_driver_properties=G.properties.apiVersion>=VK_API_VERSION_1_2;
-    int has_feedback=0,has_performance_query=0,has_swapchain=0;
+    int has_feedback=0,has_performance_query=0,has_swapchain=0,has_robustness2=0,has_draw_parameters=0,has_depth_order=0;
     for(uint32_t i=0;i<extension_count;i++){
         const char *name=extension_properties[i].extensionName;
         has_driver_properties|=!strcmp(name,VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
         has_feedback|=!strcmp(name,VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
         has_performance_query|=!strcmp(name,"VK_KHR_performance_query");
         has_swapchain|=!strcmp(name,VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        G.mirror_clamp|=!strcmp(name,VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
+        has_robustness2|=!strcmp(name,VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+        has_draw_parameters|=!strcmp(name,VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME);
+        has_depth_order|=!strcmp(name,VK_ARM_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME);
     }
     free(extension_properties);
     if(!has_swapchain)die("Vulkan swapchain extension required",0);
@@ -489,6 +570,15 @@ static void backend_init(void) {
     G.pipeline_cache_key=nvn_vk_pipeline_cache_key_make(&G.properties,&G.profile,&G.quirks);
     if(private_driver && !strcmp(private_driver,"turnip") && driver_properties.driverID!=VK_DRIVER_ID_MESA_TURNIP)die("requested private driver was not loaded",driver_properties.driverID);
     fprintf(stderr,"[nvn-vulkan] driver id=%u name=%s info=%s\n",driver_properties.driverID,driver_properties.driverName,driver_properties.driverInfo);
+    G.depth_input_experiment=getenv("DM_DEPTH_INPUT_EXPERIMENT")!=NULL;
+    G.depth_input_profile=driver_properties.driverID==VK_DRIVER_ID_ARM_PROPRIETARY&&
+        G.properties.vendorID==5045u&&G.properties.deviceID==2825322496u&&G.properties.driverVersion==159387648u&&
+        !strcmp(G.properties.deviceName,"Mali-G610 MC6")&&
+        !strcmp(driver_properties.driverInfo,"v1.r38p1-01eac0.91ad9bb3ee6ee6b8afda80c5afcd3137")&&
+        G.properties.limits.subTexelPrecisionBits==8&&G.properties.limits.subPixelPrecisionBits==8;
+    /* Separate opt-in for finite exact-boundary calibration on this driver.
+     * Neither marker can authorize another device or a wider sample interval. */
+    G.depth_input_calibrated_ties=G.depth_input_experiment&&G.depth_input_profile&&getenv("DM_DEPTH_INPUT_CALIBRATED_TIES")!=NULL;
     fprintf(stderr,"[nvn-vulkan] subgroup size=%u stages=%#x operations=%#x\n",G.subgroup.subgroupSize,G.subgroup.supportedStages,G.subgroup.supportedOperations);
     fprintf(stderr,"[nvn-vulkan] render tier=%u quirks=%#x\n",(unsigned)G.quirks.render_tier,G.quirks.flags);
     fprintf(stderr,"[nvn-vulkan] pipeline cache identity version=%u uuid=%02x%02x%02x%02x quirks=%#x\n",
@@ -506,20 +596,40 @@ static void backend_init(void) {
     if(G.family==UINT32_MAX) die("graphics/compute queue",0);
     float priority=1; VkDeviceQueueCreateInfo qi={.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
        .queueFamilyIndex=G.family,.queueCount=1,.pQueuePriorities=&priority};
-    const char *de[]={VK_KHR_SWAPCHAIN_EXTENSION_NAME,VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME};
     if(getenv("DM_VK_AB_CONTROL"))fprintf(stderr,"[nvn-vulkan] ATTACHMENT_AB_CAPS performance_query=%d timing=cpu_present_only bandwidth=not_measured\n",has_performance_query);
-    VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT feedback={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT};
-    VkPhysicalDeviceShaderDrawParametersFeatures draw_parameters={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES,.pNext=has_feedback?&feedback:NULL};
-    VkPhysicalDeviceFeatures2 features={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,.pNext=&draw_parameters};
+    const char *de[6]={VK_KHR_SWAPCHAIN_EXTENSION_NAME};uint32_t enabled_extensions=1;
+    VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesARM depth_order={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_ARM};
+    VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT feedback={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT,.pNext=has_depth_order?&depth_order:NULL};
+    VkPhysicalDeviceShaderDrawParametersFeatures draw_parameters={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES,.pNext=has_feedback?(void *)&feedback:has_depth_order?(void *)&depth_order:NULL};
+    VkPhysicalDeviceRobustness2FeaturesEXT robustness2={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,.pNext=&draw_parameters};
+    VkPhysicalDeviceFeatures2 features={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,.pNext=has_robustness2?(void *)&robustness2:(void *)&draw_parameters};
     PFN_vkGetPhysicalDeviceFeatures2 get_features=(PFN_vkGetPhysicalDeviceFeatures2)dm_vk_get(G.instance,"vkGetPhysicalDeviceFeatures2");get_features(G.physical,&features);
     G.feedback_layout=feedback.attachmentFeedbackLoopLayout;
+    if(G.feedback_layout)de[enabled_extensions++]=VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME;
+    if(G.mirror_clamp)de[enabled_extensions++]=VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME;
+    if(has_draw_parameters)de[enabled_extensions++]=VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME;
+    G.null_descriptors=robustness2.nullDescriptor;
+    robustness2.robustBufferAccess2=robustness2.robustImageAccess2=VK_FALSE;
+    if(G.null_descriptors)de[enabled_extensions++]=VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
     G.shader_draw_parameters=draw_parameters.shaderDrawParameters;
-    draw_parameters.pNext=G.feedback_layout?&feedback:NULL;
+    G.portable_draw_parameters=getenv("DM_PORTABLE_DRAW_PARAMETERS")!=NULL;
+    G.depth_order=has_depth_order&&depth_order.rasterizationOrderDepthAttachmentAccess&&G.depth_input_experiment&&G.depth_input_profile;
+    depth_order.rasterizationOrderColorAttachmentAccess=depth_order.rasterizationOrderStencilAttachmentAccess=VK_FALSE;
+    depth_order.rasterizationOrderDepthAttachmentAccess=G.depth_order;
+    if(G.depth_order)de[enabled_extensions++]=VK_ARM_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME;
+    feedback.pNext=G.depth_order?&depth_order:NULL;
+    draw_parameters.pNext=G.feedback_layout?(void *)&feedback:G.depth_order?(void *)&depth_order:NULL;
     VkPhysicalDeviceFeatures available,enabled={0}; vkGetPhysicalDeviceFeatures(G.physical,&available);
     enabled.shaderStorageImageReadWithoutFormat=available.shaderStorageImageReadWithoutFormat;
     enabled.shaderStorageImageWriteWithoutFormat=available.shaderStorageImageWriteWithoutFormat;
     enabled.shaderImageGatherExtended=available.shaderImageGatherExtended;
+    G.shader_image_gather_extended=enabled.shaderImageGatherExtended;
+    G.shader_code_identity=getenv("DM_SHADER_IDENTITY_CODE")!=NULL;
     enabled.samplerAnisotropy=available.samplerAnisotropy;
+    enabled.depthBiasClamp=available.depthBiasClamp;G.depth_bias_clamp=enabled.depthBiasClamp;
+    enabled.depthClamp=available.depthClamp;G.depth_clamp_available=enabled.depthClamp;
+    enabled.shaderClipDistance=available.shaderClipDistance;G.shader_clip_distance=enabled.shaderClipDistance;
+    enabled.shaderCullDistance=available.shaderCullDistance;G.shader_cull_distance=enabled.shaderCullDistance;
     enabled.imageCubeArray=available.imageCubeArray;
     enabled.occlusionQueryPrecise=available.occlusionQueryPrecise;
     enabled.depthBiasClamp=available.depthBiasClamp;
@@ -527,6 +637,7 @@ static void backend_init(void) {
     if(!available.independentBlend)die("NVN independent attachment blending unavailable",0);
     enabled.independentBlend=VK_TRUE;
     enabled.fragmentStoresAndAtomics=available.fragmentStoresAndAtomics;
+    G.fragment_stores=enabled.fragmentStoresAndAtomics;
     enabled.vertexPipelineStoresAndAtomics=available.vertexPipelineStoresAndAtomics;
     enabled.shaderClipDistance=available.shaderClipDistance;
     enabled.shaderCullDistance=available.shaderCullDistance;
@@ -545,7 +656,8 @@ static void backend_init(void) {
         enabled.shaderImageGatherExtended,enabled.samplerAnisotropy,enabled.imageCubeArray,enabled.occlusionQueryPrecise,
         enabled.independentBlend,enabled.fragmentStoresAndAtomics,enabled.vertexPipelineStoresAndAtomics,
         enabled.shaderClipDistance,enabled.shaderCullDistance,draw_parameters.shaderDrawParameters,G.feedback_layout,
-        enabled.pipelineStatisticsQuery,enabled.fullDrawIndexUint32,enabled.depthBiasClamp};
+        enabled.pipelineStatisticsQuery,enabled.fullDrawIndexUint32,enabled.depthBiasClamp,enabled.depthClamp,
+        G.null_descriptors,G.portable_draw_parameters,G.depth_order,G.depth_input_calibrated_ties};
     for(unsigned i=0;i<sizeof cache_features/sizeof cache_features[0];i++)
         if(cache_features[i])G.pipeline_cache_key.enabled_features|=1u<<i;
     G.precise_occlusion=enabled.occlusionQueryPrecise;
@@ -553,9 +665,12 @@ static void backend_init(void) {
     families=calloc(n,sizeof(*families));if(!families)die("timestamp queue properties",n);
     vkGetPhysicalDeviceQueueFamilyProperties(G.physical,&n,families);G.timestamp_bits=families[G.family].timestampValidBits;free(families);
     VkDeviceCreateInfo di={.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,.queueCreateInfoCount=1,.pQueueCreateInfos=&qi,
-       .enabledExtensionCount=G.feedback_layout?2u:1u,.ppEnabledExtensionNames=de,.pEnabledFeatures=&enabled,.pNext=&draw_parameters}; CHECK(vkCreateDevice(G.physical,&di,NULL,&G.device));
+       .enabledExtensionCount=enabled_extensions,.ppEnabledExtensionNames=de,.pEnabledFeatures=&enabled,.pNext=G.null_descriptors?(void *)&robustness2:(void *)&draw_parameters}; CHECK(vkCreateDevice(G.physical,&di,NULL,&G.device));
+    fprintf(stderr,"[nvn-vulkan] null_descriptors=%d\n",G.null_descriptors);
+    fprintf(stderr,"[nvn-vulkan] shader_clip_distance=%d shader_cull_distance=%d\n",G.shader_clip_distance,G.shader_cull_distance);
     fprintf(stderr,"[nvn-vulkan] shader_draw_parameters=%d\n",G.shader_draw_parameters);
     fprintf(stderr,"[nvn-vulkan] attachment_feedback_layout=%d independent_blend=%u fragment_stores=%u\n",G.feedback_layout,enabled.independentBlend,enabled.fragmentStoresAndAtomics);
+    fprintf(stderr,"[nvn-vulkan] DEPTH_INPUT_EXPERIMENT requested=%d profile=%d depth_order=%d subtexel=%u subpixel=%u calibrated_ties=%d\n",G.depth_input_experiment,G.depth_input_profile,G.depth_order,G.properties.limits.subTexelPrecisionBits,G.properties.limits.subPixelPrecisionBits,G.depth_input_calibrated_ties);
     vkGetDeviceQueue(G.device,G.family,0,&G.queue);
     pipeline_cache_init();
     fprintf(stderr,"[nvn-vulkan] driver_pipeline_cache=%d\n",G.pipeline_cache!=VK_NULL_HANDLE);
@@ -589,7 +704,7 @@ static void backend_init(void) {
      if(G.diag_barrier)fprintf(stderr,"[nvn-vulkan] DIAG_BARRIER mode=%d (timing diagnostic only; GPU synchronization is intentionally incorrect)\n",G.diag_barrier);}
     VkCommandPoolCreateInfo ci={.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,.queueFamilyIndex=G.family,
        .flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT}; CHECK(vkCreateCommandPool(G.device,&ci,NULL,&S.command_pool));CHECK(vkCreateCommandPool(G.device,&ci,NULL,&G.submission_slot2.command_pool));
-    G.support=buffer_make(1392,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT); G.zero=buffer_make(65536,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    G.support=buffer_make(1392,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT); G.zero=buffer_make(65536,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
     for(int i=0;i<73;i++) { float one=1; memcpy(G.support.map+192+16*i,&one,4); }
     G.state.mask.mask=UINT32_MAX; G.state.polygon.mode=NVN_POLYGON_MODE_FILL;
     G.state.color.logic_op=NVN_LOGIC_OP_COPY;G.state.color.alpha_func=NVN_ALPHA_FUNC_ALWAYS;
@@ -635,8 +750,8 @@ static void pool_materialize(VPool *pool) {
     /* pool_read supplies every CPU-owned range before a GPU read, and queued
      * writes supply their own bytes. Touching the entire backing with memset
      * would commit hundreds of MiB that the game has not used. */
-    pool->v=buffer_create(pool->size,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT,0);
+    pool->v=buffer_create_kind(pool->size,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT,0,DM_VK_MEMORY_POOL);
     uint64_t logical=0,resident=0;for(int i=0;i<G.npool;i++){logical+=G.pools[i].size;resident+=G.pools[i].v.size;}
     fprintf(stderr,"[nvn-vulkan] POOL_MATERIALIZE bytes=%llu resident=%llu logical=%llu pools=%d\n",(unsigned long long)pool->size,(unsigned long long)resident,(unsigned long long)logical,G.npool);
 }
@@ -736,6 +851,7 @@ static VPool *pool_read_resolved(VPool *p,uint64_t addr,uint64_t len,uint64_t *o
     G.profile_pool_ns+=prof_now()-started;return p;
 }
 static VPool *pool_read(uint64_t addr,uint64_t len,uint64_t *off) {
+    VPool *override=ghost_pool_override(addr,len,off);if(override)return override;
     VPool *p=pool_find(addr,len,off);if(!p)die("unmapped NVN buffer range",addr);
     return pool_read_resolved(p,addr,len,off);
 }
@@ -814,7 +930,7 @@ static void attachment_ab_frame(uint64_t frame) {
         (unsigned long long)a->load_bytes_avoided,(unsigned long long)a->store_bytes_avoided);
     attachment_ab_poll(frame);
 }
-static void pass_end_at(int line) { if(S.in_pass) { G.pass_end_sites[line&4095]++;if(G.profile_detail&&G.profile_frames==30)fprintf(stderr,"[nvn-vulkan] PASSLOG seg=%u rt=%s ps=%.6s n=%d bb=%#x uses=%s draws=%llu end_line=%d\n",G.seg_index,G.pass_desc,G.last_ps,G.last_count,G.last_barrier_bits,G.last_uses,(unsigned long long)(G.draws-G.pass_draws0),line);occlusion_end();
+static void pass_end_at(int line) { if(S.in_pass) { ghost_flush();G.pass_end_sites[line&4095]++;if(G.profile_detail&&G.profile_frames==30)fprintf(stderr,"[nvn-vulkan] PASSLOG seg=%u rt=%s ps=%.6s n=%d bb=%#x uses=%s draws=%llu end_line=%d\n",G.seg_index,G.pass_desc,G.last_ps,G.last_count,G.last_barrier_bits,G.last_uses,(unsigned long long)(G.draws-G.pass_draws0),line);occlusion_end();
     if(S.pt_open&&S.pass_stats)vkCmdEndQuery(S.command,S.pass_stats,S.npt);
     vkCmdEndRenderPass(S.command); S.in_pass=0;
     if(S.pt_open){S.pt_open=0;vkCmdWriteTimestamp(S.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,S.pass_ts,S.pt[S.npt].q0+1);S.pt[S.npt].q1=S.pt[S.npt].q0+1;S.pt[S.npt].draws=G.draws-S.pt_draws0;S.npt++;} } }
@@ -903,7 +1019,7 @@ static void hz_pass_sync(void) {
     int wide=S.pend[HZ_GV].stages!=0;
     VkMemoryBarrier b={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=access,
         .dstAccessMask=wide?(VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT):
-            (VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_UNIFORM_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)};
+            (VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_INPUT_ATTACHMENT_READ_BIT|VK_ACCESS_UNIFORM_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)};
     vkCmdPipelineBarrier(S.command,src,wide?VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT:(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|HZ_ATT_STAGES),0,1,&b,0,NULL,0,NULL);
     S.pend[HZ_GV].stages=S.pend[HZ_GV].access=S.pend[HZ_GF].stages=S.pend[HZ_GF].access=0;G.profile_hz_barriers++;G.hz_count[wide?1:0]++;
 }
@@ -992,9 +1108,9 @@ static void submission_pools_create(VkSubmission *sub) {
     if(G.pass_stats){q.queryType=VK_QUERY_TYPE_PIPELINE_STATISTICS;q.queryCount=512;q.pipelineStatistics=PASS_STATS_FLAGS;CHECK(vkCreateQueryPool(G.device,&q,NULL,&sub->pass_stats));}
     VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,16384},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,8192},
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,16384},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,4096},{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,16384},
-      {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,4096},{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,4096}};
+      {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,4096},{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,4096},{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,4096}};
     VkDescriptorPoolCreateInfo d={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=8192,
-        .poolSizeCount=7,.pPoolSizes=sizes};CHECK(vkCreateDescriptorPool(G.device,&d,NULL,&sub->descriptors));
+        .poolSizeCount=sizeof sizes/sizeof sizes[0],.pPoolSizes=sizes};CHECK(vkCreateDescriptorPool(G.device,&d,NULL,&sub->descriptors));
     VkFenceCreateInfo f={.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};CHECK(vkCreateFence(G.device,&f,NULL,&sub->gpu_fence));
     G.profile_submission_creates++;
 }
@@ -1002,6 +1118,16 @@ static void submission_gpu_done(VkSubmission *sub) {
     if(sub->phase!=SUBMISSION_INFLIGHT || !pthread_equal(sub->recorder,pthread_self()))die("submission completion ownership",sub->epoch);
     /* Wait success, not a software ticket, establishes safe query/readback access. */
     CHECK(vkGetFenceStatus(G.device,sub->gpu_fence));sub->phase=SUBMISSION_GPU_DONE;
+    if(sub->depth_input_guard_active){
+        uint32_t failed=0;memcpy(&failed,sub->depth_input_guard.map,4);
+        if(failed){
+            /* The real fence also covers explicitly requested diagnostic
+             * captures. Preserve them without publishing any guest effects. */
+            trace_capture_complete(sub);
+            die("depth input projected sample outside calibrated device interval",failed);
+        }
+        fprintf(stderr,"[nvn-vulkan] DEPTH_INPUT_GUARD_PASS epoch=%llu\n",(unsigned long long)sub->epoch);
+    }
 }
 static void submission_publish(VkSubmission *sub) {
     if(sub->phase!=SUBMISSION_GPU_DONE || !pthread_equal(sub->recorder,pthread_self()))die("submission publication ownership",sub->epoch);
@@ -1027,7 +1153,7 @@ static void wb_stage_record(void) {
     if(S.wb_stage.size<total){
         if(S.wb_stage.b)buffer_free(&S.wb_stage);
         uint64_t want=total+(total>>1);if(want<(1ULL<<20))want=1ULL<<20;
-        G.want_cached=1;S.wb_stage=buffer_create(want,VK_BUFFER_USAGE_TRANSFER_DST_BIT,0);G.want_cached=0;
+        G.want_cached=1;S.wb_stage=buffer_create_kind(want,VK_BUFFER_USAGE_TRANSFER_DST_BIT,0,DM_VK_MEMORY_WRITEBACK);G.want_cached=0;
     }
     all_barrier();
     VkBufferCopy regions[64];uint32_t nregions=0;VkBuffer source=VK_NULL_HANDLE;uint64_t cursor=0;
@@ -1154,6 +1280,7 @@ static void sub_begin_ctx(VkSubmission *ctx) {
     S.pending_clear=0;S.flushing_clear=0;S.pass_discard=0;
     if(!G.present_count&&!attachment_ab_sequence)attachment_ab_poll(0);
     {int flags=atomic_load(&attachment_override);G.attachment_flags=flags<0?G.attachment_defaults:flags;atomic_store(&attachment_applied,G.attachment_flags);}
+    S.depth_input_guard_active=S.depth_input=S.pass_depth_input=0;
     S.ndriver_tables=0;memset(S.driver_table_slots,0,sizeof S.driver_table_slots);memset(S.last_driver_table,0,sizeof S.last_driver_table);
     S.nocc=S.ntime=0;S.ncounter=0;S.nbuffer_view=0;
     S.occlusion_reset_count=S.timestamp_reset_count=S.pass_reset_count=S.pass_stats_reset_count=0;
@@ -1343,6 +1470,10 @@ static VkFormat format(int nvn) {
     case NVN_FORMAT_RGB32F:return VK_FORMAT_R32G32B32_SFLOAT; case NVN_FORMAT_RGBA32F:return VK_FORMAT_R32G32B32A32_SFLOAT;
     case NVN_FORMAT_RGBA8:return VK_FORMAT_R8G8B8A8_UNORM; case NVN_FORMAT_RGBA8_SRGB:return VK_FORMAT_R8G8B8A8_SRGB;
     case NVN_FORMAT_RGBA8_UI2F:return VK_FORMAT_R8G8B8A8_USCALED;case NVN_FORMAT_RGBA8_I2F:return VK_FORMAT_R8G8B8A8_SSCALED;
+    case NVN_FORMAT_RGB10A2SN:return VK_FORMAT_A2B10G10R10_SNORM_PACK32;
+    case NVN_FORMAT_RGB10A2I:return VK_FORMAT_A2B10G10R10_SINT_PACK32;
+    case NVN_FORMAT_RGB10A2_UI2F:return VK_FORMAT_A2B10G10R10_USCALED_PACK32;
+    case NVN_FORMAT_RGB10A2_I2F:return VK_FORMAT_A2B10G10R10_SSCALED_PACK32;
     case NVN_FORMAT_DEPTH16:return VK_FORMAT_D16_UNORM; case NVN_FORMAT_DEPTH32F:return VK_FORMAT_D32_SFLOAT;
     case NVN_FORMAT_DEPTH24_STENCIL8:return VK_FORMAT_D24_UNORM_S8_UINT;
     case NVN_FORMAT_DEPTH32F_STENCIL8:return VK_FORMAT_D32_SFLOAT_S8_UINT;
@@ -1446,7 +1577,7 @@ static void refresh_compressed_cpu(VTexture *t,const tex_t *source) {
         all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);vkCmdCopyBufferToImage(S.command,staging->b,t->image,t->layout,count,regions);changed_regions+=count;
         free(regions);free(old);free(next);
     }
-    free(t->cpu_snapshot);t->cpu_snapshot=snapshot;t->upload_stamp=stamp;
+    texture_snapshot_set(t,snapshot,source->L.size);t->upload_stamp=stamp;
     if(changed_regions){tex_dirty(t);G.uploads++;fprintf(stderr,"[nvn-vulkan] BC_STREAM_REFRESH serial=%llu changed_regions=%u gpu_blocks_preserved=1\n",(unsigned long long)t->serial,changed_regions);}
     G.profile_decode_ns+=dm_android_nvn_clock_ns()-started;
 }
@@ -1510,7 +1641,7 @@ static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) 
     } else { t->format=format(source->d.format); t->bpp=source->L.bpb; }
     VkFormatProperties fp=format_properties(t->format);
     VkImageUsageFlags usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
-    if(aspect(t->format)&VK_IMAGE_ASPECT_DEPTH_BIT) usage|=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if(aspect(t->format)&VK_IMAGE_ASPECT_DEPTH_BIT){usage|=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;if(G.depth_order)usage|=VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;}
     else if(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     int attachment_image=(usage&(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))!=0;
     /* Retain STORAGE for guest IMAGE textures. A first late storage binding
@@ -1521,7 +1652,7 @@ static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) 
     t->usage=usage;
     if(usage&VK_IMAGE_USAGE_STORAGE_BIT)G.image_usage_storage++;
     else if(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)G.image_usage_omitted++;
-    texture_image_allocate(t,usage,&t->image,&t->memory,&t->view);
+    texture_image_allocate(t,usage,&t->image,&t->memory,&t->view,&t->allocation_size);
 upload_existing:
     if(upload) {
         uint32_t decoded_format=0;int decoded_bpp=0;
@@ -1532,7 +1663,7 @@ upload_existing:
         uint64_t stamp=nvn_dirty_now();nvn_dirty_protect(source->mem,source->L.size);
         const uint8_t *upload_memory=source->mem;
         if(upload_bc){uint8_t *snapshot=malloc(source->L.size);if(!snapshot)die("BC CPU baseline snapshot allocation",source->L.size);
-            memcpy(snapshot,source->mem,source->L.size);free(t->cpu_snapshot);t->cpu_snapshot=snapshot;upload_memory=snapshot;}
+            memcpy(snapshot,source->mem,source->L.size);texture_snapshot_set(t,snapshot,source->L.size);upload_memory=snapshot;}
         all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         uint64_t decode_start=dm_android_nvn_clock_ns();
         for(unsigned layer=0;layer<source->L.layers;layer++)for(unsigned level=0;level<source->d.levels;level++) {
@@ -1542,11 +1673,26 @@ upload_existing:
             uint8_t *linear=malloc(row*rows*z); if(!linear)die("texture decode allocation",row*rows*z);
             if(source->d.flags&NVN_TEXTURE_FLAGS_LINEAR) { free(linear); die("linear texture upload layout",source->d.flags); }
             if(nvn_deswizzle(&source->d,level,layer,upload_memory,linear,row))die("Tegra texture deswizzle",level);
+            VkImageAspectFlags upload_aspect=aspect(t->format);
+            if(upload_aspect&VK_IMAGE_ASPECT_STENCIL_BIT){
+                uint64_t pixels=(uint64_t)w*h*z;
+                if((t->format!=VK_FORMAT_D24_UNORM_S8_UINT||bb!=4)&&(t->format!=VK_FORMAT_D32_SFLOAT_S8_UINT||bb!=8))die("packaged depth/stencil upload format",source->d.format);
+                VBuffer *split=temporary(pixels*5,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+                for(uint64_t i=0;i<pixels;i++){
+                    uint32_t depth;memcpy(&depth,linear+i*bb,4);
+                    if(bb==4){split->map[pixels*4+i]=(uint8_t)(depth>>24);depth&=0xffffff;}
+                    else split->map[pixels*4+i]=linear[i*bb+4];
+                    memcpy(split->map+i*4,&depth,4);
+                }
+                free(linear);
+                VkBufferImageCopy copies[2]={
+                    {.imageSubresource={VK_IMAGE_ASPECT_DEPTH_BIT,level,layer,1},.imageExtent={w,h,z}},
+                    {.bufferOffset=pixels*4,.imageSubresource={VK_IMAGE_ASPECT_STENCIL_BIT,level,layer,1},.imageExtent={w,h,z}}};
+                vkCmdCopyBufferToImage(S.command,split->b,t->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,2,copies);continue;
+            }
             VBuffer *staging=temporary((uint64_t)w*h*z*t->bpp,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
             if(upload_bc) {for(unsigned slice=0;slice<z;++slice)if(nvn_bc_decode(source->d.format,linear+slice*row*rows,row,w,h,staging->map+(size_t)slice*w*h*t->bpp,(size_t)w*t->bpp))die("BC decode",source->d.format); }
             else memcpy(staging->map,linear,(size_t)w*h*z*t->bpp); free(linear);
-            VkImageAspectFlags upload_aspect=aspect(t->format);
-            if(upload_aspect&VK_IMAGE_ASPECT_STENCIL_BIT)die("packaged depth/stencil upload requires separate aspect conversion",source->d.format);
             VkBufferImageCopy copy={.imageSubresource={upload_aspect,level,layer,1},.imageExtent={w,h,z}};
             vkCmdCopyBufferToImage(S.command,staging->b,t->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
         }
@@ -1559,7 +1705,24 @@ static VTexture *texture_get(const tex_t *source,int upload) {
     return texture_acquire(source,upload,(TextureRef){0});
 }
 static VTexture *slot_texture(TSlot *slot,int upload) {
+    /* Ghost candidates retain the original draw's image incarnation/version.
+     * Re-uploading CPU storage here could both change that image and end the
+     * pass recursively; replay samples the already validated resident image. */
+    if(ghost.busy)upload=0;
     VTexture *t=texture_acquire(&slot->texture,upload,slot->resident);slot->resident=texture_reference(t);return t;
+}
+static uint64_t texture_derived_release(VTexture *t) {
+    uint64_t freed=(t->shadow?t->shadow_allocation_size:0)+(t->sample_copy?t->sample_allocation_size:0);
+    if(t->shadow){vkDestroyImageView(G.device,t->shadow_view,NULL);vkDestroyImage(G.device,t->shadow,NULL);
+        memory_release(t->shadow_memory,t->shadow_allocation_size,DM_VK_MEMORY_SHADOW);}
+    if(t->sample_copy){vkDestroyImageView(G.device,t->sample_view,NULL);vkDestroyImage(G.device,t->sample_copy,NULL);
+        memory_release(t->sample_memory,t->sample_allocation_size,DM_VK_MEMORY_SAMPLE_COPY);}
+    t->shadow=VK_NULL_HANDLE;t->shadow_view=VK_NULL_HANDLE;t->shadow_memory=VK_NULL_HANDLE;t->shadow_allocation_size=0;
+    t->shadow_layout=VK_IMAGE_LAYOUT_UNDEFINED;t->shadow_version=0;
+    t->sample_copy=VK_NULL_HANDLE;t->sample_view=VK_NULL_HANDLE;t->sample_memory=VK_NULL_HANDLE;t->sample_allocation_size=0;
+    t->sample_layout=VK_IMAGE_LAYOUT_UNDEFINED;t->sample_other=0;t->sc_valid=0;
+    t->sc_level=t->sc_levels=t->sc_layer=t->sc_layers=0;
+    return freed;
 }
 void mtl_tex_release(tex_t *source) {
     if(G.active) die("texture release during submission",source->serial);
@@ -1568,11 +1731,9 @@ void mtl_tex_release(tex_t *source) {
        /* Both slots have completed and published after async_drain_locked.
         * Clear dependent framebuffers/views before destroying any image. */
        resource_cache_clear(&G.submission_slot);resource_cache_clear(&G.submission_slot2);
-       free(t->cpu_snapshot);
-       if(t->before_storage){vkDestroyImageView(G.device,t->before_storage_view,NULL);vkDestroyImage(G.device,t->before_storage,NULL);vkFreeMemory(G.device,t->before_storage_memory,NULL);G.image_retired_live--;}
-       if(t->shadow){vkDestroyImageView(G.device,t->shadow_view,NULL);vkDestroyImage(G.device,t->shadow,NULL);vkFreeMemory(G.device,t->shadow_memory,NULL);}
-       if(t->sample_copy){vkDestroyImageView(G.device,t->sample_view,NULL);vkDestroyImage(G.device,t->sample_copy,NULL);vkFreeMemory(G.device,t->sample_memory,NULL);}
-       vkDestroyImageView(G.device,t->view,NULL); vkDestroyImage(G.device,t->image,NULL); vkFreeMemory(G.device,t->memory,NULL);
+       if(t->before_storage){vkDestroyImageView(G.device,t->before_storage_view,NULL);vkDestroyImage(G.device,t->before_storage,NULL);memory_release(t->before_storage_memory,t->before_storage_allocation_size,DM_VK_MEMORY_TEXTURE);G.image_retired_live--;}
+       texture_snapshot_set(t,NULL,0);texture_derived_release(t);
+       vkDestroyImageView(G.device,t->view,NULL); vkDestroyImage(G.device,t->image,NULL); memory_release(t->memory,t->allocation_size,DM_VK_MEMORY_TEXTURE);
        G.texture_free[G.texture_free_count++]=(uint32_t)(t-G.textures);t->serial=0;G.ntexture--;G.texture_table[slot]=UINT32_MAX;G.registry_revision++;
     }
     pthread_mutex_unlock(&G.lock);
@@ -1586,6 +1747,7 @@ void mtl_reg_tex(int id,const tex_t *t,const view_t *v) {
 static VkSamplerAddressMode wrap(unsigned w) { switch(w) {
     case NVN_WRAP_MODE_REPEAT:return VK_SAMPLER_ADDRESS_MODE_REPEAT;
     case NVN_WRAP_MODE_MIRRORED_REPEAT:return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case NVN_WRAP_MODE_MIRROR_CLAMP_TO_EDGE:if(!G.mirror_clamp)die("sampler mirror clamp extension unavailable",w);return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
     case NVN_WRAP_MODE_CLAMP_TO_EDGE:return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     case NVN_WRAP_MODE_CLAMP_TO_BORDER:return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;default:die("sampler wrap mode",w); } }
 void mtl_reg_samp(int id,const samp_par *p) {
@@ -1642,8 +1804,11 @@ void mtl_set_tex_pool_n(int n) {
 
 static uint8_t *read_file(const char *name,size_t *size) {
     char path[1200]; if(!G.shader_root[0] || snprintf(path,sizeof(path),"%s/%s",G.shader_root,name)>=(int)sizeof(path))die("shader cache path",0);
-    FILE *f=fopen(path,"rb"); if(!f)die(path,0); if(fseek(f,0,SEEK_END))die("shader cache seek",0);
-    long n=ftell(f); if(n<0 || n>64*1024*1024 || fseek(f,0,SEEK_SET))die("shader cache file size",n);
+    FILE *f=fopen(path,"rb"); if(!f)die(path,errno); if(fseek(f,0,SEEK_END))die("shader cache seek",0);
+    /* Full-code indexes include original NVN bytecode for every program;
+     * the complete title cache exceeds the per-module payload limit. */
+    long limit=!strcmp(name,"shader_index.bin")?128L*1024*1024:64L*1024*1024;
+    long n=ftell(f); if(n<0 || n>limit || fseek(f,0,SEEK_SET))die("shader cache file size",n);
     uint8_t *bytes=malloc(n?n:1); if(!bytes || fread(bytes,1,n,f)!=(size_t)n)die("shader cache read",n);
     fclose(f);*size=n;return bytes;
 }
@@ -1683,10 +1848,34 @@ static uint8_t *buffer_image_module(uint8_t *bytes,size_t *size,VShader *shader)
     fprintf(stderr,"[nvn-vulkan] samplerless buffer adaptation shader=%s descriptors=%u extractions=%u\n",shader->key,count,extracts);
     free(definition);free(variable);free(loaded);free(pointers);free(bytes);*size=at*4;return (uint8_t *)out;
 }
+void dm_vk_program_capture(const NVNshaderData *shaders,int count) {
+    const char *root=getenv("DM_SHADER_CAPTURE_ROOT");if(!root)return;
+    pthread_mutex_lock(&G.lock);
+    static unsigned sequence;
+    for(int i=0;i<count;i++) {
+        const uint8_t *control=shaders[i].control;uint32_t size,offset;
+        if(!control)die("capture null shader control",i);
+        memcpy(&size,control+0x704,4);memcpy(&offset,control+0x708,4);
+        uint64_t pool_offset=0;VPool *pool=pool_find(shaders[i].data,size,&pool_offset);
+        if(!size || size>16*1024*1024 || !pool)die("capture invalid shader pool range",shaders[i].data);
+        const uint8_t *code=pool->guest+pool_offset;
+        char file[1200];unsigned current=sequence++;
+        fprintf(stderr,"[nvn-vulkan] SHADER_CAPTURE sequence=%u address=%#llx size=%u program_offset=%u first=%02x%02x%02x%02x\n",current,(unsigned long long)shaders[i].data,size,offset,code[0],code[1],code[2],code[3]);
+        snprintf(file,sizeof file,"%s/shader-%u.control.bin",root,current);FILE *f=fopen(file,"wb");
+        if(!f || fwrite(control,1,0x880,f)!=0x880 || fclose(f))die("capture control write",current);
+        snprintf(file,sizeof file,"%s/shader-%u.code.bin",root,current);f=fopen(file,"wb");
+        if(!f || fwrite(code,1,size,f)!=size || fclose(f))die("capture code write",current);
+    }
+    pthread_mutex_unlock(&G.lock);
+}
 static uint64_t control_hash(const void *control,uint32_t stage) {
     const uint8_t *bytes=control;uint64_t hash=14695981039346656037ULL^stage;
     for(unsigned i=0;i<0x880;i++){hash^=bytes[i];hash*=1099511628211ULL;}return hash;
 }
+static uint64_t shader_code_hash(uint64_t hash,const uint8_t *code,uint32_t size) {
+    for(uint32_t i=0;i<size;i++){hash^=code[i];hash*=1099511628211ULL;}return hash;
+}
+static const uint8_t *indexed_control(const uint8_t *entry) {return entry+(G.shader_index_version==2?24:20);}
 static BindingPlan *binding_plan_compile(VShader *s) {
     size_t bytes=sizeof(BindingPlan)+(size_t)s->h.nb*sizeof(BindingResource);
     BindingPlan *plan=calloc(1,bytes);if(!plan)die("shader binding plan allocation",bytes);
@@ -1694,7 +1883,7 @@ static BindingPlan *binding_plan_compile(VShader *s) {
     for(uint32_t i=0;i<s->h.nb;i++){
         const RBinding *b=&s->b[i];
         if(b->kind==2||b->kind==3||b->kind==9||b->kind==10)plan->buffers[plan->nbuffer++]=(uint8_t)i;
-        else if(b->kind==4||b->kind==6)plan->images[plan->nimage++]=(uint8_t)i;
+        else if(b->kind==4||b->kind==6||b->kind==11)plan->images[plan->nimage++]=(uint8_t)i;
         else if(b->kind==8)plan->drivers[plan->ndriver++]=(uint8_t)i;
         if(b->kind==1||b->kind==7)continue;
         if(b->kind==2&&b->type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER&&b->slot>=0&&b->slot<16)continue;
@@ -1703,28 +1892,53 @@ static BindingPlan *binding_plan_compile(VShader *s) {
     }
     return plan;
 }
-static const uint8_t *shader_entry(const void *control,uint32_t stage) {
+static const uint8_t *shader_entry(const void *control,uint32_t stage,uint64_t address) {
     if(!control)die("null shader control",stage);
     if(!G.shader_index) { G.shader_index=read_file("shader_index.bin",&G.index_bytes);
         if(G.index_bytes<12)die("shader index header",G.index_bytes); uint32_t *h=(uint32_t *)G.shader_index;
-        if(h[0]!=0x494b5644 || h[1]!=1 || G.index_bytes!=12+(size_t)h[2]*(20+0x880))die("shader index schema",h[0]); }
+        if(h[0]!=0x494b5644 || (h[1]!=1&&h[1]!=2) || (h[1]==1 && G.index_bytes!=12+(size_t)h[2]*(20+0x880)))die("shader index schema",h[0]);
+        G.shader_index_version=h[1];
+        if(G.shader_code_identity && h[1]!=2)die("title requires full-code shader identity",h[1]); }
     if(!G.shader_entries){
         uint32_t count=((uint32_t *)G.shader_index)[2];if(count>1000000)die("shader control index count",count);
         size_t capacity=16;while(capacity<(size_t)count*2)capacity*=2;
         G.shader_entries=calloc(capacity,sizeof(*G.shader_entries));if(!G.shader_entries)die("shader control index allocation",capacity);
-        G.shader_entry_capacity=capacity;const uint8_t *entry=G.shader_index+12;
-        for(uint32_t i=0;i<count;i++,entry+=20+0x880){uint32_t st;memcpy(&st,entry+16,4);uint64_t hash=control_hash(entry+20,st);size_t slot=hash&(capacity-1);
+        G.shader_entry_capacity=capacity;size_t cursor=12;
+        for(uint32_t i=0;i<count;i++){
+            nvn_shader_index_record record;
+            if(!nvn_shader_index_read(G.shader_index,G.index_bytes,G.shader_index_version,&cursor,&record))die("shader index record validation",i);
+            const uint8_t *entry=record.entry;
+            uint64_t hash=control_hash(record.control,record.stage);
+            if(record.code_size)hash=shader_code_hash(hash,record.code,record.code_size);
+            size_t slot=hash&(capacity-1);
             while(G.shader_entries[slot].entry){const uint8_t *old=G.shader_entries[slot].entry;
-                if(G.shader_entries[slot].hash==hash&&!memcmp(old+16,entry+16,4+0x880))break;
+                if(G.shader_entries[slot].hash==hash){size_t old_cursor=(size_t)(old-G.shader_index);nvn_shader_index_record previous;
+                    if(!nvn_shader_index_read(G.shader_index,G.index_bytes,G.shader_index_version,&old_cursor,&previous))die("shader index previous record",i);
+                    if(nvn_shader_index_equal(&record,&previous))break;}
                 slot=(slot+1)&(capacity-1);}
             /* Preserve the first matching verified entry, including duplicates. */
             if(!G.shader_entries[slot].entry)G.shader_entries[slot]=(ShaderEntry){entry,hash};
         }
-        fprintf(stderr,"[nvn-vulkan] SHADER_CONTROL_INDEX entries=%u slots=%zu bytes=%zu full_control_verified=1\n",count,capacity,capacity*sizeof(*G.shader_entries));
+        if(cursor!=G.index_bytes)die("shader index trailing data",cursor);
+        fprintf(stderr,"[nvn-vulkan] SHADER_CONTROL_INDEX version=%u entries=%u slots=%zu bytes=%zu full_code_verified=%d\n",G.shader_index_version,count,capacity,capacity*sizeof(*G.shader_entries),G.shader_index_version==2);
     }
-    uint64_t hash=control_hash(control,stage);size_t slot=hash&(G.shader_entry_capacity-1);
+    uint32_t code_size=0;const uint8_t *code=NULL;
+    uint64_t hash=control_hash(control,stage);
+    if(G.shader_index_version==2) {
+        uint32_t nvn_stage;memcpy(&nvn_stage,(const uint8_t *)control+0x714,4);
+        if(nvn_stage!=stage)return NULL;
+        memcpy(&code_size,(const uint8_t *)control+0x704,4);uint64_t offset=0;
+        VPool *pool=pool_find(address,code_size,&offset);
+        if(!pool || !code_size || code_size>16*1024*1024)die("shader identity GPU code range",address);
+        code=pool->guest+offset;hash=shader_code_hash(hash,code,code_size);
+    }
+    size_t slot=hash&(G.shader_entry_capacity-1);
     while(G.shader_entries[slot].entry){ShaderEntry *candidate=&G.shader_entries[slot];uint32_t st;memcpy(&st,candidate->entry+16,4);
-        if(candidate->hash==hash&&st==stage&&!memcmp(candidate->entry+20,control,0x880))return candidate->entry;
+        const uint8_t *ctrl=indexed_control(candidate->entry);
+        if(candidate->hash==hash&&st==stage&&!memcmp(ctrl,control,0x880)) {
+            uint32_t stored=0;if(G.shader_index_version==2)memcpy(&stored,candidate->entry+20,4);
+            if(G.shader_index_version==1 || (stored==code_size && !memcmp(ctrl+0x880,code,code_size)))return candidate->entry;
+        }
         slot=(slot+1)&(G.shader_entry_capacity-1);}
     return NULL;
 }
@@ -1745,10 +1959,14 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
        if(cap>=61&&cap<=68){const VkSubgroupFeatureFlags features[]={VK_SUBGROUP_FEATURE_BASIC_BIT,VK_SUBGROUP_FEATURE_VOTE_BIT,VK_SUBGROUP_FEATURE_ARITHMETIC_BIT,VK_SUBGROUP_FEATURE_BALLOT_BIT,VK_SUBGROUP_FEATURE_SHUFFLE_BIT,VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT,VK_SUBGROUP_FEATURE_CLUSTERED_BIT,VK_SUBGROUP_FEATURE_QUAD_BIT};feature=features[cap-61];}
        if(feature && (G.subgroup.supportedStages&(stage==5?VK_SHADER_STAGE_COMPUTE_BIT:stage==1?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_VERTEX_BIT)) && (G.subgroup.supportedOperations&feature))continue;
        if(cap==51 && stage==1)continue; /* DerivativeControl is core fragment functionality. */
-       if(cap==4427 && stage==0 && G.shader_draw_parameters)continue; /* BaseVertex/BaseInstance/DrawIndex use actual Vulkan draw arguments. */
+       if(cap==4427 && stage==0 && (G.shader_draw_parameters||G.portable_draw_parameters))continue; /* Actual draw arguments, native or specialized. */
+       if(cap==25 && G.shader_image_gather_extended)continue;
+       /* Check actual clip/cull declarations after portable normalization;
+        * the cache may contain unused per-vertex block members. */
+       if(cap==32 || cap==33)continue;
        if(cap!=1 && cap!=46 && cap!=47 && cap!=50 && cap!=55 && cap!=56){fprintf(stderr,"[nvn-vulkan] shader feature key=%s stage=%u cap=%u\n",key,stage,cap);die("shader feature needs device/semantic adaptation",cap);}
     }
-    if(s->h.c1n&&!warm){s->c1=buffer_make(65536,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);memcpy(s->c1.map,p,s->h.c1n);}free(bytes);
+    if(s->h.c1n&&!warm){s->c1=buffer_make(65536,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT);memcpy(s->c1.map,p,s->h.c1n);}free(bytes);
     if(s->h.reserved) {
         /* Metadata records the exact uncompressed size. zlib validates gzip
          * CRC32 and ISIZE; reject trailing/concatenated streams and short data.
@@ -1767,6 +1985,49 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         size=expected_size;
     } else {snprintf(name,sizeof(name),"%s.spv",key);bytes=read_file(name,&size);}
     if(size%4 || size<20 || ((uint32_t *)bytes)[0]!=0x07230203)die("SPIR-V module",size);
+    if(!G.shader_clip_distance||!G.shader_cull_distance){
+        const char *error=NULL;size_t words=0;uint32_t removed=0;
+        if(stage==0&&!G.shader_clip_distance){
+            uint32_t *module=nvn_vk_redundant_clip((const uint32_t *)bytes,size/4,&words,&s->requires_native_depth_clip,&error);
+            if(!module){fprintf(stderr,"[nvn-vulkan] CLIP_PROOF_REJECT shader=%s reason=%s\n",s->key,error);die("redundant clip module",0);}
+            if(words!=size/4)fprintf(stderr,"[nvn-vulkan] REDUNDANT_CLIP_REMOVED shader=%s native_depth_clip_required=%d\n",s->key,s->requires_native_depth_clip);
+            free(bytes);bytes=(uint8_t *)module;size=words*4;
+        }
+        uint32_t *module=nvn_vk_unused_distance((const uint32_t *)bytes,size/4,&words,&removed,&error);
+        if(!module){fprintf(stderr,"[nvn-vulkan] UNUSED_DISTANCE_REJECT shader=%s reason=%s\n",s->key,error);die("unused distance module",0);}
+        if(removed)fprintf(stderr,"[nvn-vulkan] UNUSED_DISTANCE_REMOVED shader=%s mask=%u\n",s->key,removed);
+        free(bytes);bytes=(uint8_t *)module;size=words*4;
+    }
+    size_t distance_words=0;uint32_t distance_mask=0;const char *distance_error=NULL;
+    uint32_t *distance_module=nvn_vk_distance_capabilities((const uint32_t *)bytes,size/4,&distance_words,&distance_mask,&distance_error);
+    if(!distance_module){fprintf(stderr,"[nvn-vulkan] DISTANCE_CAPABILITY_REJECT shader=%s reason=%s\n",s->key,distance_error);die("distance capability module",0);}
+    if(((distance_mask&NVN_DISTANCE_CLIP)&&!G.shader_clip_distance)||((distance_mask&NVN_DISTANCE_CULL)&&!G.shader_cull_distance)){
+        fprintf(stderr,"[nvn-vulkan] DISTANCE_FEATURE_UNAVAILABLE shader=%s stage=%u required=%u\n",s->key,stage,distance_mask);
+        die("shader clip/cull distance feature unavailable",distance_mask);
+    }
+    if(distance_words!=size/4)fprintf(stderr,"[nvn-vulkan] DISTANCE_CAPABILITY_REPAIR shader=%s mask=%u\n",s->key,distance_mask);
+    free(bytes);bytes=(uint8_t *)distance_module;size=distance_words*4;
+    if(stage==0){
+        const uint32_t *w=(const uint32_t *)bytes;uint32_t bound=w[3];if(!bound||bound>1000000)die("vertex input type bound",bound);
+        uint8_t *kind=calloc(bound,1),*input=calloc(bound,1);uint32_t *location=malloc((size_t)bound*4);
+        if(!kind||!input||!location)die("vertex input reflection allocation",bound);
+        for(uint32_t i=0;i<bound;i++)location[i]=UINT32_MAX;
+        for(size_t at=5;at<size/4;){uint32_t n=w[at]>>16,op=w[at]&0xffff;const uint32_t *a=w+at;
+            if(!n||n>size/4-at)die("vertex input reflection shape",at);
+            if(op==71&&n==4&&a[1]<bound&&a[2]==30)location[a[1]]=a[3];
+            if(op==22&&n==3&&a[1]<bound&&a[2]==32)kind[a[1]]=1;
+            if(op==21&&n==4&&a[1]<bound&&a[2]==32)kind[a[1]]=a[3]?2:3;
+            if(op==23&&n==4&&a[1]<bound&&a[2]<bound)kind[a[1]]=kind[a[2]];
+            if(op==32&&n==4&&a[1]<bound&&a[3]<bound)kind[a[1]]=kind[a[3]];
+            if(op==59&&n>=4&&a[1]<bound&&a[2]<bound&&a[3]==1){kind[a[2]]=kind[a[1]];input[a[2]]=1;}
+            at+=n;
+        }
+        for(uint32_t i=0;i<s->h.na;i++){uint32_t found=0;
+            for(uint32_t id=1;id<bound;id++)if(input[id]&&location[id]==s->attr[i][0]){if(!kind[id]||found)die("vertex input numeric type",id);s->attr[i][1]=kind[id]-1;found=1;}
+            if(!found)die("vertex attribute reflection missing",s->attr[i][0]);
+        }
+        free(kind);free(input);free(location);
+    }
     bytes=buffer_image_module(bytes,&size,s);
     if(stage==5&&nvn_vk_quirk_enabled(&G.quirks,NVN_VK_QUIRK_LOWER_COMPUTE_BALLOT)){
         unsigned ballots=0;uint8_t *adapted=dm_compute_ballot_apply(bytes,&size,&ballots);
@@ -1778,6 +2039,21 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         unsigned accesses=0;uint8_t *adapted=dm_skin_ubo_apply(bytes,&size,&accesses);
         if(!adapted)die("skin UBO adaptation bounds/interface",0);bytes=adapted;
         if(accesses)fprintf(stderr,"[nvn-vulkan] SKIN_UBO_VEC4_EXTRACT shader=%s accesses=%u driver=Qualcomm bytes=%zu\n",key,accesses,size);
+    }
+    NvnVkImageType image_types[64];size_t image_count=0;const char *image_error=NULL;
+    if(!nvn_vk_image_types((const uint32_t *)bytes,size/4,image_types,&image_count,&image_error)){
+        fprintf(stderr,"[nvn-vulkan] IMAGE_TYPE_REFLECTION_REJECT shader=%s reason=%s\n",s->key,image_error);
+        die("shader image type reflection",0);
+    }
+    for(size_t j=0;j<image_count;j++)for(unsigned i=0;i<s->h.nb;i++)
+        if(s->b[i].set==image_types[j].descriptor_set&&s->b[i].binding==image_types[j].binding){
+            if(s->image_type_mask&(1ull<<i))die("duplicate shader image type",i);
+            s->image_types[i]=image_types[j];s->image_type_mask|=1ull<<i;
+        }
+    if(stage==0&&G.portable_draw_parameters){
+        size_t count=0;uint32_t *lowered=nvn_vk_draw_parameters((const uint32_t *)bytes,size/4,&count,&s->draw_parameter_mask);
+        if(!lowered)die("portable draw parameter module",0);free(bytes);bytes=(uint8_t *)lowered;size=count*4;
+        if(s->draw_parameter_mask)fprintf(stderr,"[nvn-vulkan] PORTABLE_DRAW_PARAMETERS shader=%s mask=%u\n",s->key,s->draw_parameter_mask);
     }
     uint32_t *words=(uint32_t *)bytes;int fetch=0,sampling=0;
     for(size_t offset=5;offset<size/4;) {
@@ -1821,8 +2097,12 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
             if(b->slot==0){unsigned base=stage==5?0x310:stage==1?0x510:0x110;
                 valid=offset>=base && offset<base+256 && (offset-base)%16<12;
                 if(stage==5 && offset>=0x210 && offset<0x310 && (offset-0x210)%16<12)valid=1;
+                /* clustered_culling's original code computes flattened global
+                 * index = globalY * (c0[0x200] * localSizeX) + globalX.
+                 * This field is the live X workgroup count, not a zero word. */
+                if(stage==5 && (offset==0x200||offset==0x204))valid=1;
             }else valid=(offset>=0x120&&offset<0x168&&(offset-0x120)%8==0)||(offset>=0x168&&offset<0x568&&(offset-0x168)%8==0)||(offset>=0x568&&offset<0x968&&(offset-0x568)%8==0);
-            if(!valid)die("driver constant access outside verified binding tables",offset);
+            if(!valid){fprintf(stderr,"[nvn-vulkan] DRIVER_UNMAPPED shader=%s stage=%u bank=%d binding=%u offset=%llu\n",s->key,stage,b->slot,b->binding,(unsigned long long)offset);die("driver constant access outside verified binding tables",offset);}
         }
     }
     free(constants);free(known);
@@ -1833,7 +2113,7 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         if(s->storage_bias.mask)fprintf(stderr,"[nvn-vulkan] STORAGE_BIAS_MODULE shader=%s mask=%#llx bytes=%zu\n",s->key,(unsigned long long)s->storage_bias.mask,size);
     }
     const char *dump=getenv("DM_ADAPTED_SHADER_DIR");
-    if(dump&&!warm&&s->storage_bias.mask){char path[1200];if(snprintf(path,sizeof(path),"%s/%s.spv",dump,s->key)>=(int)sizeof path)die("adapted shader dump path",0);
+    if(dump&&!warm){char path[1200];if(snprintf(path,sizeof(path),"%s/%s.spv",dump,s->key)>=(int)sizeof path)die("adapted shader dump path",0);
         FILE *out=fopen(path,"wb");if(!out||fwrite(bytes,1,size,out)!=size)die("adapted shader dump",size);fclose(out);}
     VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=size,.pCode=(uint32_t *)bytes};
     CHECK(vkCreateShaderModule(G.device,&mi,NULL,&s->module));
@@ -1843,7 +2123,8 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         for(unsigned i=0;i<s->h.na;i++){unsigned l=s->attr[i][0];if(l>=16||!s->vertex_inputs[l].type||(locations&(1u<<l)))die("vertex input metadata/IR mismatch",l);locations|=1u<<l;}
         for(unsigned l=0;l<16;l++)if(s->vertex_inputs[l].type&&!(locations&(1u<<l)))die("vertex input missing metadata",l);
         s->vertex_spv=bytes;s->vertex_bytes=size;
-    }else free(bytes);
+    }
+    s->spirv=(uint32_t *)bytes;s->spirv_words=size/4;
     fprintf(stderr,"[nvn-vulkan] original shader key=%s stage=%u loaded\n",s->key,stage);
     VkDescriptorSetLayoutBinding bindings[LIMIT_BINDINGS];for(uint32_t i=0;i<s->h.nb;i++){
        if(s->b[i].count!=1 || s->b[i].set!=(stage==1?1u:0u))die("shader descriptor set/count",s->b[i].set);
@@ -1851,13 +2132,22 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
     VkDescriptorSetLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=s->h.nb,.pBindings=bindings};
     CHECK(vkCreateDescriptorSetLayout(G.device,&li,NULL,&s->layout));if(!warm)s->plan=binding_plan_compile(s);
 }
-static VkShaderModule vertex_module(VShader *s,const NvnVkVertexAdapt *plan) {
+static VkShaderModule shader_module(VShader *s,uint64_t mask);
+static VkShaderModule vertex_module(VShader *s,const NvnVkVertexAdapt *plan,uint64_t null_bindings) {
     unsigned active=plan->split;for(unsigned l=0;l<16;l++)active|=plan->convert[l];
-    if(!active)return s->module;
-    for(VertexModule *v=s->vertex_modules;v;v=v->next)if(!memcmp(&v->plan,plan,sizeof *plan))return v->module;
+    if(!active)return shader_module(s,null_bindings);
+    for(VertexModule *v=s->vertex_modules;v;v=v->next)if(v->null_bindings==null_bindings&&!memcmp(&v->plan,plan,sizeof *plan))return v->module;
     size_t bytes=s->vertex_bytes;uint8_t *adapted=nvn_vk_vertex_adapt(s->vertex_spv,&bytes,plan);
     if(!adapted)die("vertex input adaptation unsupported SPIR-V pointer/interface",plan->split);
-    VertexModule *v=calloc(1,sizeof *v);if(!v)die("vertex shader variant allocation",0);v->plan=*plan;
+    if(null_bindings){
+        uint32_t bindings[LIMIT_BINDINGS];size_t count=0;
+        for(unsigned i=0;i<s->h.nb;i++)if(null_bindings&(1ull<<i))bindings[count++]=s->b[i].binding;
+        uint32_t *lowered=NULL;size_t words=0;const char *error=NULL;
+        if(!nvn_vk_null_shader((const uint32_t *)adapted,bytes/4,bindings,count,&lowered,&words,&error)){
+            fprintf(stderr,"[nvn-vulkan] NULL_VERTEX_REJECT shader=%s reason=%s\n",s->key,error);die("vertex/null shader adaptation",0);}
+        free(adapted);adapted=(uint8_t *)lowered;bytes=words*4;
+    }
+    VertexModule *v=calloc(1,sizeof *v);if(!v)die("vertex shader variant allocation",0);v->plan=*plan;v->null_bindings=null_bindings;
     VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=bytes,.pCode=(uint32_t *)adapted};
     CHECK(vkCreateShaderModule(G.device,&mi,NULL,&v->module));
     uint32_t u=0,i=0;for(unsigned l=0;l<16;l++){if(plan->convert[l]==1)u|=1u<<l;if(plan->convert[l]==2)i|=1u<<l;}
@@ -1867,12 +2157,65 @@ static VkShaderModule vertex_module(VShader *s,const NvnVkVertexAdapt *plan) {
     fprintf(stderr,"[nvn-vulkan] VERTEX_INPUT_ADAPT shader=%s split=%#x unsigned=%#x signed=%#x bytes=%zu\n",s->key,plan->split,u,i,bytes);
     return v->module;
 }
-static VShader *shader_get(const void *control,uint32_t stage) {
-    const uint8_t *entry=shader_entry(control,stage);if(!entry)die("original shader not in verified Vulkan cache",stage);
+static VShader *shader_get(const uint8_t *entry,uint32_t stage) {
+    if(!entry)die("original shader not in verified Vulkan cache",stage);
     char key[17]={0};memcpy(key,entry,16);
     for(int i=0;i<G.nshader;i++)if(!strcmp(G.shaders[i].key,key))return &G.shaders[i];
     if(G.nshader==LIMIT_OBJECTS)die("shader object limit",G.nshader);
-    VShader *s=&G.shaders[G.nshader++];shader_load_into(s,key,stage,0);return s;
+    VShader *s=&G.shaders[G.nshader++];s->identity=G.nshader;shader_load_into(s,key,stage,0);return s;
+}
+static VkShaderModule shader_module(VShader *s,uint64_t mask) {
+    if(!mask)return s->module;
+    for(NvnNullModule *v=s->null_modules;v;v=v->next)if(v->mask==mask)return v->module;
+    if(!s->spirv||s->null_module_count>=64)die("portable null shader variant limit",s->null_module_count);
+    uint32_t bindings[LIMIT_BINDINGS];size_t n=0;
+    for(uint32_t i=0;i<s->h.nb;i++)if(mask&(1ull<<i))bindings[n++]=s->b[i].binding;
+    uint32_t *words=NULL;size_t length=0;const char *error=NULL;
+    if(!nvn_vk_null_shader(s->spirv,s->spirv_words,bindings,n,&words,&length,&error)){
+        fprintf(stderr,"[nvn-vulkan] NULL_SHADER_REJECT shader=%s mask=%#llx reason=%s\n",s->key,(unsigned long long)mask,error);die("portable null shader lowering",0);
+    }
+    const char *dump=getenv("DM_ADAPTED_SHADER_DIR");if(dump){char path[1200];snprintf(path,sizeof path,"%s/%s-null-%llx.spv",dump,s->key,(unsigned long long)mask);FILE *f=fopen(path,"wb");if(!f||fwrite(words,4,length,f)!=length||fclose(f))die("null shader diagnostic output",0);}
+    NvnNullModule *v=calloc(1,sizeof *v);if(!v)die("portable null shader allocation",0);
+    VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=length*4,.pCode=words};
+    CHECK(vkCreateShaderModule(G.device,&mi,NULL,&v->module));free(words);
+    v->mask=mask;v->next=s->null_modules;s->null_modules=v;s->null_module_count++;
+    fprintf(stderr,"[nvn-vulkan] PORTABLE_NULL_SHADER shader=%s mask=%#llx words=%zu\n",s->key,(unsigned long long)mask,length);return v->module;
+}
+/* Explicit, device-calibrated experiment. The base shader and its descriptor
+ * ABI remain immutable; no other draw can inherit this input attachment. */
+enum { RESOURCE_DEPTH_INPUT=12,RESOURCE_DEPTH_GUARD=13 };
+static VShader *depth_input_shader(VShader *base) {
+    if(base->depth_input_variant)return base->depth_input_variant;
+    if(!base->spirv||base->h.stage!=1||base->h.nb>=LIMIT_BINDINGS)
+        die("depth input shader source/binding capacity",base->h.nb);
+    unsigned target=LIMIT_BINDINGS;
+    for(unsigned i=0;i<base->h.nb;i++){
+        if(base->b[i].binding==63)die("depth input guard binding collision",63);
+        if(base->b[i].set==1&&base->b[i].binding==3&&base->b[i].kind==4)target=i;
+    }
+    if(target==LIMIT_BINDINGS)die("depth input source descriptor",3);
+    NvnVkDepthInputGuard guard={1,63,1280,720,1.0f/512.0f,1.0f/512.0f};
+    NvnVkDepthInputGuardInfo info;size_t words=0;const char *error=NULL;
+    uint32_t *code=G.depth_input_calibrated_ties?
+        nvn_vk_depth_input_calibrated_ties_guarded_variant(base->spirv,base->spirv_words,1,3,0,&guard,&words,&info,&error):
+        nvn_vk_depth_input_guarded_variant(base->spirv,base->spirv_words,1,3,0,&guard,&words,&info,&error);
+    if(!code){fprintf(stderr,"[nvn-vulkan] DEPTH_INPUT_REJECT shader=%s reason=%s\n",base->key,error);die("guarded depth input shader lowering",0);}
+    VShader *s=malloc(sizeof *s);if(!s)die("depth input shader allocation",0);*s=*base;
+    s->identity=base->identity|0x80000000u;s->depth_input=1;s->depth_input_variant=NULL;
+    s->module=VK_NULL_HANDLE;s->layout=VK_NULL_HANDLE;s->spirv=code;s->spirv_words=words;
+    s->null_modules=NULL;s->null_module_count=0;s->plan=NULL;
+    s->b[target].kind=RESOURCE_DEPTH_INPUT;s->b[target].type=VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+    s->b[s->h.nb++]=(RBinding){1,63,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,RESOURCE_DEPTH_GUARD,-1,-1,1,0};
+    VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=words*4,.pCode=code};
+    CHECK(vkCreateShaderModule(G.device,&mi,NULL,&s->module));
+    VkDescriptorSetLayoutBinding bindings[LIMIT_BINDINGS];
+    for(unsigned i=0;i<s->h.nb;i++)bindings[i]=(VkDescriptorSetLayoutBinding){s->b[i].binding,(VkDescriptorType)s->b[i].type,1,VK_SHADER_STAGE_FRAGMENT_BIT,NULL};
+    VkDescriptorSetLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=s->h.nb,.pBindings=bindings};
+    CHECK(vkCreateDescriptorSetLayout(G.device,&li,NULL,&s->layout));
+    const char *dump=getenv("DM_ADAPTED_SHADER_DIR");if(dump){char path[1200];snprintf(path,sizeof path,"%s/%s-depth-input-guard.spv",dump,s->key);
+        FILE *f=fopen(path,"wb");if(!f||fwrite(code,4,words,f)!=words||fclose(f))die("depth input shader diagnostic output",0);}
+    fprintf(stderr,"[nvn-vulkan] DEPTH_INPUT_VARIANT shader=%s identity=%u samples=%u guards=%u words=%zu guard=%s\n",s->key,s->identity,info.transform.sample_count,info.guard_count,words,G.depth_input_calibrated_ties?"exact-calibrated-ties":"conservative-open");
+    base->depth_input_variant=s;return s;
 }
 #include "nvn_vk_pipeline.inc"
 void mtl_prog_release(prog_t *p) { (void)p; /* Programs own only immutable shared shader-cache entries; no per-program GPU allocation. */ }
@@ -1890,10 +2233,14 @@ static int depth_read_only(void) {
 }
 static void collect_image_uses(VShader *s) {
     if(!s)return;
-    for(unsigned i=0;i<s->h.nb;i++) {RBinding *b=&s->b[i];if(b->kind!=4&&b->kind!=6)continue;
-        if(b->slot<0 || b->slot>=(b->kind==6?32:128))die("image-use shader slot",b->slot);
-        uint64_t handle=b->kind==6?G.state.img[s->h.stage][b->slot]:G.state.tex[s->h.stage][b->slot];unsigned tid=handle&0xfffff;
-        if(tid>=G.texture_slots||!G.tslot[tid].live)die("image-use texture descriptor",tid);
+    for(unsigned i=0;i<s->h.nb;i++) {RBinding *b=&s->b[i];if(b->kind!=4&&b->kind!=6&&b->kind!=11)continue;
+        if(b->slot<0 || b->slot>=(b->kind!=4?32:128))die("image-use shader slot",b->slot);
+        uint64_t handle=b->kind!=4?G.state.img[s->h.stage][b->slot]:G.state.tex[s->h.stage][b->slot];unsigned tid=handle&0xfffff;
+        if(!handle && (!G.texture_slots||!G.tslot[0].live))continue;
+        if(tid>=G.texture_slots||!G.tslot[tid].live){fprintf(stderr,"[nvn-vulkan] IMAGE_MISSING shader=%s stage=%u kind=%u slot=%d tid=%u\n",s->key,s->h.stage,b->kind,b->slot,tid);
+            for(unsigned slot=0;slot<32;slot++)fprintf(stderr,"[nvn-vulkan] IMAGE_BIND slot=%u handle=%llx\n",slot,(unsigned long long)G.state.img[s->h.stage][slot]);
+            for(unsigned slot=0;slot<128;slot++)if(G.state.tex[s->h.stage][slot])fprintf(stderr,"[nvn-vulkan] TEXTURE_BIND slot=%u handle=%llx\n",slot,(unsigned long long)G.state.tex[s->h.stage][slot]);
+            die("image-use texture descriptor",tid);}
         uint64_t serial=G.tslot[tid].texture.serial;unsigned j=0;while(j<S.nimage_uses&&S.image_uses[j].serial!=serial)j++;
         if(j==S.nimage_uses){if(j==2*LIMIT_BINDINGS)die("image-use capacity",j);S.image_uses[S.nimage_uses++]=(ImageUse){serial,0};}
         S.image_uses[j].roles|=b->kind==6?2u:1u;
@@ -1927,11 +2274,26 @@ static int disjoint_sampling(VTexture *t,TSlot *slot,unsigned stage) {
     if(found && storage_image_use(t->serial))die("disjoint sample copy with storage writes",t->serial);
     return found;
 }
+static int sampling_copy_required(VTexture *t,TSlot *slot,unsigned stage) {
+    if(G.feedback_layout||stage==5||aspect(t->format)!=VK_IMAGE_ASPECT_COLOR_BIT)return 0;
+    if(disjoint_sampling(t,slot,stage))return !texture_range_ok(t);
+    for(int i=0;i<G.state.rt.n;i++)if(G.state.rt.color[i]&&G.state.rt.color[i]->serial==t->serial){
+        if(storage_image_use(t->serial))die("attachment sample copy with storage writes",t->serial);
+        /* NVN's ordered attachment read observes the preceding draws. Take
+         * that GPU state before this draw; the attachment remains writable.
+         * This also avoids relying on an optional feedback-loop extension. */
+        return 1;
+    }
+    return 0;
+}
 static void prepare_sampling_copies(VShader *s) {
     if(!s || G.feedback_layout || s->h.stage==5)return;
     for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==4 && !(s->dref_bindings&(1ull<<i))){
-        unsigned tid=G.state.tex[s->h.stage][s->b[i].slot]&0xfffff;TSlot *slot=&G.tslot[tid];
-        VTexture *t=slot_texture(slot,1);if(!disjoint_sampling(t,slot,s->h.stage)||texture_range_ok(t))continue;
+        uint64_t handle=G.state.tex[s->h.stage][s->b[i].slot];unsigned tid=handle&0xfffff;
+        if(!handle&&(!G.texture_slots||!G.tslot[0].live))continue;
+        if(tid>=G.texture_slots||!G.tslot[tid].live)die("sample copy descriptor",tid);
+        TSlot *slot=&G.tslot[tid];
+        VTexture *t=slot_texture(slot,1);if(!sampling_copy_required(t,slot,s->h.stage))continue;
         view_t *sv=&slot->view;unsigned slevel=slot->has_view&&sv->set_levels?sv->base_level:0,slevels=slot->has_view&&sv->set_levels?sv->nlevels:t->source.d.levels;
         unsigned slayer=slot->has_view&&sv->set_layers?sv->min_layer:0,slayers=slot->has_view&&sv->set_layers?sv->nlayers:t->source.L.layers;
         uint32_t smask=(slevels>=32?~0u:((1u<<slevels)-1u))<<slevel;
@@ -1947,12 +2309,12 @@ static void prepare_sampling_copies(VShader *s) {
                 .usage=VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
             CHECK(vkCreateImage(G.device,&ci,NULL,&t->sample_copy));VkMemoryRequirements r;vkGetImageMemoryRequirements(G.device,t->sample_copy,&r);
             VkMemoryAllocateInfo ai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=r.size,.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
-            CHECK(vkAllocateMemory(G.device,&ai,NULL,&t->sample_memory));CHECK(vkBindImageMemory(G.device,t->sample_copy,t->sample_memory,0));
+            t->sample_allocation_size=r.size;t->sample_memory=memory_allocate(&ai,DM_VK_MEMORY_SAMPLE_COPY);CHECK(vkBindImageMemory(G.device,t->sample_copy,t->sample_memory,0));
             VkImageViewType type=cube?(t->source.L.layers==6?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY):t->source.d.target==NVN_TEXTURE_TARGET_2D_ARRAY?VK_IMAGE_VIEW_TYPE_2D_ARRAY:VK_IMAGE_VIEW_TYPE_2D;
             VkImageViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=t->sample_copy,.viewType=type,.format=t->format,
                 .subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,t->source.d.levels,0,t->source.L.layers}};
             CHECK(vkCreateImageView(G.device,&vi,NULL,&t->sample_view));t->sample_layout=VK_IMAGE_LAYOUT_UNDEFINED;
-            fprintf(stderr,"[nvn-vulkan] DISJOINT_SAMPLE_COPY serial=%llu levels=%u layers=%u\n",(unsigned long long)t->serial,t->source.d.levels,t->source.L.layers);
+            fprintf(stderr,"[nvn-vulkan] ATTACHMENT_SAMPLE_COPY serial=%llu levels=%u layers=%u\n",(unsigned long long)t->serial,t->source.d.levels,t->source.L.layers);
         }
         all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         VkImageMemoryBarrier barrier={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,.srcAccessMask=t->sample_layout==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_SHADER_READ_BIT,
@@ -1977,8 +2339,14 @@ static VkImageLayout sampled_layout(VTexture *t,unsigned stage) {
     if(storage_image_use(t->serial))return VK_IMAGE_LAYOUT_GENERAL;
     if(stage!=5){
         if(G.state.rt.depth && G.state.rt.depth->serial==t->serial){S.depth_sampled=1;
+            if(S.depth_input)die("ordinary sampled alias in depth input experiment",t->serial);
             if(depth_read_only())return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            if(!G.feedback_layout)die("NVN writable depth feedback requires device support",t->serial);
+            if(!G.feedback_layout){
+                const ds_st *d=&G.state.ds;
+                fprintf(stderr,"[nvn-vulkan] DEPTH_FEEDBACK_UNSUPPORTED serial=%llu draw=%llu dt=%u dw=%u df=%u stencil=%u write_masks=%#x,%#x ops=%u,%u,%u/%u,%u,%u\n",(unsigned long long)t->serial,(unsigned long long)G.draws,d->dt,d->dw,d->df,d->st,G.state.stencil_write[0],G.state.stencil_write[1],d->fail_f,d->zfail_f,d->zpass_f,d->fail_b,d->zfail_b,d->zpass_b);
+                if(G.capture_feedback){G.capture_feedback=0;all_barrier();mtl_sub_commit();}
+                die("NVN writable depth feedback requires device support",t->serial);
+            }
             S.feedback_flags|=VK_PIPELINE_CREATE_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
             return VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;
         }
@@ -2006,7 +2374,7 @@ static void comparison_image(VTexture *t) {
             .usage=VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
         CHECK(vkCreateImage(G.device,&ci,NULL,&t->shadow));VkMemoryRequirements r;vkGetImageMemoryRequirements(G.device,t->shadow,&r);
         VkMemoryAllocateInfo ai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=r.size,.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
-        CHECK(vkAllocateMemory(G.device,&ai,NULL,&t->shadow_memory));CHECK(vkBindImageMemory(G.device,t->shadow,t->shadow_memory,0));
+        t->shadow_allocation_size=r.size;t->shadow_memory=memory_allocate(&ai,DM_VK_MEMORY_SHADOW);CHECK(vkBindImageMemory(G.device,t->shadow,t->shadow_memory,0));
         VkImageViewType type=cube?(t->source.L.layers==6?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY):t->source.d.target==NVN_TEXTURE_TARGET_2D_ARRAY?VK_IMAGE_VIEW_TYPE_2D_ARRAY:VK_IMAGE_VIEW_TYPE_2D;
         VkImageViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=t->shadow,.viewType=type,.format=f,
             .subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,t->source.d.levels,0,t->source.L.layers}};
@@ -2040,7 +2408,9 @@ static void comparison_image(VTexture *t) {
 static void prepare_comparison_images(VShader *s) {
     if(!s)return;
     for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==4&&(s->dref_bindings&(1ull<<i))){
-        unsigned tid=G.state.tex[s->h.stage][s->b[i].slot]&0xfffff;
+        uint64_t handle=G.state.tex[s->h.stage][s->b[i].slot];unsigned tid=handle&0xfffff;
+        if(!handle&&(!G.texture_slots||!G.tslot[0].live))continue;
+        if(tid>=G.texture_slots||!G.tslot[tid].live)die("comparison image descriptor",tid);
         VTexture *t=slot_texture(&G.tslot[tid],1);
         if(aspect(t->format)==VK_IMAGE_ASPECT_COLOR_BIT)comparison_image(t);
     }
@@ -2082,6 +2452,9 @@ static VBuffer *driver_table_build(VShader *s,const RBinding *b) {
     if(s->h.stage>=6||b->type!=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER||(b->slot!=0&&b->slot!=2))die("driver table bank/stage/type",b->slot);
     uint8_t bytes[DRIVER_TABLE_BYTES];memset(bytes,0,sizeof bytes);
     if(b->slot==0){
+        /* Clustered culling uses the X count; the original screen-space
+         * compute shader also multiplies the Y count by its local size. */
+        if(s->h.stage==5)memcpy(bytes+0x200,G.state.dispatch,8);
         unsigned base=s->h.stage==5?0x310:s->h.stage==1?0x510:0x110;
         for(unsigned j=0;j<16;j++){
             Range r=G.state.storage[s->h.stage][j];if(r.size>UINT32_MAX)die("driver buffer size",r.size);uint32_t n=r.size;
@@ -2134,10 +2507,13 @@ static void direct_storage_read(Range r) {
     if(entry<0&&S.ndirect_reads<LIMIT_WRITES){entry=S.ndirect_reads++;S.direct_reads[entry]=r;}
     if(entry>=0)S.direct_read_write_count[entry]=S.nwrites;
 }
-static VkSpecializationInfo storage_specialization(VShader *s,VkSpecializationMapEntry entries[LIMIT_BINDINGS]) {
+typedef struct {uint32_t bias[LIMIT_BINDINGS];int32_t draw[3];} ShaderSpecialization;
+static VkSpecializationInfo storage_specialization(VShader *s,VkSpecializationMapEntry entries[LIMIT_BINDINGS+3],ShaderSpecialization *values,const int32_t draw[3]) {
     uint32_t count=0;
+    memcpy(values->bias,S.storage_bias[s->h.stage],sizeof values->bias);memset(values->draw,0,sizeof values->draw);
     for(unsigned i=0;i<s->h.nb;i++)if(s->storage_bias.mask&(1ull<<i))entries[count++]=(VkSpecializationMapEntry){s->storage_bias.spec_id[i],i*4,4};
-    return (VkSpecializationInfo){count,entries,sizeof(S.storage_bias[s->h.stage]),S.storage_bias[s->h.stage]};
+    if(draw)for(unsigned f=0;f<3;f++)if(s->draw_parameter_mask&(1u<<f)){values->draw[f]=draw[f];entries[count++]=(VkSpecializationMapEntry){NVN_DRAW_SPEC_BASE+f,offsetof(ShaderSpecialization,draw)+f*4,4};}
+    return (VkSpecializationInfo){count,entries,sizeof *values,values};
 }
 static VkImageView submission_image_view(const VkImageViewCreateInfo *info) {
     ImageViewKey key;memset(&key,0,sizeof key);
@@ -2186,7 +2562,7 @@ static VkDescriptorSet binding_plan_try(VShader *s) {
         if(tid>=(unsigned)G.texture_pool_n||tid>=G.texture_slots||!G.tslot[tid].live){G.profile_plan_misses++;return VK_NULL_HANDLE;}
         TSlot *slot=&G.tslot[tid];VTexture *t=slot_texture(slot,1);const BindingImage *cached=&plan->resources[i].image;
         if(t->source.d.target!=NVN_TEXTURE_TARGET_2D||
-           (slot->has_view&&(slot->view.set_levels||slot->view.set_layers||slot->view.set_format||slot->view.set_target))||
+           (slot->has_view&&(slot->view.set_levels||slot->view.set_layers||slot->view.set_format||slot->view.set_target||slot->view.set_swizzle||slot->view.depth_mode))||
            cached->descriptor_id!=tid||cached->texture.incarnation!=t->incarnation||cached->texture.slot!=(uint32_t)(t-G.textures)||
            disjoint_sampling(t,slot,s->h.stage)){G.profile_plan_misses++;return VK_NULL_HANDLE;}
         VkImageLayout layout=sampled_layout(t,s->h.stage);texture_transition(t,layout);
@@ -2199,17 +2575,97 @@ static VkDescriptorSet binding_plan_try(VShader *s) {
     }
     G.profile_plan_hits++;return plan->set;
 }
+static VkSampler fetch_sampler(void) {
+    if(!G.fetch_sampler){VkSamplerCreateInfo ci={.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,.magFilter=VK_FILTER_NEAREST,.minFilter=VK_FILTER_NEAREST,.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST,.addressModeU=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeV=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.maxLod=VK_LOD_CLAMP_NONE};CHECK(vkCreateSampler(G.device,&ci,NULL,&G.fetch_sampler));}
+    return G.fetch_sampler;
+}
+static unsigned vertex_scalar_kind(unsigned nvn) {
+    switch(nvn){
+    case NVN_FORMAT_R8UI:case NVN_FORMAT_RG8UI:case NVN_FORMAT_RGBA8UI:
+    case NVN_FORMAT_R32UI:case NVN_FORMAT_RG32UI:case NVN_FORMAT_RGBA32UI:return 2;
+    case NVN_FORMAT_RGB10A2I:return 1;
+    default:return 0;
+    }
+}
+static int shader_image_target(const NvnVkImageType *type,const VTexture *t,unsigned layers,int cube_compatible) {
+    int source=t->source.d.target;
+    if(type->multisampled)die("shader multisampled image view",type->binding);
+    if(type->dim==0&&(source==NVN_TEXTURE_TARGET_1D||source==NVN_TEXTURE_TARGET_1D_ARRAY)){
+        if(!type->arrayed&&layers!=1)die("non-array 1D shader image layers",layers);
+        return type->arrayed?NVN_TEXTURE_TARGET_1D_ARRAY:NVN_TEXTURE_TARGET_1D;
+    }
+    if(type->dim==1&&(source==NVN_TEXTURE_TARGET_2D||source==NVN_TEXTURE_TARGET_2D_ARRAY||source==NVN_TEXTURE_TARGET_CUBEMAP||source==NVN_TEXTURE_TARGET_CUBEMAP_ARRAY)){
+        if(!type->arrayed&&layers!=1)die("non-array 2D shader image layers",layers);
+        return type->arrayed?NVN_TEXTURE_TARGET_2D_ARRAY:NVN_TEXTURE_TARGET_2D;
+    }
+    if(type->dim==2&&!type->arrayed&&source==NVN_TEXTURE_TARGET_3D)return NVN_TEXTURE_TARGET_3D;
+    if(type->dim==3&&cube_compatible){
+        if(!layers||layers%6||(!type->arrayed&&layers!=6))die("cube shader image layers",layers);
+        return type->arrayed?NVN_TEXTURE_TARGET_CUBEMAP_ARRAY:NVN_TEXTURE_TARGET_CUBEMAP;
+    }
+    fprintf(stderr,"[nvn-vulkan] IMAGE_TARGET_UNSUPPORTED binding=%u dim=%u arrayed=%u source_target=%d layers=%u\n",type->binding,type->dim,type->arrayed,source,layers);
+    die("shader image dimensionality requires compatible texture",type->binding);return source;
+}
+static VkImageViewType texture_view_type(int target) {
+    switch(target){
+    case NVN_TEXTURE_TARGET_1D:return VK_IMAGE_VIEW_TYPE_1D;
+    case NVN_TEXTURE_TARGET_1D_ARRAY:return VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+    case NVN_TEXTURE_TARGET_2D:return VK_IMAGE_VIEW_TYPE_2D;
+    case NVN_TEXTURE_TARGET_2D_ARRAY:return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    case NVN_TEXTURE_TARGET_3D:return VK_IMAGE_VIEW_TYPE_3D;
+    case NVN_TEXTURE_TARGET_CUBEMAP:return VK_IMAGE_VIEW_TYPE_CUBE;
+    case NVN_TEXTURE_TARGET_CUBEMAP_ARRAY:return VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+    default:die("shader image view target",target);return VK_IMAGE_VIEW_TYPE_2D;
+    }
+}
+static VkImageSubresourceRange attachment_range(const tex_t *source,const view_t *v);
+static void depth_input_guard_prepare(void) {
+    if(S.depth_input_guard_active)return;
+    pass_end();
+    if(!S.depth_input_guard.b){
+        if(G.want_cached)die("depth input guard requires coherent allocation",0);
+        S.depth_input_guard=buffer_make(4,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    }
+    memset(S.depth_input_guard.map,0,4);
+    VkMemoryBarrier barrier={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_HOST_WRITE_BIT,
+        .dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT};
+    vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,1,&barrier,0,NULL,0,NULL);
+    S.depth_input_guard_active=1;S.submission_cpu_readback=1;
+}
 static VkDescriptorSet bind_shader(VShader *s) {
     memset(S.storage_bias[s->h.stage],0,sizeof S.storage_bias[s->h.stage]);
+    S.null_bindings[s->h.stage]=0;
     VkDescriptorSet planned=binding_plan_try(s);if(planned)return planned;
     VkWriteDescriptorSet w[LIMIT_BINDINGS];VkDescriptorBufferInfo bi[LIMIT_BINDINGS];VkDescriptorImageInfo ii[LIMIT_BINDINGS];
     BindingResource plan_resources[LIMIT_BINDINGS];memset(plan_resources,0,sizeof(plan_resources));
     int plan_safe=s->plan&&s->plan->eligible&&!G.disable_binding_plans&&!G.disable_desc_cache&&!G.trace_frame;
     memset(w,0,s->h.nb*sizeof(*w));memset(bi,0,s->h.nb*sizeof(*bi));memset(ii,0,s->h.nb*sizeof(*ii));
     int cacheable=!G.disable_desc_cache&&!G.trace_frame;VkDescriptorSet set=VK_NULL_HANDLE;
-    for(uint32_t i=0;i<s->h.nb;i++) { RBinding *b=&s->b[i]; w[i]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+    /* A requested pre-draw diagnostic must save effective buffers even when
+     * an earlier image binding stops on unsupported feedback. Descriptor
+     * indices stay unchanged; ordinary draws retain their original order. */
+    uint32_t order[LIMIT_BINDINGS],norder=0;
+    if(G.capture_feedback){
+        for(uint32_t i=0;i<s->h.nb;i++)if(s->b[i].kind==1||s->b[i].kind==2||s->b[i].kind==3||s->b[i].kind==7||s->b[i].kind==8||s->b[i].kind==9)order[norder++]=i;
+        for(uint32_t i=0;i<s->h.nb;i++)if(s->b[i].kind!=1&&s->b[i].kind!=2&&s->b[i].kind!=3&&s->b[i].kind!=7&&s->b[i].kind!=8&&s->b[i].kind!=9)order[norder++]=i;
+    }else for(uint32_t i=0;i<s->h.nb;i++)order[norder++]=i;
+    for(uint32_t step=0;step<norder;step++) { uint32_t i=order[step];RBinding *b=&s->b[i]; w[i]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
        .dstBinding=b->binding,.descriptorCount=1,.descriptorType=(VkDescriptorType)b->type};
-       if(b->kind==1)bi[i]=(VkDescriptorBufferInfo){G.support.b,0,1392};
+       if(b->kind==RESOURCE_DEPTH_GUARD){
+           if(!s->depth_input||!S.depth_input)die("depth input guard descriptor state",0);
+           depth_input_guard_prepare();bi[i]=(VkDescriptorBufferInfo){S.depth_input_guard.b,0,4};
+       }
+       else if(b->kind==RESOURCE_DEPTH_INPUT){
+           if(!s->depth_input||!S.depth_input||!G.state.rt.depth)die("depth input descriptor state",0);
+           VTexture *t=texture_get(G.state.rt.depth,0);texture_transition(t,VK_IMAGE_LAYOUT_GENERAL);
+           VkImageSubresourceRange range=attachment_range(G.state.rt.depth,G.state.rt.has_dview?&G.state.rt.dview:NULL);
+           range.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;
+           VkImageViewCreateInfo view={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=t->image,
+               .viewType=VK_IMAGE_VIEW_TYPE_2D,.format=t->format,.subresourceRange=range};
+           ii[i]=(VkDescriptorImageInfo){.imageView=submission_image_view(&view),.imageLayout=VK_IMAGE_LAYOUT_GENERAL};
+           w[i].pImageInfo=&ii[i];S.depth_sampled=1;continue;
+       }
+       else if(b->kind==1)bi[i]=(VkDescriptorBufferInfo){G.support.b,0,1392};
        else if(b->kind==7) { if(!s->c1.b)die("missing shader c1",i);bi[i]=(VkDescriptorBufferInfo){s->c1.b,0,65536}; }
        else if(b->kind==10) {
            if(b->slot<0 || b->slot>=128)die("texel buffer slot",b->slot);
@@ -2239,7 +2695,15 @@ static VkDescriptorSet bind_shader(VShader *s) {
            if(b->slot<0 || b->slot>=16)die("shader buffer slot",b->slot);
            Range r=(b->kind==2||b->kind==9)?G.state.uniform[s->h.stage][b->slot]:G.state.storage[s->h.stage][b->slot];
            if(G.pool_range_stats&&b->kind==2)G.pool_ranges[pool_range_bucket(r.size)].uniforms++;
-           if(!r.addr || !r.size)die("unbound original shader buffer",b->slot);
+           /* A zero-address, zero-size NVN binding has no resource. Preserve
+            * that state with a real null descriptor; never allocate substitute
+            * backing storage or hide a malformed half-bound range. */
+           if(!r.addr&&!r.size){
+               if(G.null_descriptors){bi[i]=(VkDescriptorBufferInfo){VK_NULL_HANDLE,0,VK_WHOLE_SIZE};w[i].pBufferInfo=&bi[i];}
+               else{S.null_bindings[s->h.stage]|=1ull<<i;w[i].descriptorCount=0;}
+               plan_safe=0;continue;
+           }
+           if(!r.addr || !r.size){fprintf(stderr,"[nvn-vulkan] BUFFER_MISSING shader=%s stage=%u binding=%u kind=%u slot=%d addr=%#llx size=%llu\n",s->key,s->h.stage,b->binding,b->kind,b->slot,(unsigned long long)r.addr,(unsigned long long)r.size);die("unbound original shader buffer",b->slot);}
            uint64_t offset=0;VPool *p=pool_read(r.addr,r.size,&offset);
            uint64_t alignment=b->kind==2?G.properties.limits.minUniformBufferOffsetAlignment:G.properties.limits.minStorageBufferOffsetAlignment;
            uint64_t prefix=offset%alignment;
@@ -2291,10 +2755,25 @@ static VkDescriptorSet bind_shader(VShader *s) {
                bi[i]=(VkDescriptorBufferInfo){aligned->buffer->b,0,r.size};
            }else bi[i]=(VkDescriptorBufferInfo){p->v.b,offset,r.size};
            if(b->kind==3 && b->flags)mark_write(r.addr,r.size);
-       } else if(b->kind==4 || b->kind==6) {
-           if(b->slot<0 || b->slot>=(b->kind==6?32:128))die("texture shader slot",b->slot);
-           uint64_t handle=b->kind==6?G.state.img[s->h.stage][b->slot]:G.state.tex[s->h.stage][b->slot];
-           unsigned tid=(unsigned)handle&0xfffff;if(tid>=(unsigned)G.texture_pool_n || tid>=G.texture_slots || !G.tslot[tid].live)die("unbound texture descriptor",tid);
+           if(G.capture_feedback&&(b->kind==2||b->kind==9)){
+               uint64_t bytes=bi[i].range;if(bytes%4)die("feedback uniform diagnostic alignment",bytes);
+               VBuffer *capture=temporary(bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT);all_barrier();
+               VkBufferCopy copy={bi[i].offset,0,bytes};vkCmdCopyBuffer(S.command,bi[i].buffer,capture->b,1,&copy);
+               char name[160];snprintf(name,sizeof(name),"feedback-effective-%04llu-%llu-%s-ubo%d",(unsigned long long)G.present_count+1,(unsigned long long)G.draws,s->h.stage?"ps":"vs",b->slot);trace_capture_queue(capture,bytes,name);
+           }
+       } else if(b->kind==4 || b->kind==6 || b->kind==11) {
+           if(b->slot<0 || b->slot>=(b->kind!=4?32:128))die("texture shader slot",b->slot);
+           if(b->kind==11 && b->type!=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE && b->type!=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)die("image-bank query descriptor type",b->type);
+           uint64_t handle=b->kind!=4?G.state.img[s->h.stage][b->slot]:G.state.tex[s->h.stage][b->slot];
+           unsigned tid=(unsigned)handle&0xfffff;
+           if(!handle && (!G.texture_slots||!G.tslot[0].live)){
+               if(!G.null_descriptors){S.null_bindings[s->h.stage]|=1ull<<i;w[i].descriptorCount=0;plan_safe=0;continue;}
+               if(!G.fetch_sampler){VkSamplerCreateInfo ci={.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,.magFilter=VK_FILTER_NEAREST,.minFilter=VK_FILTER_NEAREST,.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST,.addressModeU=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeV=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.maxLod=VK_LOD_CLAMP_NONE};CHECK(vkCreateSampler(G.device,&ci,NULL,&G.fetch_sampler));}
+               ii[i]=(VkDescriptorImageInfo){.sampler=b->type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER?G.fetch_sampler:VK_NULL_HANDLE,
+                   .imageView=VK_NULL_HANDLE,.imageLayout=b->kind==6?VK_IMAGE_LAYOUT_GENERAL:VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+               w[i].pImageInfo=&ii[i];plan_safe=0;continue;
+           }
+           if(tid>=(unsigned)G.texture_pool_n || tid>=G.texture_slots || !G.tslot[tid].live)die("unbound texture descriptor",tid);
            TSlot *slot=&G.tslot[tid];
            VTexture *t=slot_texture(slot,1);
            if(b->kind==6&&!(t->usage&VK_IMAGE_USAGE_STORAGE_BIT)){
@@ -2302,10 +2781,25 @@ static VkDescriptorSet bind_shader(VShader *s) {
                    s->key,b->binding,(unsigned long long)t->serial,t->source.d.flags,t->usage);
                die("storage image without declared Vulkan usage",t->serial);
            }
+           if(G.capture_feedback&&b->kind==4&&G.state.rt.depth&&G.state.rt.depth->serial==t->serial){
+               unsigned sid=(unsigned)((b->sampler>=0?G.state.samp[s->h.stage][b->sampler]:handle)>>20)&0xfff;
+               const samp_par *p=sid<LIMIT_OBJECTS&&G.sslot[sid].live?&G.sslot[sid].source:NULL;
+               fprintf(stderr,"[nvn-vulkan] FEEDBACK_SAMPLE shader=%s binding=%u slot=%d extent=%u,%u levels=%u layers=%u sampler=%u live=%d\n",s->key,b->binding,b->slot,t->width,t->height,t->source.d.levels,t->source.L.layers,sid,p!=NULL);
+               const view_t *v=&slot->view,*a=&G.state.rt.dview;
+               fprintf(stderr,"[nvn-vulkan] FEEDBACK_VIEW serial=%llu image=%p format=%u samples=%u sampled_flags=%u,%u,%u,%u,%u levels=%d,%d layers=%d,%d format=%d swizzle=%u,%u,%u,%u depth_mode=%u attachment_flags=%u,%u levels=%d,%d layers=%d,%d\n",(unsigned long long)t->serial,(void *)t->image,t->format,t->source.d.samples,slot->has_view&&v->set_levels,slot->has_view&&v->set_layers,slot->has_view&&v->set_format,slot->has_view&&v->set_swizzle,slot->has_view&&v->set_depth_mode,v->base_level,v->nlevels,v->min_layer,v->nlayers,v->format,v->swizzle[0],v->swizzle[1],v->swizzle[2],v->swizzle[3],v->depth_mode,G.state.rt.has_dview&&a->set_levels,G.state.rt.has_dview&&a->set_layers,a->base_level,a->nlevels,a->min_layer,a->nlayers);
+               if(p)fprintf(stderr,"[nvn-vulkan] FEEDBACK_SAMPLER min=%u mag=%u wrap=%u,%u,%u lod=%g,%g bias=%g aniso=%g compare=%u,%u\n",p->minf,p->magf,p->ws,p->wt,p->wr,p->lod_min,p->lod_max,p->lod_bias,p->aniso,p->cmp_mode,p->cmp_func);
+               fprintf(stderr,"[nvn-vulkan] FEEDBACK_IMAGE_STATE serial=%llu source_target=%u source_format=%u source_extent=%u,%u,%u sampled_has_view=%u sampled_target=%u,%d attachment_has_view=%u attachment_target=%u,%d attachment_format=%u,%d attachment_swizzle=%u,%u,%u,%u,%u attachment_depth_mode=%u,%u raster_samples=%u samples=%u\n",(unsigned long long)t->serial,t->source.d.target,t->source.d.format,t->source.d.width,t->source.d.height,t->source.d.depth,slot->has_view,v->set_target,v->target,G.state.rt.has_dview,a->set_target,a->target,a->set_format,a->format,a->set_swizzle,a->swizzle[0],a->swizzle[1],a->swizzle[2],a->swizzle[3],a->set_depth_mode,a->depth_mode,G.state.ms.raster_samples,G.state.ms.samples);
+           }
+           if(getenv("DM_ADAPTED_SHADER_DIR")&&!(s->texture_layout_logged&(1ull<<i))){
+               s->texture_layout_logged|=1ull<<i;
+               const view_t *v=&slot->view;
+               fprintf(stderr,"[nvn-vulkan] TEXTURE_LAYOUT shader=%s stage=%u binding=%u slot=%d tid=%u serial=%llu target=%u layers=%u levels=%u has_view=%u view_target=%u,%d view_layers=%u,%d,%d view_levels=%u,%d,%d\n",
+                   s->key,s->h.stage,b->binding,b->slot,tid,(unsigned long long)t->serial,t->source.d.target,t->source.L.layers,t->source.d.levels,slot->has_view,v->set_target,v->target,v->set_layers,v->min_layer,v->nlayers,v->set_levels,v->base_level,v->nlevels);
+           }
            trace_texture(t,s,b);
            int alias=b->kind==4&&(s->dref_bindings&(1ull<<i))&&aspect(t->format)==VK_IMAGE_ASPECT_COLOR_BIT;
-           int sampled_copy=b->kind==4&&!alias&&disjoint_sampling(t,slot,s->h.stage),ranged=0;
-           if(sampled_copy&&texture_range_ok(t))sampled_copy=0,ranged=1;
+           int sampled_copy=b->kind==4&&!alias&&sampling_copy_required(t,slot,s->h.stage);
+           int ranged=b->kind==4&&!alias&&disjoint_sampling(t,slot,s->h.stage)&&texture_range_ok(t);
            if(!G.feedback_layout && !sampled_copy && !ranged && b->kind==4 && s->h.stage!=5){
                for(int rt=0;rt<G.state.rt.n;rt++)if(G.state.rt.color[rt]&&G.state.rt.color[rt]->serial==t->serial){
                    view_t *v=&slot->view,*a=&G.state.rt.cview[rt];
@@ -2319,27 +2813,48 @@ static VkDescriptorSet bind_shader(VShader *s) {
            if(sampled_copy&&!t->sample_view)die("disjoint sample copy preparation",t->serial);
            VkImage selected_image=alias?t->shadow:sampled_copy?t->sample_copy:t->image;VkFormat selected_format=alias?t->shadow_format:t->format;
            ii[i].imageView=alias?t->shadow_view:sampled_copy?t->sample_view:t->view;ii[i].imageLayout=alias?t->shadow_layout:sampled_copy?t->sample_layout:ranged?VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:t->layout;
-           if(slot->has_view) {
-               view_t *v=&slot->view;
+           /* Size queries consume only the image from this descriptor. NVN
+            * image handles contain no sampler; supply a valid unused sampler
+            * when the translator declares a combined descriptor. */
+           if(b->kind==11 && b->type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)ii[i].sampler=fetch_sampler();
+           if(slot->has_view||(s->image_type_mask&(1ull<<i))) {
+               view_t no_view={0};const view_t *v=slot->has_view?&slot->view:&no_view;
                uint32_t level=v->set_levels?v->base_level:0,levels=v->set_levels?v->nlevels:t->source.d.levels;
+               /* NVN image bindings address one selected mip. The registered
+                * texture descriptor may retain the full sampled mip count;
+                * storage operations and their size queries have no mip LOD. */
+               if(b->kind==6 || b->kind==11)levels=1;
                uint32_t layer=v->set_layers?v->min_layer:0,layers=v->set_layers?v->nlayers:t->source.L.layers;
                int target=v->set_target?v->target:t->source.d.target;
                if(level>=t->source.d.levels || !levels || levels>t->source.d.levels-level ||
                   layer>=t->source.L.layers || !layers || layers>t->source.L.layers-layer ||
                   (v->set_format && v->format!=t->source.d.format) ||
-                  (target!=NVN_TEXTURE_TARGET_2D && target!=NVN_TEXTURE_TARGET_3D && target!=NVN_TEXTURE_TARGET_2D_ARRAY && target!=NVN_TEXTURE_TARGET_CUBEMAP && target!=NVN_TEXTURE_TARGET_CUBEMAP_ARRAY) ||
-                  (target==NVN_TEXTURE_TARGET_2D && layers!=1)) {
+                  (target!=NVN_TEXTURE_TARGET_1D && target!=NVN_TEXTURE_TARGET_1D_ARRAY && target!=NVN_TEXTURE_TARGET_2D && target!=NVN_TEXTURE_TARGET_3D && target!=NVN_TEXTURE_TARGET_2D_ARRAY && target!=NVN_TEXTURE_TARGET_CUBEMAP && target!=NVN_TEXTURE_TARGET_CUBEMAP_ARRAY) ||
+                  ((target==NVN_TEXTURE_TARGET_1D||target==NVN_TEXTURE_TARGET_2D) && layers!=1)) {
                    fprintf(stderr,"[nvn-vulkan] texture view id=%u flags=%u,%u,%u,%u levels=%d,%d layers=%d,%d format=%d/%d target=%d/%d\n",
                        tid,v->set_levels,v->set_layers,v->set_format,v->set_target,v->base_level,v->nlevels,v->min_layer,v->nlayers,
                        v->format,t->source.d.format,v->target,t->source.d.target);
+                   fprintf(stderr,"[nvn-vulkan] texture source serial=%llu levels=%u layers=%u extent=%u,%u,%u\n",(unsigned long long)t->serial,t->source.d.levels,t->source.L.layers,t->width,t->height,t->depth);
                    die("texture view format/target/layer/range adaptation",tid);
                }
-               if(level || levels!=t->source.d.levels || layer || layers!=t->source.L.layers || target!=t->source.d.target) {
-                   VkImageViewType view_type=target==NVN_TEXTURE_TARGET_3D?VK_IMAGE_VIEW_TYPE_3D:target==NVN_TEXTURE_TARGET_2D?VK_IMAGE_VIEW_TYPE_2D:target==NVN_TEXTURE_TARGET_2D_ARRAY?VK_IMAGE_VIEW_TYPE_2D_ARRAY:
-                       target==NVN_TEXTURE_TARGET_CUBEMAP?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+               int cube_compatible=t->source.d.target==NVN_TEXTURE_TARGET_CUBEMAP||t->source.d.target==NVN_TEXTURE_TARGET_CUBEMAP_ARRAY||
+                   (!alias&&!sampled_copy&&t->source.d.target==NVN_TEXTURE_TARGET_2D_ARRAY&&t->width==t->height&&t->source.L.layers>=6&&t->width<=G.properties.limits.maxImageDimensionCube);
+               if(s->image_type_mask&(1ull<<i))target=shader_image_target(&s->image_types[i],t,layers,cube_compatible);
+               if((target==NVN_TEXTURE_TARGET_CUBEMAP||target==NVN_TEXTURE_TARGET_CUBEMAP_ARRAY)&&layer%6)die("cube shader image base layer",layer);
+               VkImageViewType view_type=texture_view_type(target);
+               /* Existing base cube views select their type by face count. */
+               int base_target=t->source.d.target;
+               if(base_target==NVN_TEXTURE_TARGET_CUBEMAP_ARRAY&&t->source.L.layers==6)base_target=NVN_TEXTURE_TARGET_CUBEMAP;
+               if(level || levels!=t->source.d.levels || layer || layers!=t->source.L.layers || view_type!=texture_view_type(base_target) || v->set_swizzle || v->depth_mode) {
                    VkImageViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=selected_image,.viewType=view_type,
                        .format=selected_format,.subresourceRange={aspect(selected_format)&VK_IMAGE_ASPECT_DEPTH_BIT?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,level,levels,layer,layers}};
+                   if(v->set_swizzle)vi.components=(VkComponentMapping){v->swizzle[0]+1,v->swizzle[1]+1,v->swizzle[2]+1,v->swizzle[3]+1};
+                   if(v->depth_mode){if(!(aspect(selected_format)&VK_IMAGE_ASPECT_STENCIL_BIT))die("stencil view requires stencil texture",selected_format);vi.subresourceRange.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;}
                    ii[i].imageView=submission_image_view(&vi);
+                   if(target!=(v->set_target?v->target:t->source.d.target)&&!(s->typed_view_logged&(1ull<<i))){
+                       s->typed_view_logged|=1ull<<i;
+                       fprintf(stderr,"[nvn-vulkan] IMAGE_VIEW_TYPED shader=%s binding=%u source_target=%u target=%d view_type=%u layers=%u level=%u levels=%u aspect=%#x\n",s->key,b->binding,t->source.d.target,target,view_type,layers,level,levels,vi.subresourceRange.aspectMask);
+                   }
                }
            }
            if(b->kind==4 && b->type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) { unsigned sid=(unsigned)((b->sampler>=0?G.state.samp[s->h.stage][b->sampler]:handle)>>20)&0xfff;
@@ -2366,6 +2881,11 @@ static VkDescriptorSet bind_shader(VShader *s) {
            }
            w[i].pImageInfo=&ii[i];continue;
        } else die("Vulkan shader resource kind",b->kind);
+       if(G.capture_feedback&&(b->kind==1||b->kind==7)){
+           uint64_t bytes=bi[i].range;VBuffer *capture=temporary(bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT);all_barrier();
+           VkBufferCopy copy={bi[i].offset,0,bytes};vkCmdCopyBuffer(S.command,bi[i].buffer,capture->b,1,&copy);
+           char name[160];snprintf(name,sizeof(name),"feedback-effective-%04llu-%llu-%s-%s",(unsigned long long)G.present_count+1,(unsigned long long)G.draws,s->h.stage?"ps":"vs",b->kind==1?"support":"c1");trace_capture_queue(capture,bytes,name);
+       }
        w[i].pBufferInfo=&bi[i];
     }
     uint32_t nb=s->h.nb;size_t half=(size_t)nb*sizeof(VkDescriptorBufferInfo);uint32_t slot=0;uint64_t hash=0;
@@ -2383,8 +2903,8 @@ static VkDescriptorSet bind_shader(VShader *s) {
     }
     VkDescriptorSetAllocateInfo a={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,.descriptorPool=S.descriptors,
       .descriptorSetCount=1,.pSetLayouts=&s->layout};uint64_t alloc_started=prof_now();CHECK(vkAllocateDescriptorSets(G.device,&a,&set));G.profile_desc_alloc_ns+=prof_now()-alloc_started;
-    for(uint32_t i=0;i<nb;i++)w[i].dstSet=set;
-    uint64_t update_started=prof_now();vkUpdateDescriptorSets(G.device,s->h.nb,w,0,NULL);G.profile_desc_update_ns+=prof_now()-update_started;
+    uint32_t writes=0;for(uint32_t i=0;i<nb;i++)if(w[i].descriptorCount){w[writes]=w[i];w[writes++].dstSet=set;}
+    uint64_t update_started=prof_now();vkUpdateDescriptorSets(G.device,writes,w,0,NULL);G.profile_desc_update_ns+=prof_now()-update_started;
     if(cacheable&&S.ndesc<DESC_ENTRIES&&S.desc_arena_used+2*half<=DESC_ARENA&&S.ndesc*2<DESC_TABLE){
         DescEntry *e=&S.desc_entries[S.ndesc];*e=(DescEntry){hash,s,set,nb,(uint32_t)S.desc_arena_used};
         memcpy(S.desc_arena+S.desc_arena_used,bi,half);memcpy(S.desc_arena+S.desc_arena_used+half,ii,half);S.desc_arena_used+=2*half;
@@ -2400,8 +2920,12 @@ static VkDescriptorSet bind_shader(VShader *s) {
     binding_plan_remember(s,set,plan_resources,plan_safe);return set;
 }
 static VShader *program_stage_optional_impl(int stage) {
-    const prog_t *p=G.state.program;if(!p)die("draw/dispatch without program",stage);
+    const prog_t *p=G.state.programs[stage];if(!p)return NULL;
     for(uint32_t i=0;i<p->nstage;i++) { const void *control=p->sd[i].control;if(!control)die("shader data control",i);
+       if(G.shader_code_identity || G.shader_index_version==2) {
+           const uint8_t *entry=shader_entry(control,stage,p->sd[i].data);
+           if(entry)return shader_get(entry,stage);continue;
+       }
        uint64_t mix=((uint64_t)(uintptr_t)control>>4^(uint64_t)stage*0x9e3779b97f4a7c15ULL)*0xbf58476d1ce4e5b9ULL;
        ControlCache *c=&G.control_cache[(mix>>40)&(CONTROL_CACHE-2)];
        if(!(c->valid&&c->control==control&&c->stage==(uint32_t)stage)){
@@ -2413,7 +2937,8 @@ static VShader *program_stage_optional_impl(int stage) {
            G.profile_control_changed++;
        }else if(c->valid)G.profile_control_evict++;
        G.profile_control_misses++;
-       VShader *found=shader_entry(control,stage)?shader_get(control,stage):NULL;
+       const uint8_t *entry=shader_entry(control,stage,p->sd[i].data);
+       VShader *found=entry?shader_get(entry,stage):NULL;
        c->control=control;c->stage=stage;c->valid=1;c->shader=found;memcpy(c->bytes,control,0x880);
        if(found)return found; }
     return NULL;
@@ -2423,7 +2948,11 @@ static VShader *program_stage_optional(int stage) {
     G.profile_lookup_ns+=prof_now()-started;return s;
 }
 static VShader *program_stage(int stage) {
-    VShader *s=program_stage_optional(stage);if(!s)die("requested program stage missing",stage);return s;
+    VShader *s=program_stage_optional(stage);if(!s){
+        const prog_t *p=G.state.programs[stage];fprintf(stderr,"[nvn-vulkan] PROGRAM_MISSING stage=%d program=%p serial=%llu count=%u\n",stage,(const void *)p,(unsigned long long)(p?p->serial:0),p?p->nstage:0);
+        if(p)for(unsigned i=0;i<p->nstage&&i<6;i++){uint32_t actual=0xffffffff;if(p->sd[i].control)memcpy(&actual,(const uint8_t *)p->sd[i].control+0x714,4);fprintf(stderr,"[nvn-vulkan] PROGRAM_STAGE index=%u actual=%u control=%p data=%llx\n",i,actual,p->sd[i].control,(unsigned long long)p->sd[i].data);}
+        die("requested program stage missing",stage);
+    }return s;
 }
 
 static VkBlendFactor blend_factor(unsigned f) {
@@ -2455,6 +2984,67 @@ static VkImageSubresourceRange attachment_range(const tex_t *source,const view_t
        (v&&v->set_layers&&v->nlayers!=1) || (v&&v->set_format&&v->format!=source->d.format) || source->d.target==NVN_TEXTURE_TARGET_3D)
         die("attachment view format/layer/mip",level);
     return (VkImageSubresourceRange){aspect(format(source->d.format)),level,1,layer,1};
+}
+static int depth_input_identity_view(const tex_t *t,const view_t *v) {
+    if(!v)return 1;
+    if((v->set_levels&&(v->base_level||v->nlevels!=1))||
+       (v->set_layers&&(v->min_layer||v->nlayers!=1))||
+       (v->set_format&&v->format!=t->d.format)||
+       (v->set_target&&v->target!=NVN_TEXTURE_TARGET_2D)||v->depth_mode)return 0;
+    if(v->set_swizzle)for(unsigned i=0;i<4;i++)if(v->swizzle[i]!=NVN_TEXTURE_SWIZZLE_R+i)return 0;
+    return 1;
+}
+static VShader *depth_input_select(VShader *vs,VShader *ps) {
+    S.depth_input=0;
+    if(!G.depth_order||!ps||strcmp(ps->key,"3749e309ce42949e")||!G.state.rt.depth||depth_read_only())return ps;
+    RBinding *target=NULL;
+    for(unsigned i=0;i<ps->h.nb;i++)if(ps->b[i].set==1&&ps->b[i].binding==3&&ps->b[i].kind==4)target=&ps->b[i];
+    if(!target||target->slot<0||target->slot>=128)die("depth input calibrated shader binding",0);
+    uint64_t handle=G.state.tex[1][target->slot];unsigned tid=handle&0xfffff;
+    if(tid>=G.texture_slots||!G.tslot[tid].live||G.tslot[tid].texture.serial!=G.state.rt.depth->serial)return ps;
+    const tex_t *depth=G.state.rt.depth;const TSlot *slot=&G.tslot[tid];
+    const VkViewport *vp=&G.state.viewport;const VkRect2D *sc=&G.state.scissor;
+    if(strcmp(vs->key,"4a2526c0e38b227d")||!G.fragment_stores||
+       atomic_load(&G.window_origin)!=NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT||
+       atomic_load(&G.depth_mode)!=NVN_DEPTH_MODE_NEAR_IS_ZERO||G.state.depth_clamp||
+       vp->x!=0||vp->y!=0||vp->width!=1280||vp->height!=720||vp->minDepth!=0||vp->maxDepth!=1||
+       sc->offset.x||sc->offset.y||sc->extent.width!=1280||sc->extent.height!=720||
+       !G.state.ds.dt||!G.state.ds.dw||G.state.ds.df!=NVN_DEPTH_FUNC_LEQUAL||G.state.ds.st||
+       G.state.polygon.offset_en||G.state.polygon_offset.factor||G.state.polygon_offset.units||G.state.polygon_offset.clamp||
+       G.state.ms.cov2color_en||G.state.ms.raster_samples>1)
+        die("depth input experiment outside calibrated draw state",G.draws);
+    if(depth->d.width!=1280||depth->d.height!=720||depth->d.target!=NVN_TEXTURE_TARGET_2D||
+       depth->d.levels!=1||depth->L.layers!=1||depth->d.samples>1||format(depth->d.format)!=VK_FORMAT_D24_UNORM_S8_UINT||
+       !depth_input_identity_view(depth,G.state.rt.has_dview?&G.state.rt.dview:NULL)||
+       !depth_input_identity_view(&slot->texture,slot->has_view?&slot->view:NULL))
+        die("depth input experiment outside calibrated image/view",depth->serial);
+    unsigned sid=(unsigned)((target->sampler>=0?G.state.samp[1][target->sampler]:handle)>>20)&0xfff;
+    const samp_par *p=sid<LIMIT_OBJECTS&&G.sslot[sid].live?&G.sslot[sid].source:NULL;
+    if(!p||p->minf!=NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR||p->magf!=NVN_MAG_FILTER_LINEAR||
+       p->ws!=NVN_WRAP_MODE_CLAMP_TO_EDGE||p->wt!=NVN_WRAP_MODE_CLAMP_TO_EDGE||p->cmp_mode||
+       p->aniso!=1||p->lod_min!=-1000||p->lod_max!=1000||p->lod_bias!=0)
+        die("depth input experiment outside calibrated sampler",sid);
+    if(G.diag_barrier||G.diag_loadstore||G.diag_skip_draws||G.diag_skip_class||G.diag_skip_xfer||
+       G.diag_shape||G.diag_fixed_desc||G.diag_no_pass_deps||G.hz_diag||G.skip_ps[0])
+        die("depth input experiment incompatible diagnostic mode",0);
+    /* Ordinary sampled aliases and storage accesses must never borrow the
+     * ordered input attachment's layout or semantics. */
+    for(unsigned stage=0;stage<2;stage++){VShader *s=stage?ps:vs;
+        for(unsigned i=0;i<s->h.nb;i++){RBinding *b=&s->b[i];if(b->kind!=4&&b->kind!=6&&b->kind!=11)continue;
+            if(b->slot<0||b->slot>=(b->kind==4?128:32))die("depth input alias slot",b->slot);
+            unsigned id=(b->kind==4?G.state.tex[stage][b->slot]:G.state.img[stage][b->slot])&0xfffff;
+            if(id<G.texture_slots&&G.tslot[id].live&&G.tslot[id].texture.serial==depth->serial&&b!=target)
+                die("depth input experiment additional image alias",b->binding);
+        }
+    }
+    for(int i=0;i<G.state.rt.n;i++)if(G.state.rt.color[i]){
+        const tex_t *c=G.state.rt.color[i];VkImageSubresourceRange r=attachment_range(c,G.state.rt.has_cview[i]?&G.state.rt.cview[i]:NULL);
+        if((c->d.width>>r.baseMipLevel)<1280||(c->d.height>>r.baseMipLevel)<720)
+            die("depth input experiment framebuffer intersection",c->serial);
+    }
+    pass_end();S.depth_input=1;depth_input_guard_prepare();
+    fprintf(stderr,"[nvn-vulkan] DEPTH_INPUT_DRAW frame=%llu draw=%llu serial=%llu device_calibrated=1\n",(unsigned long long)G.present_count+1,(unsigned long long)G.draws,(unsigned long long)depth->serial);
+    return depth_input_shader(ps);
 }
 /* Submit the commands recorded so far so the GPU starts while the CPU keeps recording this segment.
  * Completion, writeback, events and counters are still published only after the segment's final fence. */
@@ -2513,7 +3103,7 @@ static VkRenderPass render_begin(void) {
     /* OP_SET_RT and every transfer/layout barrier already end the pass.
      * Keep ordinary consecutive draws in the same attachment configuration.
      * Feedback passes retain the original explicit pass boundaries. */
-    if(S.in_pass && !G.disable_pass_reuse && !S.feedback_flags && !S.pass_feedback_flags && read_only==S.pass_depth_read_only){
+    if(S.in_pass && !G.disable_pass_reuse && !S.feedback_flags && !S.pass_feedback_flags && !S.depth_input && !S.pass_depth_input && read_only==S.pass_depth_read_only){
         for(int i=0;i<rt->n+(rt->depth?1:0);i++){
             const tex_t *source=i==rt->n?rt->depth:rt->color[i];if(!source)continue;
             VTexture *t=texture_get(source,0);t->cpu_owned=0;{const view_t *av=i==rt->n?(rt->has_dview?&rt->dview:NULL):(rt->has_cview[i]?&rt->cview[i]:NULL);tex_attach_dirty(t,av&&av->set_levels?av->base_level:0);}
@@ -2522,7 +3112,7 @@ static VkRenderPass render_begin(void) {
     }
     pass_end();G.pass_side_effects=0;
     if(S.chunk_draws)sub_chunk_flush();
-    VkAttachmentDescription attachments[9];VkAttachmentReference color[8],depth;VkImageView views[9];VkClearValue clears[9]={0};uint32_t n=0,width=0,height=0;
+    VkAttachmentDescription attachments[9];VkAttachmentReference color[8],depth,input;VkImageView views[9];VkClearValue clears[9]={0};uint32_t n=0,width=0,height=0;
     uint64_t clear_bpp=0,discard_bpp=0;
     S.pass_discard=0;
     memset(attachments,0,sizeof(attachments));
@@ -2541,7 +3131,8 @@ static VkRenderPass render_begin(void) {
         if(!width){width=tw;height=th;}else {if(tw<width)width=tw;if(th<height)height=th;}
         t->cpu_owned=0;tex_attach_dirty(t,range.baseMipLevel);
         VkImageLayout attachment_layout=is_depth?VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        if(is_depth&&S.depth_sampled&&depth_read_only())attachment_layout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        if(is_depth&&S.depth_input)attachment_layout=VK_IMAGE_LAYOUT_GENERAL;
+        else if(is_depth&&S.depth_sampled&&depth_read_only())attachment_layout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         else if(S.feedback_flags&(is_depth?VK_PIPELINE_CREATE_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT:VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT))attachment_layout=VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;
         VkImageLayout layout;
         if(!is_depth&&texture_range_ok(t)&&range.levelCount<t->source.d.levels){texture_transition_levels(t,range.baseMipLevel,range.levelCount,attachment_layout);layout=attachment_layout;}
@@ -2574,6 +3165,11 @@ static VkRenderPass render_begin(void) {
     G.attachment_stats.store_bytes_avoided+=(uint64_t)width*height*discard_bpp;
     VkSubpassDescription sub={.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS,.colorAttachmentCount=rt->n,.pColorAttachments=color,
         .pDepthStencilAttachment=rt->depth?&depth:NULL};
+    VkInputAttachmentAspectReference input_aspect={.subpass=0,.inputAttachmentIndex=0,.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT};
+    VkRenderPassInputAttachmentAspectCreateInfo input_info={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO,
+        .aspectReferenceCount=1,.pAspectReferences=&input_aspect};
+    if(S.depth_input){input=depth;sub.inputAttachmentCount=1;sub.pInputAttachments=&input;
+        sub.flags=VK_SUBPASS_DESCRIPTION_RASTERIZATION_ORDER_ATTACHMENT_DEPTH_ACCESS_BIT_ARM;}
     VkSubpassDependency deps[3]={
       {.srcSubpass=VK_SUBPASS_EXTERNAL,.dstSubpass=0,.srcStageMask=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
        .dstStageMask=VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT,.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT},
@@ -2583,9 +3179,12 @@ static VkRenderPass render_begin(void) {
        .dstStageMask=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,.srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
        .dstAccessMask=VK_ACCESS_SHADER_READ_BIT,.dependencyFlags=VK_DEPENDENCY_BY_REGION_BIT|VK_DEPENDENCY_FEEDBACK_LOOP_BIT_EXT}};
     VkRenderPassCreateInfo ri={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,.attachmentCount=n,.pAttachments=attachments,
-       .subpassCount=1,.pSubpasses=&sub,.dependencyCount=(G.diag_no_pass_deps||(G.precise_sync&&!S.feedback_flags))?0u:S.feedback_flags?3u:2u,.pDependencies=deps};
+       .subpassCount=1,.pSubpasses=&sub,.dependencyCount=S.depth_input?2u:(G.diag_no_pass_deps||(G.precise_sync&&!S.feedback_flags))?0u:S.feedback_flags?3u:2u,.pDependencies=deps,
+       .pNext=S.depth_input?&input_info:NULL};
     memset(&S.pass_key,0,sizeof(S.pass_key));
     S.pass_key.count=n;S.pass_key.color_count=rt->n;S.pass_key.has_depth=rt->depth!=NULL;S.pass_key.dependency_count=ri.dependencyCount;
+    S.pass_key.input_count=sub.inputAttachmentCount;S.pass_key.subpass_flags=sub.flags;
+    if(S.depth_input){S.pass_key.input=input;S.pass_key.input_aspect=input_aspect.aspectMask;}
     memcpy(S.pass_key.attachments,attachments,n*sizeof(*attachments));
     memcpy(S.pass_key.color,color,rt->n*sizeof(*color));if(rt->depth)S.pass_key.depth=depth;
     memcpy(S.pass_key.dependencies,deps,ri.dependencyCount*sizeof(*deps));
@@ -2612,7 +3211,7 @@ static VkRenderPass render_begin(void) {
     if(G.precise_sync)hz_pass_sync();
     vkCmdBeginRenderPass(S.command,&begin,VK_SUBPASS_CONTENTS_INLINE);S.pending_clear=0;S.in_pass=1;G.pass_count++;
     if(S.pass_stats){if(S.pt_open)vkCmdBeginQuery(S.command,S.pass_stats,S.npt,0);else{G.pass_stats_omitted++;G.pass_stats_window_omitted++;}}
-    S.pass_feedback_flags=S.feedback_flags;S.pass_depth_read_only=read_only;
+    S.pass_feedback_flags=S.feedback_flags;S.pass_depth_read_only=read_only;S.pass_depth_input=S.depth_input;
     return S.passes[index];
 }
 static void trace_mesh_range(const char *name,uint64_t address,uint64_t bytes) {
@@ -2631,7 +3230,7 @@ static void trace_mesh_range(const char *name,uint64_t address,uint64_t bytes) {
 static void command_bind_profile(unsigned kind,int issued) {
     if(issued)G.profile_cmd_issued[kind]++;else G.profile_cmd_skipped[kind]++;
 }
-static void draw(const p_draw *a,const p_draw_idx *idx) {
+static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_instance) {
     if(!a&&!idx)die("draw parameters",0);
     int upper_left=atomic_load(&G.window_origin)==NVN_WINDOW_ORIGIN_MODE_UPPER_LEFT;
     if(G.state.ms.samples>1 || G.state.ms.a2c || G.state.ms.cov_mod || G.state.ms.sl_en)die("multisample semantics",G.state.ms.samples);
@@ -2648,17 +3247,53 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     /* A zero-color pass may still run fragment discard, depth export or
      * storage side effects. Only a program with no fragment stage omits it. */
     VShader *vs=program_stage(0),*ps=program_stage_optional(1);
+    if(ps&&getenv("DM_FRAME_DIR")&&((!strcmp(ps->key,"3749e309ce42949e")&&!strcmp(vs->key,"4a2526c0e38b227d"))||(!strcmp(ps->key,"73adabd418bb541e")&&!strcmp(vs->key,"72f3a02ea695e6be")))){
+        char request[1200];snprintf(request,sizeof(request),"%s/%s",getenv("DM_FRAME_DIR"),!strcmp(ps->key,"3749e309ce42949e")?"feedback-request":"feedback-73ad-request");
+        /* Empty/zero requests capture the first match. A positive integer
+         * skips that many matching draws, enabling a later failing draw to be
+         * reproduced without changing its real uniforms or depth writes. */
+        int capture=0;FILE *requested=fopen(request,"r");
+        if(requested){unsigned skip=0;int parsed=fscanf(requested,"%u",&skip);fclose(requested);
+            if(parsed==1&&skip){if(skip>100000)die("feedback capture skip bound",skip);
+                FILE *remaining=fopen(request,"w");if(!remaining||fprintf(remaining,"%u\n",skip-1)<0||fclose(remaining))die("feedback capture skip output",0);
+            }else capture=1;
+        }
+        if(capture){
+            if(unlink(request))die("feedback trace request consume",0);G.capture_feedback=G.trace_frame=1;snprintf(G.trace_shader,sizeof G.trace_shader,"%s",ps->key);G.ntrace_textures=0;
+            fprintf(stderr,"[nvn-vulkan] FEEDBACK_DRAW frame=%llu draw=%llu vs=%s ps=%s origin=%d viewport=%g,%g,%g,%g depth_range=%g,%g clamp=%u depth_mode=%d\n",(unsigned long long)G.present_count+1,(unsigned long long)G.draws,vs->key,ps->key,atomic_load(&G.window_origin),G.state.viewport.x,G.state.viewport.y,G.state.viewport.width,G.state.viewport.height,G.state.viewport.minDepth,G.state.viewport.maxDepth,G.state.depth_clamp,atomic_load(&G.depth_mode));
+            fprintf(stderr,"[nvn-vulkan] FEEDBACK_POLYGON offset_enable=%u factor=%g units=%g clamp=%g\n",G.state.polygon.offset_en,G.state.polygon_offset.factor,G.state.polygon_offset.units,G.state.polygon_offset.clamp);
+            for(unsigned stage=0;stage<2;stage++){VShader *s=stage?ps:vs;
+                for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==2||s->b[i].kind==9){unsigned slot=s->b[i].slot;char name[48];snprintf(name,sizeof(name),"feedback-%s-ubo%u",stage?"ps":"vs",slot);Range r=G.state.uniform[stage][slot];if(r.addr&&r.size)trace_mesh_range(name,r.addr,r.size);}}
+            uint8_t streams[16]={0};for(unsigned i=0;i<vs->h.na;i++){unsigned location=vs->attr[i][0];if(location>=16)die("feedback diagnostic attribute",location);va_st attr=G.state.attributes[location];if(attr.stream>=16)die("feedback diagnostic stream",attr.stream);streams[attr.stream]=1;
+                fprintf(stderr,"[nvn-vulkan] FEEDBACK_VERTEX location=%u stream=%u format=%u offset=%u stride=%u divisor=%u\n",location,attr.stream,attr.fmt,attr.offset,G.state.streams[attr.stream].stride,G.state.streams[attr.stream].divisor);}
+            for(unsigned i=0;i<16;i++)if(streams[i]&&G.state.vbuf[i].size){char name[32];snprintf(name,sizeof(name),"feedback-vbuf%u",i);if(G.state.vbuf[i].size<=16*1024*1024)trace_mesh_range(name,G.state.vbuf[i].address,G.state.vbuf[i].size);else fprintf(stderr,"[nvn-vulkan] FEEDBACK_BUFFER_SKIPPED stream=%u bytes=%llu\n",i,(unsigned long long)G.state.vbuf[i].size);}
+            if(idx){trace_mesh_range("feedback-indices",idx->ibuf,(uint64_t)idx->count*(idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?2:4));fprintf(stderr,"[nvn-vulkan] FEEDBACK_INDEX count=%d instances=%d base_vertex=%d base_instance=%u type=%u primitive=%u\n",idx->count,idx->instances,idx->base_vertex,idx->base_instance,idx->itype,idx->prim);}
+            else fprintf(stderr,"[nvn-vulkan] FEEDBACK_ARRAY first=%d count=%d instances=%d base_instance=%d primitive=%d\n",a->first,a->count,instances,base_instance,a->prim);
+            /* Capture every sampled texture before binding can stop at the
+             * unsupported depth descriptor partway through the binding list. */
+            for(unsigned i=0;i<ps->h.nb;i++)if(ps->b[i].kind==4){
+                unsigned tid=(unsigned)G.state.tex[1][ps->b[i].slot]&0xfffff;
+                if(tid<G.texture_slots&&G.tslot[tid].live)trace_texture(slot_texture(&G.tslot[tid],1),ps,&ps->b[i]);
+            }
+        }
+    }
+    int trace_postprocess=G.trace_frame&&!G.trace_ui&&!G.capture_feedback&&ps&&G.trace_shader[0]&&
+        (!strcmp(ps->key,G.trace_shader)||!strcmp(ps->key,"68ea18a1b9bbe5f3"));
+    /* The proven ClipDistance[0] == Position.z plane is supplied by Vulkan's
+     * native zero-to-one clipping only with depth clamping disabled. */
+    if(vs->requires_native_depth_clip&&(G.state.depth_clamp||atomic_load(&G.depth_mode)!=NVN_DEPTH_MODE_NEAR_IS_ZERO))die("redundant clip requires unclamped zero-to-one depth",G.state.depth_clamp);
     if(G.pass_timing&&ps&&G.state.rt.n==1&&G.state.rt.color[0]&&G.state.rt.color[0]->d.width==1280&&G.state.rt.color[0]->d.height==720){
         uint32_t k=0;while(k<G.nhot&&strcmp(G.hot[k].key,ps->key))k++;
         if(k==G.nhot&&k<64){strcpy(G.hot[k].key,ps->key);G.hot[k].draws=0;G.nhot++;}
         if(k<G.nhot)G.hot[k].draws++;}
+    ps=depth_input_select(vs,ps);
     if(G.skip_ps[0]&&ps&&!strcmp(ps->key,G.skip_ps))return;
     S.read_snapshots_allowed=1;
     for(unsigned stage=0;stage<2;stage++){VShader *s=stage?ps:vs;if(!s)continue;
         for(unsigned i=0;i<s->h.nb;i++){RBinding *b=&s->b[i];if(((b->kind==3||b->kind==9)&&b->flags)||b->kind==6||b->type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)S.read_snapshots_allowed=0;}
     }
     if(!S.read_snapshots_allowed)G.pass_side_effects=1;
-    G.draw_store=!S.read_snapshots_allowed;
+    G.draw_store=!S.read_snapshots_allowed||S.depth_input;
     if(G.profile_detail){snprintf(G.last_ps,sizeof G.last_ps,"%s",ps?ps->key:"none");G.last_count=a?a->count:idx->count;}
     if(G.precise_sync&&G.draw_store){pass_end();hz_add(1u<<HZ_GV|1u<<HZ_GF,HZ_ATT_STAGES|HZ_SHADER_STAGES,HZ_ATT_ACCESS|VK_ACCESS_SHADER_WRITE_BIT);}
     if(G.trace_frame&&!G.trace_ui&&idx&&idx->count>=100&&G.trace_meshes<4&&!strcmp(vs->key,"54f730a6c0efc118")){
@@ -2673,9 +3308,17 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
         NVNbufferRange v=G.state.vbuf[0];trace_mesh_range("ui-vbuf0",v.address,v.size);
         blend_st b=G.state.blend[0];fprintf(stderr,"[nvn-vulkan] UI_BLEND draw=%llu enable=%u src=%u,%u dst=%u,%u equation=%u,%u channels=%#x\n",(unsigned long long)G.draws,G.state.color.blend_en,b.src_rgb,b.src_a,b.dst_rgb,b.dst_a,b.eq_rgb,b.eq_a,G.state.mask.mask);
     }
+    if(trace_postprocess){
+        for(unsigned stage=0;stage<2;stage++){VShader *s=stage?ps:vs;
+            for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==2||s->b[i].kind==9){unsigned slot=s->b[i].slot;char name[48];snprintf(name,sizeof(name),"post-%s-ubo%u",stage?"ps":"vs",slot);Range r=G.state.uniform[stage][slot];if(r.addr&&r.size)trace_mesh_range(name,r.addr,r.size);}}
+        for(unsigned i=0;i<16;i++)if(G.state.vbuf[i].size){char name[32];snprintf(name,sizeof(name),"post-vbuf%u",i);trace_mesh_range(name,G.state.vbuf[i].address,G.state.vbuf[i].size);}
+        if(idx){trace_mesh_range("post-indices",idx->ibuf,(uint64_t)idx->count*(idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?2:4));
+            fprintf(stderr,"[nvn-vulkan] POST_INDEX draw=%llu type=%u base_vertex=%d base_instance=%u count=%d primitive=%u\n",(unsigned long long)G.draws,idx->itype,idx->base_vertex,idx->base_instance,idx->count,idx->prim);}
+        blend_st b=G.state.blend[0];fprintf(stderr,"[nvn-vulkan] POST_BLEND draw=%llu shader=%s enable=%u src=%u,%u dst=%u,%u equation=%u,%u channels=%#x\n",(unsigned long long)G.draws,ps->key,G.state.color.blend_en,b.src_rgb,b.src_a,b.dst_rgb,b.dst_a,b.eq_rgb,b.eq_a,G.state.mask.mask);
+    }
     if(G.state.rt.n&&!ps)die("color draw program fragment stage missing",1);
     if(G.draws<9 || G.trace_frame)fprintf(stderr,"[nvn-vulkan] DRAW_TRACE draw=%llu vs=%s ps=%s count=%d instances=%d rt=%llu viewport=%g,%g,%g,%g scissor=%d,%d,%u,%u cull=%u front=%u depth=%u,%u,%u blend=%u mask=%#x\n",
-        (unsigned long long)G.draws,vs->key,ps?ps->key:"none",a?a->count:idx->count,a?1:idx->instances,
+        (unsigned long long)G.draws,vs->key,ps?ps->key:"none",a?a->count:idx->count,a?instances:idx->instances,
         (unsigned long long)(G.state.rt.n&&G.state.rt.color[0]?G.state.rt.color[0]->serial:0),G.state.viewport.x,G.state.viewport.y,G.state.viewport.width,G.state.viewport.height,
         G.state.scissor.offset.x,G.state.scissor.offset.y,G.state.scissor.extent.width,G.state.scissor.extent.height,
         G.state.polygon.cull,G.state.polygon.front,G.state.ds.dt,G.state.ds.dw,G.state.ds.df,G.state.color.blend_en,G.state.mask.mask);
@@ -2704,11 +3347,13 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     if(S.active_occlusion==UINT32_MAX)query_reserve(S.occlusion,&S.occlusion_reset_count,S.nocc,1,LIMIT_WRITES);
     uint64_t render_started=prof_now();render_begin();G.profile_render_ns+=prof_now()-render_started;
     VkVertexInputAttributeDescription attributes[32];VkVertexInputBindingDescription bindings[16];uint32_t nbindings=0,nattributes=0,locations=0;uint8_t used[16]={0};
-    NvnVkVertexAdapt vertex_plan={0};
+    NvnVkVertexAdapt vertex_plan={0};int has_default=0;
     for(unsigned l=0;l<16;l++)if(vs->vertex_inputs[l].type)locations|=1u<<l;
     for(uint32_t i=0;i<vs->h.na;i++) { unsigned location=vs->attr[i][0];if(location>=16)die("vertex attribute count",location);
         va_st v=G.state.attributes[location];if(v.stream>=16)die("vertex stream",v.stream);
+        if(getenv("DM_ADAPTED_SHADER_DIR")&&!vs->vertex_layout_logged)fprintf(stderr,"[nvn-vulkan] VERTEX_LAYOUT shader=%s location=%u shader_kind=%u format=%u kind=%u stream=%u offset=%u\n",vs->key,location,vs->attr[i][1],v.fmt,vertex_scalar_kind(v.fmt),v.stream,v.offset);
         if(G.trace_frame)fprintf(stderr,"[nvn-vulkan] VERTEX_INPUT draw=%llu location=%u shader_type=%u stream=%u format=%u offset=%u stride=%u divisor=%u address=%#llx size=%llu\n",(unsigned long long)G.draws,location,vs->attr[i][1],v.stream,v.fmt,v.offset,G.state.streams[v.stream].stride,G.state.streams[v.stream].divisor,(unsigned long long)G.state.vbuf[v.stream].address,(unsigned long long)G.state.vbuf[v.stream].size);
+        if(v.fmt==NVN_FORMAT_NONE){has_default=1;continue;}
         NvnVkVertexFormat f=nvn_vk_vertex_format(v.fmt);if(!f.native)die("unsupported NVN vertex format",v.fmt);
         NvnVkVertexInput input=vs->vertex_inputs[location];
         if(input.kind!=f.kind)die("vertex format/shader numeric type mismatch",location);
@@ -2746,14 +3391,26 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
             attributes[nattributes++]=(VkVertexInputAttributeDescription){tail,v.stream,f.tail,(uint32_t)offset};
         }
     }
+    if(has_default){
+        unsigned binding=0;while(binding<16&&used[binding])binding++;if(binding==16)die("default vertex attribute binding limit",16);
+        if(!G.default_vertex.b){G.default_vertex=buffer_make(32,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);const float value[4]={0,0,0,1};const uint32_t integer[4]={0,0,0,1};memcpy(G.default_vertex.map,value,sizeof value);memcpy(G.default_vertex.map+16,integer,sizeof integer);}
+        for(uint32_t i=0;i<vs->h.na;i++)if(G.state.attributes[vs->attr[i][0]].fmt==NVN_FORMAT_NONE){
+            unsigned kind=vs->attr[i][1];if(kind>2)die("default vertex attribute scalar type",kind);
+            if(nattributes>=32)die("default vertex attribute limit",nattributes);
+            attributes[nattributes++]=(VkVertexInputAttributeDescription){vs->attr[i][0],binding,kind==2?VK_FORMAT_R32G32B32A32_UINT:kind==1?VK_FORMAT_R32G32B32A32_SINT:VK_FORMAT_R32G32B32A32_SFLOAT,kind?16:0};
+        }
+        bindings[nbindings++]=(VkVertexInputBindingDescription){binding,0,VK_VERTEX_INPUT_RATE_VERTEX};
+        command_bind_profile(NVN_VK_CMD_VERTEX,nvn_vk_cmd_vertex(&S.command_state,G.enable_command_cache&&!G.trace_frame,S.command,binding,G.default_vertex.b,0));
+    }
     if(nattributes>G.properties.limits.maxVertexInputAttributes)die("vertex attribute count device limit",nattributes);
+    vs->vertex_layout_logged=1;
     for(unsigned i=0;i<16;i++)if(used[i]) { vs_st v=G.state.streams[i];if(v.divisor>1)die("vertex divisor",v.divisor);
         bindings[nbindings++]=(VkVertexInputBindingDescription){i,v.stride,v.divisor?VK_VERTEX_INPUT_RATE_INSTANCE:VK_VERTEX_INPUT_RATE_VERTEX};
         NVNbufferRange r=G.state.vbuf[i];if(!r.address || !r.size)die("unbound vertex stream",i);uint64_t offset=0;VPool *p=pool_read(r.address,r.size,&offset);
         command_bind_profile(NVN_VK_CMD_VERTEX,nvn_vk_cmd_vertex(&S.command_state,G.enable_command_cache&&!G.trace_frame,S.command,i,p->v.b,offset)); }
     VkPipelineInputAssemblyStateCreateInfo ai={.sType=VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology=topology(a?a->prim:idx->prim)};
-    VkPipelineRasterizationStateCreateInfo raster={.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,.polygonMode=VK_POLYGON_MODE_FILL,
+    VkPipelineRasterizationStateCreateInfo raster={.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,.polygonMode=VK_POLYGON_MODE_FILL,.depthClampEnable=G.state.depth_clamp,
        .cullMode=G.state.polygon.cull==NVN_FACE_FRONT?VK_CULL_MODE_FRONT_BIT:G.state.polygon.cull==NVN_FACE_BACK?VK_CULL_MODE_BACK_BIT:
           G.state.polygon.cull==NVN_FACE_FRONT_AND_BACK?VK_CULL_MODE_FRONT_AND_BACK:VK_CULL_MODE_NONE,
        // An upper-left NVN window retains NDC y upwards; a negative Vulkan
@@ -2762,7 +3419,8 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
         .depthBiasEnable=depth_bias.enabled,.depthBiasConstantFactor=depth_bias.constant,
         .depthBiasSlopeFactor=depth_bias.slope,.depthBiasClamp=depth_bias.clamp};
     VkPipelineDepthStencilStateCreateInfo ds={.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,.depthTestEnable=G.state.ds.dt,
-        .depthWriteEnable=G.state.ds.dw,.depthCompareOp=(VkCompareOp)(G.state.ds.df-1),.stencilTestEnable=G.state.ds.st};
+        .depthWriteEnable=G.state.ds.dw,.depthCompareOp=(VkCompareOp)(G.state.ds.df-1),.stencilTestEnable=G.state.ds.st,
+        .flags=S.depth_input?VK_PIPELINE_DEPTH_STENCIL_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_DEPTH_ACCESS_BIT_ARM:0};
     ds.front=(VkStencilOpState){.failOp=(VkStencilOp)(G.state.ds.fail_f-1),.passOp=(VkStencilOp)(G.state.ds.zpass_f-1),
        .depthFailOp=(VkStencilOp)(G.state.ds.zfail_f-1),.compareOp=(VkCompareOp)(G.state.ds.sf_f-1),
        .compareMask=G.state.stencil_compare[0],.writeMask=G.state.stencil_write[0],.reference=G.state.stencil_ref[0]};
@@ -2777,16 +3435,22 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
            blends[i].dstColorBlendFactor=blend_factor(b.dst_rgb);blends[i].srcAlphaBlendFactor=blend_factor(b.src_a);
            blends[i].dstAlphaBlendFactor=blend_factor(b.dst_a);blends[i].colorBlendOp=blend_op(b.eq_rgb);blends[i].alphaBlendOp=blend_op(b.eq_a);} }
     VkPipelineColorBlendStateCreateInfo cb={.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,.attachmentCount=G.state.rt.n,.pAttachments=blends};
+    int32_t draw_parameters[3]={a?a->first:idx->base_vertex,a?base_instance:idx->base_instance,0};
     PsoKey key;memset(&key,0,sizeof(key));
-    key.shader[0]=(uint32_t)(vs-G.shaders)+1;key.shader[1]=ps?(uint32_t)(ps-G.shaders)+1:0;
+    key.shader[0]=vs->identity;key.shader[1]=ps?ps->identity:0;
     memcpy(key.storage_bias[0],S.storage_bias[0],sizeof key.storage_bias[0]);if(ps)memcpy(key.storage_bias[1],S.storage_bias[1],sizeof key.storage_bias[1]);
+    key.null_bindings[0]=S.null_bindings[0];if(ps)key.null_bindings[1]=S.null_bindings[1];
+    for(unsigned f=0;f<3;f++)if(vs->draw_parameter_mask&(1u<<f))key.draw_parameters[f]=draw_parameters[f];
     key.flags=S.feedback_flags;key.topology=ai.topology;key.cull=raster.cullMode;key.front=raster.frontFace;
     key.depth_bias=depth_bias;
     key.vertex_split=vertex_plan.split;
     for(unsigned l=0;l<16;l++){if(vertex_plan.convert[l]==1)key.vertex_unsigned|=1u<<l;if(vertex_plan.convert[l]==2)key.vertex_signed|=1u<<l;}
     key.attribute_count=nattributes;key.binding_count=nbindings;key.color_count=cb.attachmentCount;
     memcpy(key.attributes,attributes,nattributes*sizeof(*attributes));memcpy(key.bindings,bindings,nbindings*sizeof(*bindings));
+    key.shader_variant[1]=ps?ps->depth_input:0;
     key.depth_test=ds.depthTestEnable;key.depth_write=ds.depthWriteEnable;key.depth_compare=ds.depthCompareOp;key.stencil_test=ds.stencilTestEnable;
+    key.depth_flags=ds.flags;
+    key.depth_clamp=raster.depthClampEnable;
     key.stencil[0]=ds.front;key.stencil[1]=ds.back;memcpy(key.blend,blends,cb.attachmentCount*sizeof(*blends));key.pass=S.pass_key;
     /* Load/store actions do not affect Vulkan render-pass compatibility.
      * Keep the real pass descriptions intact, but avoid a new graphics PSO
@@ -2821,27 +3485,38 @@ static void draw(const p_draw *a,const p_draw_idx *idx) {
     if(G.diag_skip_class){const tex_t *first=G.state.rt.n>0?G.state.rt.color[0]:G.state.rt.depth;unsigned w=first?first->d.width:0,h=first?first->d.height:0;
         int cls=(w==2100&&h==2100)?1:(w==960&&h==540)?(G.state.rt.n==0?2:G.state.rt.n==1?4:8):16;skip_class=(G.diag_skip_class&cls)!=0;}
     if(G.diag_skip_draws||skip_class){}
-    else if(a) {if(a->count<0 || a->first<0)die("draw arrays bounds",a->count);vkCmdDraw(S.command,(G.diag_shape&2)&&a->count>3?3:a->count,1,a->first,0);}
+    else if(a) {if(a->count<0 || a->first<0||instances<0||base_instance<0)die("draw arrays bounds",a->count);vkCmdDraw(S.command,(G.diag_shape&2)&&a->count>3?3:a->count,instances,a->first,base_instance);}
     else { if(idx->count<0 || idx->instances<0 || (idx->itype!=NVN_INDEX_TYPE_UNSIGNED_SHORT && idx->itype!=NVN_INDEX_TYPE_UNSIGNED_INT))die("index type/bounds",idx->itype);
         uint64_t offset=0,size=(uint64_t)idx->count*(idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?2:4);VPool *p=pool_read(idx->ibuf,size,&offset);
         command_bind_profile(NVN_VK_CMD_INDEX,nvn_vk_cmd_index(&S.command_state,cache_commands,S.command,p->v.b,offset,idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32));
         vkCmdDrawIndexed(S.command,(G.diag_shape&2)&&idx->count>3?3:idx->count,idx->instances,0,idx->base_vertex,idx->base_instance); }
     if(G.disable_query_batch||G.trace_frame)occlusion_end();
-    if(G.trace_frame&&G.trace_ui&&ps&&!strcmp(ps->key,"62ddcb3faa41a92a")&&G.state.rt.n==1){
+    if(G.trace_frame&&ps&&((G.trace_ui&&!strcmp(ps->key,"62ddcb3faa41a92a"))||trace_postprocess)&&G.state.rt.n==1){
         VTexture *t=texture_get(G.state.rt.color[0],0);if(t->bpp!=4||aspect(t->format)!=VK_IMAGE_ASPECT_COLOR_BIT)die("UI result capture format",t->format);
         all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);uint64_t bytes=(uint64_t)t->width*t->height*4;
         VBuffer *capture=temporary(bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT);VkBufferImageCopy copy={.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.imageExtent={t->width,t->height,1}};
-        vkCmdCopyImageToBuffer(S.command,t->image,t->layout,capture->b,1,&copy);char name[160];snprintf(name,sizeof(name),"ui-result-%04llu-%llu-%ux%u",(unsigned long long)G.present_count+1,(unsigned long long)G.draws,t->width,t->height);trace_capture_queue(capture,bytes,name);
+        vkCmdCopyImageToBuffer(S.command,t->image,t->layout,capture->b,1,&copy);char name[160];snprintf(name,sizeof(name),"%s-result-%04llu-%llu-%ux%u",trace_postprocess?"post":"ui",(unsigned long long)G.present_count+1,(unsigned long long)G.draws,t->width,t->height);trace_capture_queue(capture,bytes,name);
+        fprintf(stderr,"[nvn-vulkan] GPU_OUTPUT_CAPTURE name=%s draw=%llu shader=%s serial=%llu format=%u extent=%u,%u\n",name,(unsigned long long)G.draws,ps->key,(unsigned long long)t->serial,t->format,t->width,t->height);
     }
-    G.draws++;aligned_writeback();
+    ghost_note(a,idx,instances,base_instance,vs,ps);
+    G.capture_feedback=0;G.draws++;aligned_writeback();
+    /* Inspect the GPU guard before any following draw, guest publication or
+     * presentation. Keep this conservative experiment synchronous. */
+    if(S.depth_input){all_barrier();mtl_sub_commit();mtl_sub_begin();}
 }
+#include "nvn_vk_ui_ghost.inc"
 static void dispatch(const p_dispatch *p) {
     S.read_snapshots_allowed=0;
-    pass_end();if(p->x<0 || p->y<0 || p->z<0)die("dispatch dimensions",p->x);VShader *s=program_stage(5);
+    pass_end();if(p->x<0 || p->y<0 || p->z<0)die("dispatch dimensions",p->x);
+    uint32_t groups[3]={(uint32_t)p->x,(uint32_t)p->y,(uint32_t)p->z};
+    for(unsigned axis=0;axis<3;axis++)if(groups[axis]>G.properties.limits.maxComputeWorkGroupCount[axis])die("dispatch device group limit",axis);
+    if(memcmp(G.state.dispatch,groups,sizeof groups)){memcpy(G.state.dispatch,groups,sizeof groups);G.ssbo_revision[5]++;G.binding_revision[5]++;}
+    VShader *s=program_stage(5);
     S.nimage_uses=0;collect_image_uses(s);prepare_comparison_images(s);
     VkDescriptorSet set=bind_shader(s);
-    PsoKey key;memset(&key,0,sizeof(key));key.compute=1;key.shader[0]=(uint32_t)(s-G.shaders)+1;
+    PsoKey key;memset(&key,0,sizeof(key));key.compute=1;key.shader[0]=s->identity;
     memcpy(key.storage_bias[0],S.storage_bias[5],sizeof key.storage_bias[0]);
+    key.null_bindings[0]=S.null_bindings[5];
     uint64_t hash=0;Pso pso,*cached=pso_lookup(&key,&hash);
     if(cached)pso=*cached;
     else pso=pipeline_obtain(&key,hash,s,NULL);
@@ -3008,6 +3683,18 @@ static void clear_tex(const p_clear_tex *p) {
        (uint64_t)p->r.yoffset+p->r.height>h || (uint64_t)(volume?0:layer)+p->r.zoffset+p->r.depth>z)
         die("texture clear view/region/mask",nvn);
     if(!p->r.width || !p->r.height)return;
+    if(!p->is_uint && nvn==p->tex->d.format &&
+       (nvn==NVN_FORMAT_R11G11B10F || nvn==NVN_FORMAT_R16F || nvn==NVN_FORMAT_RG16F || nvn==NVN_FORMAT_RGBA16F) &&
+       !p->r.xoffset && !p->r.yoffset && (unsigned)p->r.width==w && (unsigned)p->r.height==h &&
+       (!volume || (!p->r.zoffset && (unsigned)p->r.depth==z))) {
+        /* Vulkan performs the target float packing, including R11G11B10,
+         * for complete mip/layer clears. Partial clears retain the checked
+         * staging path below. */
+        VkClearColorValue value;memcpy(value.float32,p->c.f,sizeof value.float32);
+        VkImageSubresourceRange range={VK_IMAGE_ASPECT_COLOR_BIT,level,1,volume?0:layer+p->r.zoffset,volume?1:p->r.depth};
+        all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdClearColorImage(S.command,t->image,t->layout,&value,1,&range);t->cpu_owned=0;tex_dirty(t);return;
+    }
     uint8_t pixel[16]={0};int channels=0,unorm=0,integer=0,floating=0;
     switch(nvn) {
         case NVN_FORMAT_R8:channels=1;unorm=1;break;case NVN_FORMAT_RG8:channels=2;unorm=1;break;case NVN_FORMAT_RGBA8:case NVN_FORMAT_RGBA8_SRGB:channels=4;unorm=1;break;
@@ -3036,6 +3723,7 @@ static void clear_tex(const p_clear_tex *p) {
     t->cpu_owned=0;tex_dirty(t); /* GPU now owns the image; sampled access must preserve it. */
 }
 static VkImageSubresourceLayers copy_layers(const tex_t *t,VkFormat gpu_format,const view_t *v,const NVNcopyRegion *r) {
+    if(v)fprintf(stderr,"[nvn-vulkan] COPY_VIEW serial=%llu target=%d format=%d view_format=%u:%d view_target=%u:%d levels=%u:%d,%d layers=%u:%d,%d region=%d,%d,%d,%d,%d,%d\n",(unsigned long long)t->serial,t->d.target,t->d.format,v->set_format,v->format,v->set_target,v->target,v->set_levels,v->base_level,v->nlevels,v->set_layers,v->min_layer,v->nlayers,r->xoffset,r->yoffset,r->zoffset,r->width,r->height,r->depth);
     unsigned level=v&&v->set_levels?v->base_level:0,base=v&&v->set_layers?v->min_layer:0;
     int volume=t->d.target==NVN_TEXTURE_TARGET_3D;
     if(level>=t->d.levels || (v&&v->set_levels&&v->nlevels<1) || (v&&v->set_format&&v->format!=t->d.format) ||
@@ -3051,22 +3739,33 @@ static VkImageSubresourceLayers copy_layers(const tex_t *t,VkFormat gpu_format,c
 }
 #include "nvn_vk_depth_copy.h"
 static void copy_t2t(const p_copy_t2t *p) {
+    static unsigned copies;
+    if(copies++<8||G.trace_frame)fprintf(stderr,"[nvn-vulkan] COPY_REPLAY frame=%llu src=%llu dst=%llu src_mem=%p dst_mem=%p src_extent=%u,%u dst_extent=%u,%u sr=%d,%d,%d,%d,%d,%d dr=%d,%d,%d,%d,%d,%d flags=%#x src_view=%u:%d,%d,%d,%d dst_view=%u:%d,%d,%d,%d\n",
+        (unsigned long long)G.present_count+1,(unsigned long long)p->src->serial,(unsigned long long)p->dst->serial,p->src->mem,p->dst->mem,p->src->d.width,p->src->d.height,p->dst->d.width,p->dst->d.height,
+        p->sr.xoffset,p->sr.yoffset,p->sr.zoffset,p->sr.width,p->sr.height,p->sr.depth,p->dr.xoffset,p->dr.yoffset,p->dr.zoffset,p->dr.width,p->dr.height,p->dr.depth,p->flags,
+        p->has_sv,p->sv.base_level,p->sv.nlevels,p->sv.min_layer,p->sv.nlayers,p->has_dv,p->dv.base_level,p->dv.nlevels,p->dv.min_layer,p->dv.nlayers);
     if(p->flags&~(NVN_COPY_FLAGS_ENGINE_2D_BIT|NVN_COPY_FLAGS_LINEAR_FILTER_BIT))die("texture copy flags",p->flags);
+    if(p->sr.width<0 || p->sr.height<0 || p->sr.depth<0 || p->dr.width<0 || p->dr.height<0 || p->dr.depth<0)die("texture copy negative extent",0);
+    if(!p->sr.width || !p->sr.height || !p->sr.depth || !p->dr.width || !p->dr.height || !p->dr.depth) {
+        fprintf(stderr,"[nvn-vulkan] COPY_EMPTY src=%d,%d,%d dst=%d,%d,%d\n",p->sr.width,p->sr.height,p->sr.depth,p->dr.width,p->dr.height,p->dr.depth);return;
+    }
     uint32_t decoded_format;int decoded_bpp;
     int bc_destination=nvn_bc_unpacked(p->dst->d.format,&decoded_format,&decoded_bpp);
     /* A partial BC update must retain the other compressed blocks already
      * present in guest storage, even when the destination is first used here. */
     VTexture *s=texture_get(p->src,1),*d=texture_get(p->dst,bc_destination);
     int sv=p->src->d.target==NVN_TEXTURE_TARGET_3D,dv=p->dst->d.target==NVN_TEXTURE_TARGET_3D;
-    if(s==d || sv!=dv || s->format!=d->format || p->src->d.format!=p->dst->d.format)die("texture copy alias/dimension/format",p->dst->serial);
+    int same_format=s->format==d->format && p->src->d.format==p->dst->d.format;
+    if(s==d || sv!=dv)die("texture copy alias/dimension",p->dst->serial);
     VkImageSubresourceLayers sl=copy_layers(p->src,s->format,p->has_sv?&p->sv:NULL,&p->sr),dl=copy_layers(p->dst,d->format,p->has_dv?&p->dv:NULL,&p->dr);
+    if(sl.aspectMask!=dl.aspectMask)die("texture copy aspect mismatch",p->dst->serial);
     /* Copies are normal per-frame work. Keep their resource details for startup
      * and requested frame traces without growing the on-device log per copy. */
     if(G.present_count<2 || G.trace_frame)fprintf(stderr,"[nvn-vulkan] COPY_T2T src=%llu dst=%llu region=%d,%d,%d -> %d,%d,%d flags=%#x src_level=%u dst_level=%u src_layer=%u dst_layer=%u\n",(unsigned long long)p->src->serial,(unsigned long long)p->dst->serial,p->sr.width,p->sr.height,p->sr.depth,p->dr.width,p->dr.height,p->dr.depth,p->flags,sl.mipLevel,dl.mipLevel,sl.baseArrayLayer,dl.baseArrayLayer);
     VkOffset3D so={p->sr.xoffset,p->sr.yoffset,sv?p->sr.zoffset:0},doff={p->dr.xoffset,p->dr.yoffset,dv?p->dr.zoffset:0};
     int depth=(sl.aspectMask&VK_IMAGE_ASPECT_DEPTH_BIT)!=0;
     G.profile_t2t_copies++;G.profile_t2t_texels+=(uint64_t)p->dr.width*p->dr.height*p->dr.depth;
-    if(p->sr.width==p->dr.width&&p->sr.height==p->dr.height&&p->sr.depth==p->dr.depth) {
+    if(same_format&&p->sr.width==p->dr.width&&p->sr.height==p->dr.height&&p->sr.depth==p->dr.depth) {
         texture_transition(s,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);texture_transition(d,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);all_barrier();
         VkImageCopy c={.srcSubresource=sl,.srcOffset=so,.dstSubresource=dl,.dstOffset=doff,.extent={p->sr.width,p->sr.height,sv?p->sr.depth:1}};
         VkImageCopy copies[2]={c,c};unsigned count=1;
@@ -3078,12 +3777,15 @@ static void copy_t2t(const p_copy_t2t *p) {
         if(depth)DepthCopy.plain_copies++;
     }else {
         G.profile_t2t_scaled++;
-        VkFormatProperties fp=format_properties(s->format);
+        VkFormatProperties fp=format_properties(s->format),dp=format_properties(d->format);
         if(!(p->flags&NVN_COPY_FLAGS_ENGINE_2D_BIT) || (!sv&&p->sr.depth!=p->dr.depth))die("texture scaled copy flags/layers",p->flags);
         VkFilter filter=p->flags&NVN_COPY_FLAGS_LINEAR_FILTER_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST;
         if(depth&&filter!=VK_FILTER_NEAREST)die("depth copy requires nearest filtering",p->flags);
+        if(!same_format && !((p->src->d.format==NVN_FORMAT_R11G11B10F || p->src->d.format==NVN_FORMAT_RGBA16F) &&
+                            (p->dst->d.format==NVN_FORMAT_RGBA8 || p->dst->d.format==NVN_FORMAT_RGBA8_SRGB || p->dst->d.format==NVN_FORMAT_RGB10A2)))
+            die("texture 2D format conversion needs numeric class validation",p->dst->d.format);
         if(filter==VK_FILTER_LINEAR&&!(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))die("texture blit linear feature",s->format);
-        int blit=(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT)&&(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT);
+        int blit=(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT)&&(dp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT);
         const char *force=depth?getenv("DM_VK_DEPTH_COPY_DRAW"):NULL;
         int drawn=depth&&(!blit||(force&&!strcmp(force,"1")));
         if(drawn){
@@ -3105,6 +3807,38 @@ static void copy_t2t(const p_copy_t2t *p) {
         }
     }
     d->cpu_owned=0;tex_dirty(d);all_barrier();
+}
+static void zcull_data(const p_zcull *p,int restore) {
+    if(p->address%32 || p->size<sizeof(NvnVkZCullRecord) || !pool_find(p->address,p->size,NULL))
+        die("ZCull storage bounds/alignment",p->address);
+    if(!G.state.rt.depth)die("ZCull without depth attachment",restore);
+    VTexture *depth=texture_get(G.state.rt.depth,0);
+    if(!(aspect(depth->format)&VK_IMAGE_ASPECT_DEPTH_BIT))die("ZCull non-depth attachment",depth->format);
+    VkImageSubresourceRange range=attachment_range(&depth->source,G.state.rt.has_dview?&G.state.rt.dview:NULL);
+    unsigned width=depth->width>>range.baseMipLevel,height=depth->height>>range.baseMipLevel;
+    NvnVkZCullRecord expected=nvn_vk_zcull_record(depth->source.d.format,width?width:1,height?height:1,
+        depth->source.d.samples>1?depth->source.d.samples:1,range.baseMipLevel,range.layerCount);
+    all_barrier();
+    uint64_t offset=0;
+    if(restore) {
+        /* Upload CPU-owned bytes, preserve queued GPU writes, then wait for the
+         * actual fence before inspecting the saved record. This also handles
+         * save/copy/restore in one command handle or across submissions. */
+        pool_read(p->address,sizeof(expected),&offset);S.submission_cpu_readback=1;
+        mtl_sub_commit();mtl_sub_begin();
+        VPool *pool=pool_find(p->address,sizeof(expected),&offset);
+        if(!pool || !pool->v.map)die("ZCull restore pool lifetime",p->address);
+        NvnVkZCullRecord saved;memcpy(&saved,pool->v.map+offset,sizeof(saved));
+        if(!nvn_vk_zcull_valid(&saved,&expected))die("ZCull restore incompatible/corrupt state",p->address);
+        /* No external hierarchy is imported into Vulkan. Each image keeps its
+         * own driver-managed HiZ; never roll back or clear real depth pixels. */
+    } else {
+        VPool *pool=pool_find(p->address,sizeof(expected),&offset);pool_materialize(pool);
+        vkCmdUpdateBuffer(S.command,pool->v.b,offset,sizeof(expected),&expected);
+        mark_write(p->address,sizeof(expected));
+    }
+    if(G.trace_frame)fprintf(stderr,"[nvn-vulkan] ZCULL_%s address=%llx bytes=%zu extent=%ux%u level=%u layers=%u conservative=1\n",
+        restore?"RESTORE":"SAVE",(unsigned long long)p->address,sizeof(expected),width,height,range.baseMipLevel,range.layerCount);
 }
 static void payload_check(const op_hdr *h,size_t bytes) { if(h->size<8+bytes)die("command payload truncated",h->op); }
 static int command_memory_readable(CommandMemoryCursor *cursor,const uint8_t *pointer,uint64_t bytes) {
@@ -3141,6 +3875,13 @@ static void execute(const uint8_t *p,unsigned depth) {
         case OP_RESET_COUNTER:{uint64_t type;payload_check(&h,8);memcpy(&type,a,8);
             if(type!=NVN_COUNTER_TYPE_SAMPLES_PASSED)die("GPU counter reset type implementation pending",type);
             occlusion_end();counter_op(0,0,0);break;}
+        case OP_SAVE_ZCULL:case OP_RESTORE_ZCULL:
+            payload_check(&h,sizeof(p_zcull));zcull_data((const p_zcull *)a,h.op==OP_RESTORE_ZCULL);break;
+        case OP_DEBUG:{payload_check(&h,sizeof(p_debug));const p_debug *d=(const void *)a;
+            if(d->action<1 || d->action>3 || !d->length || d->length>4096)die("debug record fields",d->action);
+            payload_check(&h,sizeof(*d)+d->length);const char *label=(const char *)(d+1);
+            if(label[d->length-1])die("debug record string bounds",d->length);
+            if(G.trace_frame)fprintf(stderr,"[nvn-vulkan] DEBUG_GROUP action=%u domain=%#x text=%s\n",d->action,d->domain,label);break;}
         case OP_COPY_B2B:{uint64_t src,dst,len;payload_check(&h,24);memcpy(&src,a,8);memcpy(&dst,a+8,8);memcpy(&len,a+16,8);mtl_sub_copy(src,dst,len);break;}
         case OP_UPDATE_UB:{uint64_t dst,len;payload_check(&h,16);memcpy(&dst,a,8);memcpy(&len,a+8,8);if(len>h.size-24)die("uniform update payload",len);
             G.profile_uniform_updates++;
@@ -3159,7 +3900,11 @@ static void execute(const uint8_t *p,unsigned depth) {
         case OP_SCISSOR:{payload_check(&h,sizeof(p_scissor));const p_scissor *s=(const void *)a;if(s->x<0||s->y<0||s->w<0||s->h<0)die("scissor bounds",s->x);
             G.state.scissor=(VkRect2D){{s->x,s->y},{s->w,s->h}};G.state.scissor_set=1;break;}
         case OP_DEPTH_RANGE:{payload_check(&h,sizeof(p_depth_range));const p_depth_range *d=(const void *)a;G.state.viewport.minDepth=d->n;G.state.viewport.maxDepth=d->f;break;}
-        case OP_BIND_PROGRAM:payload_check(&h,sizeof(p_bind_program));G.state.program=((const p_bind_program *)a)->prog;break;
+        case OP_BIND_PROGRAM:{payload_check(&h,sizeof(p_bind_program));const p_bind_program *b=(const void *)a;
+            if(G.present_count<3)fprintf(stderr,"[nvn-vulkan] BIND_PROGRAM pointer=%p mask=%#x count=%u serial=%llu\n",(const void *)b->prog,b->stages,b->prog?b->prog->nstage:0,(unsigned long long)(b->prog?b->prog->serial:0));
+            if(b->stages&~63)die("program stage mask",b->stages);
+            for(unsigned stage=0;stage<6;stage++)if(b->stages&(1u<<stage))G.state.programs[stage]=b->prog;
+            break;}
         case OP_BIND_STATE:{payload_check(&h,sizeof(p_bind_state));const p_bind_state *b=(const void *)a;switch(b->kind){
             case 0:{blend_st s;memcpy(&s,b->bytes,sizeof(s));if(s.target>=8)die("blend target",s.target);G.state.blend[s.target]=s;break;}
             case 1:memcpy(&G.state.color,b->bytes,sizeof(color_st));break;case 2:memcpy(&G.state.mask,b->bytes,sizeof(chmask_st));break;
@@ -3188,8 +3933,9 @@ static void execute(const uint8_t *p,unsigned depth) {
             payload_check(&h,offsetof(p_bind_handles,h)+(size_t)b->n*sizeof(uint64_t));
             uint64_t *dest=h.op==OP_BIND_TEX?G.state.tex[b->stage]:h.op==OP_BIND_SAMP?G.state.samp[b->stage]:G.state.img[b->stage];
             size_t bytes=(size_t)b->n*sizeof(uint64_t);if(bytes&&memcmp(dest+b->first,b->h,bytes)){memcpy(dest+b->first,b->h,bytes);G.binding_revision[b->stage]++;G.texbind_revision[b->stage]++;}break;}
-        case OP_DRAW:payload_check(&h,sizeof(p_draw));draw((const p_draw *)a,NULL);break;
-        case OP_DRAW_IDX:payload_check(&h,sizeof(p_draw_idx));draw(NULL,(const p_draw_idx *)a);break;
+        case OP_DRAW:payload_check(&h,sizeof(p_draw));draw((const p_draw *)a,NULL,1,0);break;
+        case OP_DRAW_IDX:payload_check(&h,sizeof(p_draw_idx));draw(NULL,(const p_draw_idx *)a,0,0);break;
+        case OP_DRAW_INSTANCED:{payload_check(&h,sizeof(p_draw_instanced));const p_draw_instanced *d=(const void *)a;draw(&d->draw,NULL,d->instances,d->base_instance);break;}
         case OP_DISPATCH:payload_check(&h,sizeof(p_dispatch));dispatch((const p_dispatch *)a);break;
         case OP_BARRIER:{payload_check(&h,4);int32_t bits;memcpy(&bits,a,4);G.barrier_bits[bits&255]++;G.last_barrier_bits=bits;
             /* A pass with no shader-written memory has nothing for a barrier to order: attachment hazards are covered by
@@ -3197,7 +3943,13 @@ static void execute(const uint8_t *p,unsigned depth) {
             if(G.barrier_pass_elide&&S.in_pass&&!G.pass_side_effects){G.barrier_kept[bits&255]++;break;}
             if(!S.in_pass)G.barrier_nopass++;else G.barrier_sidefx++;
             all_barrier_soft();break;} /* Full barrier is stronger than every supported NVN barrier bit. */
-        case OP_POLY_OFFSET:payload_check(&h,sizeof(p_poly_offset));memcpy(&G.state.polygon_offset,a,sizeof(p_poly_offset));break;
+        case OP_POLY_OFFSET:{payload_check(&h,sizeof(p_poly_offset));const p_poly_offset *v=(const void *)a;
+            if(!isfinite(v->factor)||!isfinite(v->units)||!isfinite(v->clamp))die("non-finite polygon offset",0);
+            G.state.polygon_offset=*v;
+            break;}
+        case OP_DEPTH_CLAMP:{payload_check(&h,sizeof(uint32_t));uint32_t enabled;memcpy(&enabled,a,4);
+            if(enabled>1||(enabled&&!G.depth_clamp_available))die("depth clamp feature/state unavailable",enabled);
+            G.state.depth_clamp=enabled;break;}
         case OP_WAIT_EVENT:{uint64_t address;uint32_t mode,value;payload_check(&h,16);
             memcpy(&address,a,8);memcpy(&mode,a+8,4);memcpy(&value,a+12,4);
             if(!pool_find(address,4,NULL) || address%4 || mode>1)die("event wait storage/mode",address);
@@ -3336,15 +4088,29 @@ void dm_vk_set_window(void *native) {
         if(!create)die("Android Vulkan surface entry",0);CHECK(create(G.instance,&i,NULL,&G.surface)); }
     pthread_mutex_unlock(&G.lock);
 }
-static void swapchain_make(void) {
+static int present_srgb(VkFormat format) {
+    return format==VK_FORMAT_R8G8B8A8_SRGB||format==VK_FORMAT_B8G8R8A8_SRGB;
+}
+static void swapchain_make(VkFormat source_format) {
     if(G.swapchain)return;if(!G.surface)die("present without Android Surface",0);
     VkBool32 supported=0;CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(G.physical,G.family,G.surface,&supported));if(!supported)die("queue surface support",0);
     VkSurfaceCapabilitiesKHR caps;CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(G.physical,G.surface,&caps));
     if(!(caps.supportedUsageFlags&VK_IMAGE_USAGE_TRANSFER_DST_BIT))die("swapchain transfer usage",caps.supportedUsageFlags);
     uint32_t n=0;CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(G.physical,G.surface,&n,NULL));if(!n)die("surface formats",0);
     VkSurfaceFormatKHR *formats=calloc(n,sizeof(*formats));if(!formats)die("surface format allocation",n);
-    CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(G.physical,G.surface,&n,formats));VkSurfaceFormatKHR chosen=formats[0];
-    for(uint32_t i=0;i<n;i++)if(formats[i].format==VK_FORMAT_R8G8B8A8_UNORM || formats[i].format==VK_FORMAT_B8G8R8A8_UNORM){chosen=formats[i];break;}free(formats);
+    CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(G.physical,G.surface,&n,formats));VkSurfaceFormatKHR chosen=formats[0];int selected=0;
+    /* Preserve the guest's encoded scanout values. A blit from sRGB to
+     * UNORM decodes to linear; Android's nonlinear display then looks dark. */
+    if(n==1&&formats[0].format==VK_FORMAT_UNDEFINED){chosen.format=present_srgb(source_format)?VK_FORMAT_R8G8B8A8_SRGB:VK_FORMAT_R8G8B8A8_UNORM;selected=1;}
+    for(int fallback=0;fallback<2&&!selected;fallback++)for(uint32_t k=0;k<n;k++){
+        VkFormat f=formats[k].format;
+        if((f==VK_FORMAT_R8G8B8A8_UNORM||f==VK_FORMAT_B8G8R8A8_UNORM||present_srgb(f))&&
+           formats[k].colorSpace==VK_COLOR_SPACE_SRGB_NONLINEAR_KHR&&present_srgb(f)==(present_srgb(source_format)^fallback)){
+            chosen=formats[k];selected=1;break;
+        }
+    }
+    free(formats);if(!selected)die("Android scanout surface needs supported 8-bit nonlinear format",chosen.format);
+    fprintf(stderr,"[nvn-vulkan] PRESENT_ENCODING source_format=%u swap_format=%u colorspace=%u bridge=%d\n",source_format,chosen.format,chosen.colorSpace,present_srgb(source_format)!=present_srgb(chosen.format));
     G.swap_format=chosen.format;G.swap_extent=caps.currentExtent;
     if(G.swap_extent.width==UINT32_MAX)G.swap_extent=(VkExtent2D){(uint32_t)ANativeWindow_getWidth(G.window),(uint32_t)ANativeWindow_getHeight(G.window)};
     uint32_t count=caps.minImageCount+1;if(caps.maxImageCount && count>caps.maxImageCount)count=caps.maxImageCount;
@@ -3364,19 +4130,54 @@ static void swapchain_make(void) {
     for(uint32_t k=0;k<G.nswap;k++)CHECK(vkCreateSemaphore(G.device,&sem_info,NULL,&G.swap_finished[k]));
 }
 static void swapchain_destroy_locked(void) {
+    if(G.present_encoding_bridge.image)vkDestroyImage(G.device,G.present_encoding_bridge.image,NULL);
+    memory_release(G.present_encoding_bridge.memory,G.present_encoding_bridge.allocation_size,DM_VK_MEMORY_PRESENT);
+    memset(&G.present_encoding_bridge,0,sizeof G.present_encoding_bridge);
     for(uint32_t k=0;k<G.nswap&&k<16;k++)if(G.swap_finished[k]){vkDestroySemaphore(G.device,G.swap_finished[k],NULL);G.swap_finished[k]=VK_NULL_HANDLE;}
     if(G.swapchain)vkDestroySwapchainKHR(G.device,G.swapchain,NULL);G.swapchain=VK_NULL_HANDLE;G.nswap=0;
+}
+static VTexture *present_encoded_source(VTexture *source) {
+    if(present_srgb(source->format)==present_srgb(G.swap_format))return source;
+    int rgba=source->format==VK_FORMAT_R8G8B8A8_SRGB||source->format==VK_FORMAT_R8G8B8A8_UNORM;
+    int bgra=source->format==VK_FORMAT_B8G8R8A8_SRGB||source->format==VK_FORMAT_B8G8R8A8_UNORM;
+    if(!rgba&&!bgra)die("scanout encoding bridge format",source->format);
+    VkFormat format=rgba?(present_srgb(G.swap_format)?VK_FORMAT_R8G8B8A8_SRGB:VK_FORMAT_R8G8B8A8_UNORM):
+        (present_srgb(G.swap_format)?VK_FORMAT_B8G8R8A8_SRGB:VK_FORMAT_B8G8R8A8_UNORM);
+    VTexture *t=&G.present_encoding_bridge;
+    if(t->image&&(t->width!=source->width||t->height!=source->height||t->format!=format)){
+        CHECK(cpu_work_queue_idle(G.queue));vkDestroyImage(G.device,t->image,NULL);memory_release(t->memory,t->allocation_size,DM_VK_MEMORY_PRESENT);memset(t,0,sizeof(*t));
+    }
+    if(!t->image){
+        t->width=source->width;t->height=source->height;t->depth=1;t->format=format;t->source.d.levels=1;t->source.L.layers=1;
+        VkImageCreateInfo ci={.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,.imageType=VK_IMAGE_TYPE_2D,.format=format,
+            .extent={t->width,t->height,1},.mipLevels=1,.arrayLayers=1,.samples=VK_SAMPLE_COUNT_1_BIT,
+            .tiling=VK_IMAGE_TILING_OPTIMAL,.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
+        CHECK(vkCreateImage(G.device,&ci,NULL,&t->image));VkMemoryRequirements r;vkGetImageMemoryRequirements(G.device,t->image,&r);
+        VkMemoryAllocateInfo ai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=r.size,.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+        t->allocation_size=r.size;t->memory=memory_allocate(&ai,DM_VK_MEMORY_PRESENT);CHECK(vkBindImageMemory(G.device,t->image,t->memory,0));
+    }
+    /* Copying compatible formats preserves bits; subsequent blitting between
+     * matching encodings scales those pixels without changing scanout gamma. */
+    texture_transition(source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy copy={.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.extent={t->width,t->height,1}};
+    vkCmdCopyImage(S.command,source->image,source->layout,t->image,t->layout,1,&copy);texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);return t;
+}
+void dm_vk_set_layer_crop(int x,int y,int width,int height) {
+    if(x<0||y<0||width<0||height<0||width>INT32_MAX-x||height>INT32_MAX-y)die("vi layer crop arguments",width);
+    pthread_mutex_lock(&G.lock);G.vi_crop[0]=x;G.vi_crop[1]=y;G.vi_crop[2]=width;G.vi_crop[3]=height;pthread_mutex_unlock(&G.lock);
+    fprintf(stderr,"[nvn-vulkan] VI_LAYER_CROP %d,%d %dx%d\n",x,y,width,height);
 }
 uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     if(present_cpu_depth++==0)present_cpu_started=dm_android_nvn_thread_cpu_ns();
     uint64_t present_started=dm_android_nvn_clock_ns();G.seg_index=0;
-    (void)period;if(!G.window)die("original game present requires Surface",0);sub_begin_ctx(&G.submission_slot2);swapchain_make();
+    (void)period;if(!G.window)die("original game present requires Surface",0);sub_begin_ctx(&G.submission_slot2);
     VTexture *t=texture_get(source,0);if(aspect(t->format)!=VK_IMAGE_ASPECT_COLOR_BIT)die("present depth texture",t->format);
-    if(G.present_count<2 || G.trace_frame)fprintf(stderr,"[nvn-vulkan] PRESENT_FORMAT frame=%llu source_format=%u swap_format=%u source_extent=%u,%u swap_extent=%u,%u\n",(unsigned long long)G.present_count+1,t->format,G.swap_format,t->width,t->height,G.swap_extent.width,G.swap_extent.height);
+    swapchain_make(t->format);
+    if(G.present_count<2 || G.trace_frame)fprintf(stderr,"[nvn-vulkan] PRESENT_FORMAT frame=%llu source=%llu source_mem=%p source_format=%u swap_format=%u source_extent=%u,%u swap_extent=%u,%u\n",(unsigned long long)G.present_count+1,(unsigned long long)source->serial,source->mem,t->format,G.swap_format,t->width,t->height,G.swap_extent.width,G.swap_extent.height);
     const char *capture_root=getenv("DM_FRAME_DIR");VBuffer capture={0};
     int capture_frame=capture_root && (G.trace_frame || (getenv("DM_CAPTURE_FRAMES") &&
         (G.present_count<4 || (G.present_count%120==0 && G.present_count<1000))));
-    if(capture_frame && t->bpp==4){capture=buffer_make((uint64_t)t->width*t->height*4,VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    if(capture_frame && t->bpp==4){capture=buffer_create_kind((uint64_t)t->width*t->height*4,VK_BUFFER_USAGE_TRANSFER_DST_BIT,1,DM_VK_MEMORY_READBACK);
         texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);VkBufferImageCopy c={.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.imageExtent={t->width,t->height,1}};
         vkCmdCopyImageToBuffer(S.command,t->image,t->layout,capture.b,1,&c);}
     VkSemaphoreCreateInfo sem_info={.sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};VkSemaphore available;
@@ -3392,12 +4193,22 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
        .dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,.image=G.swap_images[index],.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
     vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,NULL,0,NULL,1,&barrier);
     int x=0,y=0,w=t->width,h=t->height;if(crop && crop[2]>0 && crop[3]>0){x=crop[0];y=crop[1];w=crop[2];h=crop[3];}
+    if(G.vi_crop[2]>0 && G.vi_crop[3]>0) {
+        int right=x+w,bottom=y+h;
+        if(G.vi_crop[0]>x)x=G.vi_crop[0];if(G.vi_crop[1]>y)y=G.vi_crop[1];
+        if(G.vi_crop[0]+G.vi_crop[2]<right)right=G.vi_crop[0]+G.vi_crop[2];
+        if(G.vi_crop[1]+G.vi_crop[3]<bottom)bottom=G.vi_crop[1]+G.vi_crop[3];
+        w=right-x;h=bottom-y;
+    }
     if(x<0||y<0||w<=0||h<=0||(uint64_t)x+w>t->width||(uint64_t)y+h>t->height)die("present crop bounds",w);
-    VkImageBlit blit={.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.srcOffsets={{x,y,0},{x+w,y+h,1}},
+    int flip_y=atomic_load(&G.window_origin)==NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT;
+    VkImageBlit blit={.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.srcOffsets={{x,flip_y?y+h:y,0},{x+w,flip_y?y:y+h,1}},
       .dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.dstOffsets={{0,0,0},{(int)G.swap_extent.width,(int)G.swap_extent.height,1}}};
-    VkFormatProperties src_format=format_properties(t->format),dst_format=format_properties(G.swap_format);
+    if(G.present_count<2||G.trace_frame)fprintf(stderr,"[nvn-vulkan] PRESENT_ORIENTATION origin=%d flip_y=%d crop=%d,%d,%d,%d\n",atomic_load(&G.window_origin),flip_y,x,y,w,h);
+    VTexture *encoded=present_encoded_source(t);
+    VkFormatProperties src_format=format_properties(encoded->format),dst_format=format_properties(G.swap_format);
     if(!(src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT)||!(dst_format.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT))die("present blit formats",t->format);
-    vkCmdBlitImage(S.command,t->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,G.swap_images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,
+    vkCmdBlitImage(S.command,encoded->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,G.swap_images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,
        src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST);
     barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=0;
@@ -3407,6 +4218,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
       .pWaitSemaphores=&available,.pWaitDstStageMask=&wait_stage,.commandBufferCount=1,.pCommandBuffers=&S.command,
       .signalSemaphoreCount=1,.pSignalSemaphores=&finished};
     VkFence fence=S.gpu_fence;
+    if(S.depth_input_guard_active)die("unchecked depth input guard reached presentation",S.epoch);
     CHECK(vkQueueSubmit(G.queue,1,&si,fence));S.ticket=++G.fence;S.phase=SUBMISSION_INFLIGHT;VkPresentInfoKHR pi={.sType=VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,.waitSemaphoreCount=1,
       .pWaitSemaphores=&finished,.swapchainCount=1,.pSwapchains=&G.swapchain,.pImageIndices=&index};
     uint64_t present_wait=dm_android_nvn_work_wait_begin(DM_NVN_WAIT_PRESENT);
@@ -3569,7 +4381,7 @@ void mtl_read_texels(const tex_t *source,unsigned level,unsigned layer,const NVN
     size_t pitch=(size_t)region->width*t->bpp;if(row<pitch || (img && img<row*(size_t)region->height))die("CPU texture read stride",row);
     int packed_stencil=(aspect(t->format)&VK_IMAGE_ASPECT_STENCIL_BIT)!=0;
     uint64_t texels=(uint64_t)region->width*region->height,stencil_offset=texels*4;
-    VBuffer readback=buffer_make(packed_stencil?(stencil_offset+texels+3)&~3ull:pitch*region->height,VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    VBuffer readback=buffer_create_kind(packed_stencil?(stencil_offset+texels+3)&~3ull:pitch*region->height,VK_BUFFER_USAGE_TRANSFER_DST_BIT,1,DM_VK_MEMORY_READBACK);
     texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy copy={.imageSubresource={packed_stencil?VK_IMAGE_ASPECT_DEPTH_BIT:aspect(t->format),level,layer,1},
         .imageOffset={region->xoffset,region->yoffset,region->zoffset},.imageExtent={region->width,region->height,1}};
@@ -3589,7 +4401,67 @@ void mtl_read_texels(const tex_t *source,unsigned level,unsigned layer,const NVN
     }
     buffer_free(&readback);
 }
+void dm_vk_write_texels(const tex_t *source,const view_t *view,const NVNcopyRegion *r,const void *data,ptrdiff_t row,ptrdiff_t img) {
+    if(!source || !r || !data)die("CPU texture write arguments",0);
+    unsigned level=view&&view->set_levels?view->base_level:0,layer=view&&view->set_layers?view->min_layer:0;
+    int bw=0,bh=0,bytes=nvn_fmt_bpb(source->d.format,&bw,&bh);
+    int volume=source->d.target==NVN_TEXTURE_TARGET_3D;
+    if((source->d.target!=NVN_TEXTURE_TARGET_2D&&!volume) || bw!=1 || bh!=1 || !bytes ||
+       source->d.samples>1 || (view&&view->set_format&&view->format!=source->d.format) ||
+       (view&&view->set_target&&view->target!=source->d.target) ||
+       (source->d.format>=NVN_FORMAT_DEPTH16&&source->d.format<=NVN_FORMAT_DEPTH32F_STENCIL8))
+        {fprintf(stderr,"[nvn-vulkan] CPU_TEXTURE_WRITE_UNSUPPORTED target=%d format=%d samples=%d block=%dx%d extent=%ux%ux%u region=%d,%d,%d,%d,%d,%d\n",source->d.target,source->d.format,source->d.samples,bw,bh,source->d.width,source->d.height,source->d.depth,r->xoffset,r->yoffset,r->zoffset,r->width,r->height,r->depth);die("CPU texture write target/format requires adaptation",source->d.format);}
+    if(level>=source->d.levels || layer>=source->L.layers || r->xoffset<0 || r->yoffset<0 ||
+       r->zoffset<0 || r->depth<0 || (!volume&&(r->zoffset||r->depth!=1)) || r->width<0 || r->height<0)die("CPU texture write region",level);
+    uint32_t width=source->d.width>>level,height=source->d.height>>level;if(!width)width=1;if(!height)height=1;
+    uint32_t depth=volume?source->d.depth>>level:1;if(!depth)depth=1;
+    if((uint64_t)r->xoffset+r->width>width || (uint64_t)r->yoffset+r->height>height || (uint64_t)r->zoffset+r->depth>depth)die("CPU texture write bounds",r->width);
+    if(!r->width || !r->height || !r->depth)return;
+    size_t pitch=(size_t)r->width*bytes;if(!row)row=pitch;
+    if(row<0 || (size_t)row<pitch || img<0 || (img&&(uint64_t)img<(uint64_t)row*r->height))die("CPU texture write stride",row);
+    if(!img)img=row*r->height;
+    uint32_t full_row,rows,slices,bpb;uint64_t base;unsigned th,td;
+    if(nvn_deswizzle_geom(&source->d,level,layer,&full_row,&rows,&slices,&base,&th,&td,&bpb))die("CPU texture write layout",source->serial);
+    mtl_sub_begin();
+    if(!pool_find((uint64_t)(uintptr_t)source->mem,source->L.size,NULL))die("CPU texture write storage",source->serial);
+    /* Update only the addressed block-linear bytes. GPU-owned pixels outside
+     * the region are retained in the image and never re-uploaded from RAM. */
+    for(int z=0;z<r->depth;z++)for(int y=0;y<r->height;y++)for(size_t x=0;x<pitch;x++) {
+        uint64_t offset=base+nvn_bl_offset((uint32_t)((size_t)r->xoffset*bytes+x),r->yoffset+y,r->zoffset+z,full_row,rows,th,td);
+        if(offset>=source->L.size)die("CPU texture write storage bounds",offset);
+        source->mem[offset]=((const uint8_t *)data)[(size_t)z*img+(size_t)y*row+x];
+    }
+    VTexture *t=texture_get(source,1);VBuffer *staging=temporary(pitch*r->height*r->depth,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    for(int z=0;z<r->depth;z++)for(int y=0;y<r->height;y++)memcpy(staging->map+((size_t)z*r->height+y)*pitch,(const uint8_t *)data+(size_t)z*img+(size_t)y*row,pitch);
+    all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy copy={.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level,layer,1},
+        .imageOffset={r->xoffset,r->yoffset,r->zoffset},.imageExtent={r->width,r->height,r->depth}};
+    vkCmdCopyBufferToImage(S.command,staging->b,t->image,t->layout,1,&copy);tex_dirty(t);
+    if(G.trace_frame)fprintf(stderr,"[nvn-vulkan] CPU_TEXTURE_WRITE serial=%llu format=%d mip=%u region=%d,%d,%d,%d\n",
+        (unsigned long long)source->serial,source->d.format,level,r->xoffset,r->yoffset,r->width,r->height);
+    mtl_sub_commit();
+}
 #ifdef DM_VK_COPY_TEST
+/* Separate aspect copies: a combined depth/stencil mask is not legal in a
+ * VkBufferImageCopy. This probe checks actual GPU pixels after ZCull restore. */
+int dm_vk_copy_test_depth(const tex_t *source,float expected_depth,unsigned expected_stencil) {
+    if(G.active)die("depth probe during submission",0);
+    mtl_sub_begin();S.submission_cpu_readback=1;VTexture *t=texture_get(source,1);
+    if(t->format!=VK_FORMAT_D24_UNORM_S8_UINT)die("depth probe format",t->format);
+    uint64_t pixels=(uint64_t)t->width*t->height;
+    VBuffer readback=buffer_create_kind(pixels*5,VK_BUFFER_USAGE_TRANSFER_DST_BIT,1,DM_VK_MEMORY_READBACK);
+    texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy c[2]={
+        {.imageSubresource={VK_IMAGE_ASPECT_DEPTH_BIT,0,0,1},.imageExtent={t->width,t->height,1}},
+        {.bufferOffset=pixels*4,.imageSubresource={VK_IMAGE_ASPECT_STENCIL_BIT,0,0,1},.imageExtent={t->width,t->height,1}}};
+    vkCmdCopyImageToBuffer(S.command,t->image,t->layout,readback.b,2,c);mtl_sub_commit();
+    uint32_t expected=(uint32_t)llround((double)expected_depth*16777215.0);int ok=1;
+    for(uint64_t i=0;i<pixels;i++){
+        uint32_t depth;memcpy(&depth,readback.map+i*4,4);depth&=0xffffff;
+        if((depth>expected?depth-expected:expected-depth)>1 || readback.map[pixels*4+i]!=expected_stencil)ok=0;
+    }
+    buffer_free(&readback);return ok;
+}
 void dm_vk_copy_test_pool_bytes(uint64_t *logical,uint64_t *resident) {
     *logical=*resident=0;for(int i=0;i<G.npool;i++){*logical+=G.pools[i].size;*resident+=G.pools[i].v.size;}
 }
@@ -3599,13 +4471,14 @@ void dm_vk_copy_test_read(const tex_t *source,unsigned level,unsigned layer,uint
     if(G.active || level>=source->d.levels || layer>=source->L.layers)die("copy probe subresource",level);
     mtl_sub_begin();S.submission_cpu_readback=1;VTexture *t=texture_get(source,1);
     unsigned w=t->width>>level,h=t->height>>level;if(!w)w=1;if(!h)h=1;
-    VBuffer readback=buffer_make((uint64_t)w*h*t->bpp,VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    VBuffer readback=buffer_create_kind((uint64_t)w*h*t->bpp,VK_BUFFER_USAGE_TRANSFER_DST_BIT,1,DM_VK_MEMORY_READBACK);
     texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy c={.imageSubresource={aspect(t->format),level,layer,1},.imageExtent={w,h,1}};
     vkCmdCopyImageToBuffer(S.command,t->image,t->layout,readback.b,1,&c);mtl_sub_commit();
     memcpy(dst,readback.map,(size_t)w*h*t->bpp);buffer_free(&readback);
 }
 #endif
+#include "nvn_vk_memory.inc"
 void mtl_stats(uint64_t *passes,uint64_t *draws) { *passes=G.pass_count;*draws=G.draws; }
 void mtl_pkg_stats(uint64_t *uploads,uint64_t *reuploads) { *uploads=G.uploads;*reuploads=0; }
 void mtl_set_frame(uint64_t frame) { G.frame=frame; }
@@ -3615,4 +4488,4 @@ int mtl_link_active(void) { return 0; } /* No Android frame-link service has bee
 int mtl_link_wait_tick(uint64_t timeout) { (void)timeout;return 0; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; } /* No cross-frame store-elision ledger exists. */
 void mtl_ub_present(double ms) { (void)ms; } /* Disabled diagnostic experiment. */
-uint64_t mtl_upload_bytes(void) { uint64_t n=0;for(int i=0;i<G.ntexture;i++)if(G.textures[i].cpu_owned)n+=(uint64_t)G.textures[i].width*G.textures[i].height*G.textures[i].bpp;return n; }
+uint64_t mtl_upload_bytes(void) { uint64_t n=0;for(uint32_t i=0;i<G.texture_used;i++)if(G.textures[i].serial&&G.textures[i].cpu_owned)n+=(uint64_t)G.textures[i].width*G.textures[i].height*G.textures[i].bpp;return n; }

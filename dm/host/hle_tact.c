@@ -22,12 +22,15 @@
 // an offline cross-check of all 4,979 files before character select (558.8 MiB of output) gives MD5 == the list's CKey.
 #include "hle.h"
 #include "../third_party/libdeflate/libdeflate.h"
-#include <CommonCrypto/CommonDigest.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <pthread/qos.h>
 #include <stdatomic.h>
+#ifndef __ANDROID__
+#include <CommonCrypto/CommonDigest.h>
+#include <pthread/qos.h>
+#endif
 
+#ifndef __ANDROID__
 // DM_TACTCHK=<文件>：每次解码记一行「输入开头16字节(hex)\t输入长度\t输出长度\t输出MD5\t发起线程句柄」，离线与独立解码的逐块 MD5 对照（验收用）。
 // 到选角（第一次 OpenPanel MainMenuButtonRibbon）即停记（启动块清单按此记录生成，边界须由事件定、不随杀进程时刻变）
 // DM_TACTCHK=<file>: log one line per decode, "first 16 input bytes (hex)\tinput length\toutput length\toutput MD5\trequesting thread handle", to be compared offline against per-block MD5s of an independent decode (for acceptance).
@@ -52,6 +55,14 @@ static void chk_log(const uint8_t *in, uint32_t n, const uint8_t *out, size_t go
     fprintf(g_chk, "\t%u\t%zu\t", n, got); for (int i = 0; i < 16; i++) fprintf(g_chk, "%02x", md[i]); fprintf(g_chk, "\t%#x\n", thr_cur_handle());
     pthread_mutex_unlock(&g_chk_lock);
 }
+#else
+/* Android mounts the merged image rather than a directory of CASC files.
+ * Keep the exact decoder below; file-prefetch and the CommonCrypto-only
+ * optional audit logger are not part of this image-backed adapter. */
+static void chk_log(const uint8_t *in, uint32_t n, const uint8_t *out, size_t got) {
+    (void)in; (void)n; (void)out; (void)got;
+}
+#endif
 
 static __thread struct libdeflate_decompressor *t_dec;   // 每线程一个（解压器不可跨线程并用） | One per thread (a decompressor must not be shared across threads)
 // 随线程退出释放（键析构，同 crash.c 备用栈）：原先不放，做过解码又退出的线程每条漏一个解压器（约 11.5 KB）
@@ -83,6 +94,7 @@ static struct libdeflate_decompressor *thread_dec(void) {
 // a block being decoded is waited for; not found / not identical / not reached yet → decode on the spot as usual. A block is freed as soon as it is taken.
 // Worker thread 0x1005 consumes the async load task queue, so the order within a stream is also shuffled every run (measured lag: median 340, max 1,609 blocks) ⇒ nothing is discarded by lag (DM_TACT_PREFETCH_LAG can set it, default no discard),
 // memory is bounded by the cap alone; on reaching character select (MainMenuButtonRibbon) the background threads stop and the remaining cache is freed (blocks in the list that this run did not ask for do not hold memory long term).
+#ifndef __ANDROID__
 enum { PF_EMPTY, PF_BUSY, PF_READY, PF_GONE };
 typedef struct { uint16_t fi; uint8_t sid; uint64_t off; uint32_t n, dl, next, pos; uint8_t key[16]; _Atomic int st; uint8_t *cmp, *dec; } pf_ent;
 #define PF_MAXS 8
@@ -240,6 +252,11 @@ static void tact_prefetch_finish(void) {             // 到选角：停后台、
         atomic_load(&g_pfhit), atomic_load(&g_pfwait), atomic_load(&g_pfwait_ns) / 1e9, atomic_load(&g_pfmiss), atomic_load(&g_pfdrop),
         atomic_load(&g_pfpeak) / 1048576.0, atomic_load(&g_pfdone), g_npf);
 }
+#else
+static int pf_take(const uint8_t *in, uint32_t n, uint8_t *out, uint32_t cap, size_t *got) {
+    (void)in; (void)n; (void)out; (void)cap; (void)got; return 0;
+}
+#endif
 
 static uint32_t tact_decode_zlib(uint64_t *r) {
     uint8_t *out = (uint8_t *)r[0]; uint32_t cap = (uint32_t)r[1];
@@ -263,6 +280,12 @@ static uint32_t tact_decode_zlib(uint64_t *r) {
     return rc == LIBDEFLATE_INSUFFICIENT_SPACE ? 4 : 1;
 }
 
+#ifdef __ANDROID__
+int dm_android_tact_call(int number, uint64_t *registers) {
+    if (number != SVC_HOST_TACT_ZLIB || !registers) return 0;
+    registers[0] = tact_decode_zlib(registers); return 1;
+}
+#else
 // 私有Render门：弱实现走原图；UI强实现只读确认cohort。x8临时结果，跳板两路恢复x8。
 // Private Render gate: the weak implementation takes the original picture; the UI strong implementation only reads to confirm the cohort. x8 is the temporary result, both trampoline paths restore x8.
 __attribute__((weak)) int dm_touch_game_hide_own_glyph(uint64_t widget) { (void)widget; return 0; }
@@ -298,3 +321,4 @@ uint64_t svc_host_call(int num, uint64_t *regs) {
     }
     return 0;
 }
+#endif

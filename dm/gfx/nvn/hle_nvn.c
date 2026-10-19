@@ -48,6 +48,7 @@
 #include <assert.h>
 #include <stdatomic.h>
 #include <time.h>
+#include "nvn_vk_zcull.h"
 #endif
 
 #ifdef __ANDROID__
@@ -129,6 +130,28 @@ static void nvn_slots_initialize_once(void) {
 }
 static void nvn_init_slots(void) {static pthread_once_t once=PTHREAD_ONCE_INIT;if(pthread_once(&once,nvn_slots_initialize_once))die("NVN slot initialization failed");}
 
+#ifdef __ANDROID__
+/* Newer titles resolve a complete NVN table at startup. Known extension names
+ * may be resolved, but calling an unimplemented operation is still fatal. */
+#define ANDROID_NVN_PENDING(X) \
+    X(nvnCommandBufferBindImagesDeferred) \
+    X(nvnCommandBufferBindSeparateSamplersDeferred) \
+    X(nvnCommandBufferBindSeparateTexturesDeferred) \
+    X(nvnCommandBufferBindStorageBuffersDeferred) \
+    X(nvnCommandBufferBindTexturesDeferred) \
+    X(nvnCommandBufferBindUniformBuffersDeferred) \
+    X(nvnCommandBufferOverrideSubtileSize) \
+    X(nvnCommandBufferSetControlMemoryCallbackEnabled) \
+    X(nvnCommandBufferSetProvokingVertexMode) \
+    X(nvnCommandBufferSetZCullZF32CompressionEnable) \
+    X(nvnDeviceSetAutomaticCheckpointsMask) \
+    X(nvnInstallGlobalDebugCallback) \
+    X(nvnProgramGetSubtileSize) \
+    X(nvnTextureBuilderGetViewOffset)
+#define PENDING_TRAP(name) static void android_pending_##name(void) {die("Android NVN operation requires implementation: " #name);}
+ANDROID_NVN_PENDING(PENDING_TRAP)
+#undef PENDING_TRAP
+#endif
 static void *nvn_lookup(const char *name) {
     nvn_init_slots();
 #ifdef __ANDROID__
@@ -136,6 +159,12 @@ static void *nvn_lookup(const char *name) {
 #endif
     for (unsigned i = 0; i < NVN_NFUNC; i++)
         if (!strcmp(nvn_names[i], name)) return nvn_thunk[i];
+#ifdef __ANDROID__
+#define PENDING_LOOKUP(fn) if(!strcmp(name,#fn))return (void *)android_pending_##fn;
+    ANDROID_NVN_PENDING(PENDING_LOOKUP)
+#undef PENDING_LOOKUP
+#undef ANDROID_NVN_PENDING
+#endif
     LOG("【红】NVN 取址未知名字：%s", name ? name : "(null)");
 #ifdef __ANDROID__
     die("Android unknown NVN function lookup %s",name);
@@ -156,6 +185,26 @@ HLE_FORCE("nvnBootstrapLoader", "NVN 图形接口整块换成宿主空设备（�
 #ifdef __ANDROID__
 static void android_queue_fence(sync_t *s);
 static NVNsyncWaitResult android_sync_wait(const sync_t *s, uint64_t timeout);
+/* Debug labels are emitted into the port's captured diagnostics. They carry
+ * no rendering state and do not require VK_EXT_debug_utils to be enabled. */
+#define ANDROID_DEBUG_LABEL(kind,type) \
+    NVN(nvn##kind##SetDebugLabel,void,type *object,const char *label) { \
+        if(!object)die("Android NVN null debug-label object"); \
+        LOG("NVN_DEBUG_LABEL " #kind " object=%p label=%.256s",(void *)object,label?label:""); \
+    }
+ANDROID_DEBUG_LABEL(Device,NVNdevice)
+ANDROID_DEBUG_LABEL(Queue,NVNqueue)
+ANDROID_DEBUG_LABEL(Window,NVNwindow)
+ANDROID_DEBUG_LABEL(Program,NVNprogram)
+ANDROID_DEBUG_LABEL(MemoryPool,NVNmemoryPool)
+ANDROID_DEBUG_LABEL(TexturePool,NVNtexturePool)
+ANDROID_DEBUG_LABEL(SamplerPool,NVNsamplerPool)
+ANDROID_DEBUG_LABEL(Buffer,NVNbuffer)
+ANDROID_DEBUG_LABEL(Texture,NVNtexture)
+ANDROID_DEBUG_LABEL(Sampler,NVNsampler)
+ANDROID_DEBUG_LABEL(CommandBuffer,NVNcommandBuffer)
+ANDROID_DEBUG_LABEL(Sync,NVNsync)
+#undef ANDROID_DEBUG_LABEL
 #endif
 
 // ---------- 设备 ----------
@@ -206,6 +255,12 @@ NVN(nvnDeviceGetInteger, void, const NVNdevice *d, NVNdeviceInfo what, int *out)
     OLOG("DeviceGetInteger %#x -> %d", w, *out);
 }
 NVN(nvnDeviceGetImageHandle, NVNimageHandle, const NVNdevice *d, int id) { (void)d; return (NVNimageHandle)id; }
+#ifdef __ANDROID__
+NVN(nvnDeviceGetTextureHandle,NVNtextureHandle,const NVNdevice *device,int texture,int sampler) {
+    (void)device;if(texture<0 || texture>=1048576 || sampler<0 || sampler>=4096)die("Android combined texture/sampler ID bounds");
+    return (uint64_t)(uint32_t)texture | (uint64_t)(uint32_t)sampler<<20;
+}
+#endif
 // 分离贴图 / 采样器句柄：值 = 描述符号（采样器号放 20 位以上，与组合句柄的位布局一致）
 // Separate texture / sampler handles: value = descriptor index (the sampler index goes in bit 20 and above, consistent with the bit layout of combined handles)
 NVN(nvnDeviceGetSeparateTextureHandle, NVNseparateTextureHandle, const NVNdevice *d, int id) { (void)d; return (NVNseparateTextureHandle){(uint64_t)id}; }
@@ -220,7 +275,14 @@ NVN(nvnDeviceSetWindowOriginMode, void, NVNdevice *d, NVNwindowOriginMode m) {
 #endif
     LOG("[nvn] 窗口原点 %s", m ? "左上（同 D3D / Metal）" : "左下（GL）");
 }
-NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) { ((dev_t_ *)d)->depth_mode = m; LOG("[nvn] 深度模式 %s", m ? "近=0（同 D3D / Metal）" : "近=-w（GL）"); }
+NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) {
+    ((dev_t_ *)d)->depth_mode=m;
+#ifdef __ANDROID__
+    extern void dm_vk_set_depth_mode(int mode);
+    ANDROID_DRAIN();dm_vk_set_depth_mode(m);
+#endif
+    LOG("[nvn] 深度模式 %s",m?"近=0（同 D3D / Metal）":"近=-w（GL）");
+}
 NVN(nvnDeviceFinalizeCommandHandle, void, NVNdevice *d, NVNcommandHandle h) { (void)d; (void)h; ANDROID_DRAIN(); }
 
 // ---------- 内存池 ----------
@@ -251,6 +313,63 @@ NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
 }
 NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) { (void)p; (void)off; (void)n; }
 NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { return (NVNbufferAddress)((const pool_t *)p)->mem; }
+#ifdef __ANDROID__
+NVN(nvnMemoryPoolMap,void *,const NVNmemoryPool *object) {
+    const pool_t *p=(const pool_t *)object;if(p->magic!=MAGIC('P','O','O','L'))die("Android invalid memory pool");
+    return p->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS?NULL:p->mem;
+}
+NVN(nvnMemoryPoolGetSize,size_t,const NVNmemoryPool *object) {return ((const pool_t *)object)->size;}
+NVN(nvnMemoryPoolGetFlags,NVNmemoryPoolFlags,const NVNmemoryPool *object) {return (NVNmemoryPoolFlags)((const pool_t *)object)->flags;}
+NVN(nvnMemoryPoolInvalidateMappedRange,void,const NVNmemoryPool *object,ptrdiff_t offset,size_t size) {
+    const pool_t *p=(const pool_t *)object;
+    if(p->magic!=MAGIC('P','O','O','L') || offset<0 || (uint64_t)offset>p->size || size>p->size-(uint64_t)offset)die("Android invalid pool invalidate range");
+    ANDROID_DRAIN();mtl_finish();__atomic_thread_fence(__ATOMIC_ACQUIRE);
+}
+typedef struct {NVNdevice *device;const pool_t *pool;ptrdiff_t offset;size_t size;} android_buffer_builder;
+typedef struct {uint32_t magic;const pool_t *pool;ptrdiff_t offset;size_t size;uint64_t serial;} android_buffer;
+FITS(android_buffer_builder,NVNbufferBuilder);FITS(android_buffer,NVNbuffer);
+static const android_buffer *android_buffer_check(const NVNbuffer *object) {
+    const android_buffer *b=(const android_buffer *)object;
+    if(!b || b->magic!=MAGIC('B','U','F',0) || !b->pool || b->pool->magic!=MAGIC('P','O','O','L'))die("Android invalid NVN buffer");
+    return b;
+}
+NVN(nvnBufferBuilderSetDefaults,void,NVNbufferBuilder *object) {memset(object,0,sizeof(android_buffer_builder));}
+NVN(nvnBufferBuilderSetDevice,void,NVNbufferBuilder *object,NVNdevice *device) {((android_buffer_builder *)object)->device=device;}
+NVN(nvnBufferBuilderSetStorage,void,NVNbufferBuilder *object,NVNmemoryPool *pool,ptrdiff_t offset,size_t size) {
+    android_buffer_builder *b=(android_buffer_builder *)object;b->pool=(const pool_t *)pool;b->offset=offset;b->size=size;
+}
+/* The legacy generated table omits GetDevice and drops GetMemoryPool's '*'. */
+NVN_NOPROTO(nvnBufferBuilderGetDevice,NVNdevice *,const NVNbufferBuilder *object) {return ((const android_buffer_builder *)object)->device;}
+NVN_NOPROTO(nvnBufferBuilderGetMemoryPool,NVNmemoryPool *,const NVNbufferBuilder *object) {return (NVNmemoryPool *)((const android_buffer_builder *)object)->pool;}
+NVN(nvnBufferBuilderGetMemoryOffset,ptrdiff_t,const NVNbufferBuilder *object) {return ((const android_buffer_builder *)object)->offset;}
+NVN(nvnBufferBuilderGetSize,size_t,const NVNbufferBuilder *object) {return ((const android_buffer_builder *)object)->size;}
+NVN(nvnBufferInitialize,NVNboolean,NVNbuffer *object,const NVNbufferBuilder *builder) {
+    const android_buffer_builder *b=(const android_buffer_builder *)builder;
+    if(!b->device || !b->pool || b->pool->magic!=MAGIC('P','O','O','L') || !b->pool->mem || b->offset<0 || !b->size ||
+       (uint64_t)b->offset>b->pool->size || b->size>b->pool->size-(uint64_t)b->offset)return 0;
+    *(android_buffer *)object=(android_buffer){MAGIC('B','U','F',0),b->pool,b->offset,b->size,nvn_new_serial()};return 1;
+}
+NVN(nvnBufferFinalize,void,NVNbuffer *object) {android_buffer_check(object);((android_buffer *)object)->magic=0;}
+NVN(nvnBufferMap,void *,const NVNbuffer *object) {const android_buffer *b=android_buffer_check(object);return b->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS?NULL:b->pool->mem+b->offset;}
+NVN(nvnBufferGetAddress,NVNbufferAddress,const NVNbuffer *object) {const android_buffer *b=android_buffer_check(object);return (uint64_t)(uintptr_t)(b->pool->mem+b->offset);}
+NVN(nvnBufferGetMemoryPool,NVNmemoryPool *,const NVNbuffer *object) {return (NVNmemoryPool *)android_buffer_check(object)->pool;}
+NVN(nvnBufferGetMemoryOffset,ptrdiff_t,const NVNbuffer *object) {return android_buffer_check(object)->offset;}
+NVN(nvnBufferGetSize,size_t,const NVNbuffer *object) {return android_buffer_check(object)->size;}
+NVN(nvnBufferGetDebugID,uint64_t,const NVNbuffer *object) {return android_buffer_check(object)->serial;}
+static void android_buffer_range(const NVNbuffer *object,ptrdiff_t offset,size_t size) {
+    const android_buffer *b=android_buffer_check(object);
+    if(offset<0 || (uint64_t)offset>b->size || size>b->size-(uint64_t)offset)die("Android NVN buffer range");
+}
+NVN(nvnBufferFlushMappedRange,void,const NVNbuffer *object,ptrdiff_t offset,size_t size) {
+    android_buffer_range(object,offset,size);
+    /* Pool storage is coherent CPU memory; dirty tracking supplies GPU uploads
+     * at the next use. Publish preceding CPU writes before that use. */
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+}
+NVN(nvnBufferInvalidateMappedRange,void,const NVNbuffer *object,ptrdiff_t offset,size_t size) {
+    android_buffer_range(object,offset,size);ANDROID_DRAIN();mtl_finish();__atomic_thread_fence(__ATOMIC_ACQUIRE);
+}
+#endif
 
 // ---------- 描述符池 ----------
 // ---------- Descriptor pools ----------
@@ -395,6 +514,23 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
 }
 NVN(nvnTextureFinalize, void, NVNtexture *t) { ANDROID_DRAIN(); snap_drop(&TX(t)->snap, TX(t)->serial, offsetof(tex_t, serial)); mtl_tex_release(TX(t)); TX(t)->magic = 0; }
 NVN(nvnTextureGetFlags, NVNtextureFlags, const NVNtexture *t) { return (NVNtextureFlags)CTX(t)->d.flags; }
+#ifdef __ANDROID__
+static size_t android_zcull_storage(const nvn_texdesc *description) {
+    if(description->format>=NVN_FORMAT_DEPTH16 && description->format<=NVN_FORMAT_DEPTH32F_STENCIL8)
+        return sizeof(NvnVkZCullRecord);
+    return 0;
+}
+NVN(nvnTextureGetZCullStorageSize,size_t,const NVNtexture *t) {return android_zcull_storage(&CTX(t)->d);}
+NVN(nvnTextureBuilderGetZCullStorageSize,size_t,const NVNtextureBuilder *t) {return android_zcull_storage(&TB(t)->d);}
+NVN(nvnTextureGetTarget,NVNtextureTarget,const NVNtexture *t) {return CTX(t)->d.target;}
+NVN(nvnTextureGetLevels,int,const NVNtexture *t) {return CTX(t)->d.levels;}
+NVN(nvnTextureGetFormat,NVNformat,const NVNtexture *t) {return CTX(t)->d.format;}
+NVN(nvnTextureGetSamples,int,const NVNtexture *t) {return CTX(t)->d.samples;}
+NVN(nvnTextureGetStride,ptrdiff_t,const NVNtexture *t) {return CTX(t)->d.stride;}
+NVN(nvnTextureGetMemoryOffset,ptrdiff_t,const NVNtexture *t) {return CTX(t)->off;}
+NVN(nvnTextureGetDebugID,uint64_t,const NVNtexture *t) {return CTX(t)->serial;}
+NVN_NOPROTO(nvnTextureGetMemoryPool,NVNmemoryPool *,const NVNtexture *t) {return (NVNmemoryPool *)CTX(t)->pool;}
+#endif
 NVN(nvnTextureGetWidth, int, const NVNtexture *t) { return (int)CTX(t)->d.width; }
 NVN(nvnTextureGetHeight, int, const NVNtexture *t) { return (int)CTX(t)->d.height; }
 NVN(nvnTextureGetDepth, int, const NVNtexture *t) { return (int)CTX(t)->d.depth; }
@@ -408,10 +544,49 @@ NVN(nvnTextureCompare, NVNboolean, const NVNtexture *a, const NVNtexture *b) {
 NVN_NOPROTO(nvnTextureGetRawStorageClass, int, const NVNtexture *t) { (void)t; return 1; }
 #define VW(v) ((view_t *)(v))
 NVN(nvnTextureViewSetDefaults, void, NVNtextureView *v) { memset(v, 0, sizeof(view_t)); }
-NVN(nvnTextureViewSetLevels, void, NVNtextureView *v, int base, int n) { VW(v)->set_levels = 1; VW(v)->base_level = base; VW(v)->nlevels = n; }
-NVN(nvnTextureViewSetLayers, void, NVNtextureView *v, int min, int n) { VW(v)->set_layers = 1; VW(v)->min_layer = min; VW(v)->nlayers = n; }
+NVN(nvnTextureViewSetLevels, void, NVNtextureView *v, int base, int n) {
+#ifdef __ANDROID__
+    if(base<INT8_MIN||base>INT8_MAX||n<INT8_MIN||n>INT8_MAX)die("Android texture view level representation: %d,%d",base,n);
+#endif
+    VW(v)->set_levels = 1; VW(v)->base_level = base; VW(v)->nlevels = n;
+}
+NVN(nvnTextureViewSetLayers, void, NVNtextureView *v, int min, int n) {
+#ifdef __ANDROID__
+    if(min<INT16_MIN||min>INT16_MAX||n<INT16_MIN||n>INT16_MAX)die("Android texture view layer representation: %d,%d",min,n);
+#endif
+    VW(v)->set_layers = 1; VW(v)->min_layer = min; VW(v)->nlayers = n;
+}
 NVN(nvnTextureViewSetFormat, void, NVNtextureView *v, NVNformat f) { VW(v)->set_format = 1; VW(v)->format = f; }
-NVN(nvnTextureViewSetTarget, void, NVNtextureView *v, NVNtextureTarget t) { VW(v)->set_target = 1; VW(v)->target = t; }
+NVN(nvnTextureViewSetTarget, void, NVNtextureView *v, NVNtextureTarget t) {
+#ifdef __ANDROID__
+    if(t<NVN_TEXTURE_TARGET_1D||t>NVN_TEXTURE_TARGET_BUFFER)die("Android texture view target: %d",t);
+#endif
+    VW(v)->set_target = 1; VW(v)->target = t;
+}
+#ifdef __ANDROID__
+NVN(nvnTextureViewGetLevels,NVNboolean,const NVNtextureView *v,int *base,int *count) {
+    const view_t *o=(const view_t *)v;if(!o->set_levels)return 0;if(!base||!count)die("Android null view levels");*base=o->base_level;*count=o->nlevels;return 1;
+}
+NVN(nvnTextureViewGetFormat,NVNboolean,const NVNtextureView *v,NVNformat *format) {
+    const view_t *o=(const view_t *)v;if(!o->set_format)return 0;if(!format)die("Android null view format");*format=o->format;return 1;
+}
+NVN(nvnTextureViewGetTarget,NVNboolean,const NVNtextureView *v,NVNtextureTarget *target) {
+    const view_t *o=(const view_t *)v;if(!o->set_target)return 0;if(!target)die("Android null view target");*target=o->target;return 1;
+}
+NVN(nvnTextureViewSetSwizzle,void,NVNtextureView *v,NVNtextureSwizzle r,NVNtextureSwizzle g,NVNtextureSwizzle b,NVNtextureSwizzle a) {
+    int values[]={r,g,b,a};for(unsigned i=0;i<4;i++){if(values[i]<0 || values[i]>5)die("Android view swizzle");VW(v)->swizzle[i]=(uint8_t)values[i];}VW(v)->set_swizzle=1;
+}
+NVN(nvnTextureViewSetDepthStencilMode,void,NVNtextureView *v,NVNtextureDepthStencilMode mode) {
+    if(mode!=0&&mode!=1)die("Android texture view depth/stencil mode");VW(v)->set_depth_mode=1;VW(v)->depth_mode=(uint8_t)mode;
+}
+NVN(nvnTextureViewGetDepthStencilMode,NVNboolean,const NVNtextureView *v,NVNtextureDepthStencilMode *mode) {
+    const view_t *o=(const view_t *)v;if(!mode)die("Android null depth/stencil output");*mode=(NVNtextureDepthStencilMode)o->depth_mode;return o->set_depth_mode;
+}
+NVN(nvnTextureViewGetSwizzle,NVNboolean,const NVNtextureView *v,NVNtextureSwizzle *r,NVNtextureSwizzle *g,NVNtextureSwizzle *b,NVNtextureSwizzle *a) {
+    const view_t *o=(const view_t *)v;if(!r||!g||!b||!a)die("Android null swizzle output");
+    *r=o->set_swizzle?o->swizzle[0]:2;*g=o->set_swizzle?o->swizzle[1]:3;*b=o->set_swizzle?o->swizzle[2]:4;*a=o->set_swizzle?o->swizzle[3]:5;return o->set_swizzle;
+}
+#endif
 NVN(nvnTextureViewGetLayers, NVNboolean, const NVNtextureView *v, int *min, int *n) {
     const view_t *o = (const view_t *)v; *min = o->min_layer; *n = o->nlayers; return o->set_layers;
 }
@@ -439,6 +614,20 @@ NVN(nvnTextureReadTexels, void, const NVNtexture *t, const NVNtextureView *v, co
 NVN(nvnTextureReadTexelsStrided, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, void *dst, ptrdiff_t row, ptrdiff_t img) {
     read_texels(CTX(t), (const view_t *)v, r, dst, row, img);
 }
+#ifdef __ANDROID__
+void dm_vk_write_texels(const tex_t *,const view_t *,const NVNcopyRegion *,const void *,ptrdiff_t,ptrdiff_t);
+NVN(nvnTextureWriteTexels,void,const NVNtexture *t,const NVNtextureView *v,const NVNcopyRegion *r,const void *src) {
+    ANDROID_DRAIN();dm_vk_write_texels(CTX(t),(const view_t *)v,r,src,0,0);
+}
+NVN(nvnTextureWriteTexelsStrided,void,const NVNtexture *t,const NVNtextureView *v,const NVNcopyRegion *r,const void *src,ptrdiff_t row,ptrdiff_t img) {
+    ANDROID_DRAIN();dm_vk_write_texels(CTX(t),(const view_t *)v,r,src,row,img);
+}
+NVN(nvnTextureFlushTexels,void,const NVNtexture *t,const NVNtextureView *v,const NVNcopyRegion *r) {
+    /* WriteTexels publishes both guest storage and the Vulkan image, waiting
+     * for its real fence; there are no deferred CPU cache lines to flush. */
+    (void)t;(void)v;(void)r;
+}
+#endif
 NVN(nvnTextureInvalidateTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }
 
 // ---------- 采样器 ----------
@@ -459,6 +648,14 @@ NVN(nvnSamplerBuilderSetLodBias, void, NVNsamplerBuilder *b, float v) { SB(b)->l
 NVN(nvnSamplerBuilderSetCompare, void, NVNsamplerBuilder *b, NVNcompareMode m, NVNcompareFunc f) { SB(b)->cmp_mode = m; SB(b)->cmp_func = f; }
 NVN(nvnSamplerBuilderSetBorderColor, void, NVNsamplerBuilder *b, const float *c) { memcpy(SB(b)->border, c, 16); }
 NVN(nvnSamplerBuilderSetMaxAnisotropy, void, NVNsamplerBuilder *b, float v) { SB(b)->aniso = v; }
+#ifdef __ANDROID__
+NVN(nvnSamplerBuilderSetReductionFilter,void,NVNsamplerBuilder *b,NVNsamplerReduction mode) {
+    (void)b;if(mode!=NVN_SAMPLER_REDUCTION_AVERAGE)die("Android sampler min/max reduction requires device feature adaptation: %d",mode);
+    /* The current Vulkan sampler uses weighted-average reduction. */
+}
+NVN(nvnSamplerBuilderGetReductionFilter,NVNsamplerReduction,const NVNsamplerBuilder *b) {(void)b;return NVN_SAMPLER_REDUCTION_AVERAGE;}
+NVN(nvnSamplerGetReductionFilter,NVNsamplerReduction,const NVNsampler *s) {(void)s;return NVN_SAMPLER_REDUCTION_AVERAGE;}
+#endif
 NVN(nvnSamplerBuilderSetLodSnap, void, NVNsamplerBuilder *b, float v) { (void)b; (void)v; }   // Metal 无对应，忽略 | No Metal equivalent, ignored
 NVN(nvnSamplerBuilderGetMinMagFilter, void, const NVNsamplerBuilder *b, NVNminFilter *mi, NVNmagFilter *ma) {
     const samp_par *o = &((const samp_builder_t *)b)->p; *mi = (NVNminFilter)o->minf; *ma = (NVNmagFilter)o->magf;
@@ -480,10 +677,30 @@ NVN(nvnProgramFinalize, void, NVNprogram *p) { ANDROID_DRAIN(); prog_t *o = (pro
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("【红】ProgramSetShaders 阶段数 %d", n); return 0; }
-    ANDROID_DRAIN(); snap_drop(&o->snap, o->serial, offsetof(prog_t, serial)); mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
+    ANDROID_DRAIN();
+    snap_drop(&o->snap, o->serial, offsetof(prog_t, serial));
+    mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
+#ifdef __ANDROID__
+    void dm_vk_program_capture(const NVNshaderData *, int);
+    dm_vk_program_capture(sd, n);
+#endif
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;
 }
+#ifdef __ANDROID__
+/* 1.1.0's caller constructs 24-byte entries (main+0x32d234), preserving
+ * the ordinary data/control pair. Nonzero extension data needs adaptation. */
+typedef struct {NVNbufferAddress data;const void *control;uint64_t extension;} android_shader_data_ext;
+NVN_NOPROTO(nvnProgramSetShadersExt,NVNboolean,NVNprogram *program,int count,const android_shader_data_ext *shaders) {
+    if(count<0 || count>6 || (count&&!shaders))die("Android extended shader count");
+    NVNshaderData ordinary[6];
+    for(int i=0;i<count;i++) {
+        if(shaders[i].extension)die("Android shader extension requires adaptation: %#llx",(unsigned long long)shaders[i].extension);
+        ordinary[i]=(NVNshaderData){shaders[i].data,shaders[i].control};
+    }
+    return h_nvnProgramSetShaders(program,count,ordinary);
+}
+#endif
 
 // ---------- 同步 / 事件 ----------
 // ---------- Sync / events ----------
@@ -653,6 +870,12 @@ NVN(nvnCommandBufferIsRecording, NVNboolean, const NVNcommandBuffer *c) { return
 NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
     for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
 }
+#ifdef __ANDROID__
+NVN(nvnCommandBufferCallCommands,void,NVNcommandBuffer *c,int count,const NVNcommandHandle *handles) {
+    if(count<0 || (count&&!handles))die("Android command call list bounds");
+    h_nvnCommandBufferCopyCommands(c,count,handles);
+}
+#endif
 static int nvn_event_trace_enabled(void) { return getenv("DM_EVENT_TRACE") != NULL; }
 NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *c, const NVNevent *e, NVNeventSignalMode m, NVNeventSignalLocation loc, int flags, uint32_t v) {
     uint8_t *p = cmd_alloc(CB(c), 24); put_hdr(p, OP_SIGNAL_EVENT, 24);
@@ -689,6 +912,31 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
     return p + 8;
 }
 #define REC(c, OP, T) ((T *)rec((c), (OP), sizeof(T)))
+#ifdef __ANDROID__
+static void android_debug_record(NVNcommandBuffer *c,uint32_t action,uint32_t domain,const char *text) {
+    size_t length=text?strnlen(text,4096):0;if(length==4096)die("Android NVN debug label too long");
+    p_debug *p=rec(c,OP_DEBUG,sizeof(*p)+length+1);*p=(p_debug){action,domain,(uint32_t)length+1,0};
+    if(length)memcpy(p+1,text,length);
+}
+NVN(nvnCommandBufferPushDebugGroupDynamic,void,NVNcommandBuffer *c,uint32_t domain,const char *text){android_debug_record(c,1,domain,text);}
+NVN(nvnCommandBufferPushDebugGroupStatic,void,NVNcommandBuffer *c,uint32_t domain,const char *text){android_debug_record(c,1,domain,text);}
+NVN(nvnCommandBufferPushDebugGroup,void,NVNcommandBuffer *c,uint32_t domain,const char *text){android_debug_record(c,1,domain,text);}
+NVN(nvnCommandBufferPopDebugGroup,void,NVNcommandBuffer *c){android_debug_record(c,2,0,NULL);}
+NVN(nvnCommandBufferPopDebugGroupId,void,NVNcommandBuffer *c,uint32_t domain){android_debug_record(c,2,domain,NULL);}
+NVN(nvnCommandBufferInsertDebugMarkerDynamic,void,NVNcommandBuffer *c,uint32_t domain,const char *text){android_debug_record(c,3,domain,text);}
+NVN(nvnCommandBufferInsertDebugMarkerStatic,void,NVNcommandBuffer *c,uint32_t domain,const char *text){android_debug_record(c,3,domain,text);}
+NVN(nvnCommandBufferInsertDebugMarker,void,NVNcommandBuffer *c,const char *text){android_debug_record(c,3,0,text);}
+static void android_record_zcull(NVNcommandBuffer *c,NVNbufferAddress address,size_t size,uint32_t op) {
+    if(address%32 || size<sizeof(NvnVkZCullRecord))die("Android ZCull buffer alignment/size");
+    *REC(c,op,p_zcull)=(p_zcull){address,size};
+}
+NVN(nvnCommandBufferSaveZCullData,void,NVNcommandBuffer *c,NVNbufferAddress address,size_t size) {
+    android_record_zcull(c,address,size,OP_SAVE_ZCULL);
+}
+NVN(nvnCommandBufferRestoreZCullData,void,NVNcommandBuffer *c,NVNbufferAddress address,size_t size) {
+    android_record_zcull(c,address,size,OP_RESTORE_ZCULL);
+}
+#endif
 // 带数组的绑定记录按实际个数分配：前缀字段 + n 个元素（回放端只读前 n 个）。原先按最大个数定长记（绑顶点缓冲 272 字节、绑贴图 / 采样器 280 字节，
 // 实际常只有 1–2 个），空尾占每帧命令字节的四到五成；88 级法师的高级属性页每帧录 12.5 MB，把游戏自己的命令内存池（约每帧 105 段 × 128 KB）用空
 // Binding records with arrays are allocated by the actual count: prefix fields + n elements (the replay side reads only the first n). Previously they were recorded at fixed length for the maximum count (bind vertex buffers 272 bytes, bind textures / samplers 280 bytes,
@@ -714,6 +962,26 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
+#ifdef __ANDROID__
+NVN(nvnCommandBufferSetConservativeRasterEnable,void,NVNcommandBuffer *c,uint32_t enable) {
+    (void)c;if(B(enable))die("Android enabled conservative rasterization requires device feature and pipeline adaptation");
+}
+NVN(nvnCommandBufferSetRasterizerDiscard,void,NVNcommandBuffer *c,uint32_t enable) {
+    (void)c;if(B(enable))die("Android enabled rasterizer discard requires pipeline adaptation");
+}
+NVN(nvnCommandBufferSetDepthClamp,void,NVNcommandBuffer *c,uint32_t enable) {
+    *REC(c,OP_DEPTH_CLAMP,uint32_t)=B(enable);
+}
+NVN(nvnCommandBufferSetDepthBounds,void,NVNcommandBuffer *c,uint32_t enable,float minimum,float maximum) {
+    (void)c;(void)minimum;(void)maximum;
+    if(B(enable))die("Android enabled depth bounds require device feature and pipeline adaptation");
+    /* Every Android pipeline currently has depthBoundsTestEnable=false. */
+}
+NVN(nvnCommandBufferSetScissors,void,NVNcommandBuffer *c,int first,int count,const int *values) {
+    if(!count)return;if(first!=0 || count!=1 || !values)die("Android multiple scissors require viewport-array support");
+    h_nvnCommandBufferSetScissor(c,values[0],values[1],values[2],values[3]);
+}
+#endif
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){snap_prog(p), stages};
@@ -737,6 +1005,12 @@ NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int
     if (n < 0 || first + n > 16) { LOG("【红】BindVertexBuffers first=%d n=%d", first, n); return; }
     p_bind_vbuf *r = RECN(c, OP_BIND_VBUF, p_bind_vbuf, r, n); r->first = first; r->n = n; memcpy(r->r, rg, sizeof *rg * n);
 }
+#ifdef __ANDROID__
+NVN(nvnCommandBufferBindVertexBuffer,void,NVNcommandBuffer *c,int index,NVNbufferAddress address,size_t size) {
+    if(index<0 || index>=16)die("Android vertex buffer index");
+    NVNbufferRange range={address,size};h_nvnCommandBufferBindVertexBuffers(c,index,1,&range);
+}
+#endif
 NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) {
     *REC(c, OP_BIND_UBO, p_bind_buf) = (p_bind_buf){st, i, a, n};
 }
@@ -753,11 +1027,24 @@ static void bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, 
     if (n < 0 || n > 32) { LOG("【红】绑定句柄数 %d", n); return; }
     p_bind_handles *r = RECN(c, op, p_bind_handles, h, n); r->stage = st; r->first = first; r->n = n; memcpy(r->h, h, 8 * n);
 }
+#ifdef __ANDROID__
+NVN(nvnCommandBufferBindTextures,void,NVNcommandBuffer *c,NVNshaderStage stage,int first,int count,const NVNtextureHandle *handles) {
+    bind_handles(c,OP_BIND_TEX,stage,first,count,handles);
+}
+NVN(nvnCommandBufferBindTexture,void,NVNcommandBuffer *c,NVNshaderStage stage,int index,NVNtextureHandle handle) {
+    bind_handles(c,OP_BIND_TEX,stage,index,1,&handle);
+}
+#endif
 // 图像（可写贴图）：句柄 = 贴图池号（GetImageHandle 原样返回；游戏不调 RegisterImage，图像与贴图共用登记）
 // Image (writable texture): handle = texture pool index (GetImageHandle returns it as-is; the game does not call RegisterImage, images and textures share registration)
 NVN(nvnCommandBufferBindImages, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNimageHandle *h) {
     bind_handles(c, OP_BIND_IMG, st, first, n, (const uint64_t *)h);
 }
+#ifdef __ANDROID__
+NVN(nvnCommandBufferBindImage,void,NVNcommandBuffer *c,NVNshaderStage stage,int index,NVNimageHandle handle) {
+    h_nvnCommandBufferBindImages(c,stage,index,1,&handle);
+}
+#endif
 NVN(nvnCommandBufferBindSeparateTextures, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNseparateTextureHandle *h) {
     bind_handles(c, OP_BIND_TEX, st, first, n, (const uint64_t *)h);
 }
@@ -774,6 +1061,14 @@ NVN(nvnCommandBufferSetPolygonOffsetClamp, void, NVNcommandBuffer *c, float fa, 
     *REC(c, OP_POLY_OFFSET, p_poly_offset) = (p_poly_offset){fa, un, cl};
 }
 NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { *REC(c, OP_DRAW, p_draw) = (p_draw){pr, first, n}; }
+#ifdef __ANDROID__
+NVN(nvnCommandBufferDrawArraysInstanced,void,NVNcommandBuffer *c,NVNdrawPrimitive primitive,int first,int count,int base_instance,int instances) {
+    *REC(c,OP_DRAW_INSTANCED,p_draw_instanced)=(p_draw_instanced){{primitive,first,count},base_instance,instances};
+}
+NVN(nvnCommandBufferDrawElementsBaseVertex,void,NVNcommandBuffer *c,NVNdrawPrimitive primitive,NVNindexType type,int count,NVNbufferAddress indices,int base_vertex) {
+    *REC(c,OP_DRAW_IDX,p_draw_idx)=(p_draw_idx){primitive,type,count,base_vertex,0,1,indices};
+}
+#endif
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
     *REC(c, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){pr, it, n, bv, bi, inst, ib};
@@ -817,6 +1112,15 @@ NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNte
     const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags) {
     p_copy_t2t *o = REC(c, OP_COPY_T2T, p_copy_t2t); o->src = snap_tex(s); o->dst = snap_tex(d);
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv); o->sr = *sr; o->dr = *dr; o->flags = flags;
+#ifdef __ANDROID__
+    static _Atomic unsigned copies;
+    if(atomic_fetch_add(&copies,1)<8){
+        const tex_t *a=(const tex_t *)s,*b=(const tex_t *)d;
+        fprintf(stderr,"[nvn-vulkan] COPY_RECORD caller=%p src=%llu dst=%llu src_mem=%p dst_mem=%p src_extent=%u,%u dst_extent=%u,%u sr=%d,%d,%d,%d,%d,%d dr=%d,%d,%d,%d,%d,%d flags=%#x\n",
+            __builtin_return_address(0),(unsigned long long)a->serial,(unsigned long long)b->serial,a->mem,b->mem,a->d.width,a->d.height,b->d.width,b->d.height,
+            sr->xoffset,sr->yoffset,sr->zoffset,sr->width,sr->height,sr->depth,dr->xoffset,dr->yoffset,dr->zoffset,dr->width,dr->height,dr->depth,flags);
+    }
+#endif
 }
 NVN(nvnCommandBufferSetCopyRowStride, void, NVNcommandBuffer *c, ptrdiff_t st) { REC(c, OP_COPY_STRIDE, p_copy_stride)->stride = st; }
 #ifdef __ANDROID__

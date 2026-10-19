@@ -32,8 +32,8 @@ static char guest_owned[64];
 static void *one(void *arg) {
     guest_thread_init();
     assert(dm_android_thread_has_guest_context());
-    /* The guest replaces logical TLS pointers; the original allocations still
-     * belong to the Android context, not to the current values of those keys. */
+    /* The guest replaces logical TLS pointers; the allocation owner key keeps
+     * the original pointers independently of the current logical slot values. */
     dm_android_slot_set(g_keytls, guest_owned);
     dm_android_slot_set(g_keytlr, guest_owned + 32);
     if ((uintptr_t)arg & 1) {

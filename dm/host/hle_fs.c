@@ -340,6 +340,9 @@ static int set_guest_name(const char *hp, const char *path) {
     return -1;
 }
 static Result err_res(const char *op, const char *path) {
+#ifdef __ANDROID__
+    if(g_flag.fs)LOG("ANDROID_FS_RESULT operation=%s path=%s errno=%d",op,path,errno);
+#endif
     if (errno == ENOENT || errno == ENOTDIR) return RES_PATH_NOT_FOUND;
     if (errno == EEXIST) return RES_PATH_EXISTS;
     LOG("fs %s %s 失败 errno=%d", op, path, errno); return RES_FAIL;
@@ -464,6 +467,7 @@ static void settings_seed(const char *save_dir) {
     fclose(f); if (rename(tmp, path)) { LOG("【红】设置缺省：改名到 %s 失败", path); return; }
     LOG("设置缺省：%s 补了 %d 个键（显示物品 = 开关式 / 说明条热键 = 关 / 小地图放右、进局自动开%s；已有的键不动）", path, added, first ? " / 首次安装按系统语言写 Language" : "");
 }
+#endif // Apple-only save seed/default modifications
 // 语言开关（自定义页标题行那一格，dm_custom.c 的 lang_en）：玩家点过「应用」后设置文件里有明确的值，每次挂存档（游戏读设置之前）按它把原版设置文件的
 // Language（文字）和 VoiceLanguage（语音，语音跟着切）改成 0 英文 / 8 简中。只在「与开关不符」时改：开关 = 英文而文字不是 0；开关 = 中文而文字是 0。
 // 所以开关关着时玩家若在原版里选了繁中等别的语言，不会被改回简中。两个键缺哪个补哪个。没点过应用（-1）= 一个字不动
@@ -472,25 +476,50 @@ static void settings_seed(const char *save_dir) {
 // So with the switch off, if the player has chosen another language such as Traditional Chinese in the original game, it is not changed back to Simplified Chinese. Whichever of the two keys is missing is added. Apply never tapped (-1) = nothing is touched
 static int json_int_set(char *buf, size_t cap, const char *key, int val) {   // 把 "key": N 的 N 换成 val（没有这个键就插在第一个 { 之后）；返回 1 = 改了 | Replace the N of "key": N with val (if the key is absent, insert it after the first {); returns 1 = changed
     char *k = strstr(buf, key); char num[16]; snprintf(num, sizeof num, "%d", val);
-    if (!k) { char *b = strchr(buf, '{'); char ins[96]; int m = snprintf(ins, sizeof ins, "\n    %s: %s,", key, num); if (!b || strlen(buf) + (size_t)m + 1 >= cap) return 0;
+    if (!k) { char *b = strchr(buf, '{'); if (!b) return 0; const char *rest = b + 1; while (*rest == ' ' || *rest == '\t' || *rest == '\r' || *rest == '\n') rest++;
+        char ins[96]; int m = snprintf(ins, sizeof ins, "\n    %s: %s%s", key, num, *rest == '}' ? "" : ","); if (strlen(buf) + (size_t)m + 1 >= cap) return 0;
         memmove(b + 1 + m, b + 1, strlen(b + 1) + 1); memcpy(b + 1, ins, (size_t)m); return 1; }
     char *v = strchr(k + strlen(key), ':'); if (!v) return 0; v++; while (*v == ' ' || *v == '\t') v++; char *e = v; if (*e == '-') e++; while (*e >= '0' && *e <= '9') e++;
-    if (e == v || atoi(v) == val) return 0; size_t nl = strlen(num); if (strlen(buf) + nl + 1 >= cap) return 0;
+    if (e == v || atoi(v) == val) return 0;
+    size_t nl = strlen(num); if (strlen(buf) + nl + 1 >= cap) return 0;
     memmove(v + nl, e, strlen(e) + 1); memcpy(v, num, nl); return 1; }
 static void settings_lang_apply(const char *save_dir) {
     int dm_custom_lang_explicit(void); int en = dm_custom_lang_explicit(); if (en < 0) return;
-    char path[1200]; snprintf(path, sizeof path, "%s/Settings/Settings.json", save_dir); static char buf[66000]; FILE *f = fopen(path, "rb"); if (!f) return;
-    size_t n = fread(buf, 1, 65535, f); fclose(f); if (n == 65535) return; buf[n] = 0;
+    char path[1200]; snprintf(path, sizeof path, "%s/Settings/Settings.json", save_dir);
+#ifdef __ANDROID__
+    /* These edits precede the transaction clone's own link checks. Refuse
+     * linked Settings directories/files before following either path. */
+    struct stat st;char settings_dir[1200];snprintf(settings_dir,sizeof settings_dir,"%s/Settings",save_dir);
+    if(lstat(save_dir,&st)||!S_ISDIR(st.st_mode))return;
+    if(lstat(settings_dir,&st)){if(errno!=ENOENT)return;}else if(!S_ISDIR(st.st_mode))return;
+    if(lstat(path,&st)){if(errno!=ENOENT)return;}else if(!S_ISREG(st.st_mode))return;
+#endif
+    static char buf[66000]; FILE *f = fopen(path, "rb");
+    if (!f) {
+#ifdef __ANDROID__
+        if(errno!=ENOENT)return;
+        char dir[1200];snprintf(dir,sizeof dir,"%s/Settings",save_dir);if(mkdir(dir,0755)&&errno!=EEXIST)return;
+        strcpy(buf,"{}");
+#else
+        return;
+#endif
+    } else {size_t n = fread(buf, 1, 65535, f);int bad=ferror(f);fclose(f);if(bad||n==65535)return;buf[n]=0;}
     const char *k = strstr(buf, "\"Language\""), *c = k ? strchr(k + 10, ':') : NULL; int cur = c ? atoi(c + 1) : 8;   // 没写 = 游戏缺省（宿主报简中） | Not written = game default (the host reports Simplified Chinese)
     if ((en && cur == 0) || (!en && cur != 0)) { const char *vk = strstr(buf, "\"VoiceLanguage\""), *vc = vk ? strchr(vk + 15, ':') : NULL; int vcur = vc ? atoi(vc + 1) : cur;
         if ((en && vcur == 0) || (!en && vcur != 0)) return; }   // 文字、语音都已与开关相符 | Text and voice already match the switch
     int want = en ? 0 : 8, ch = json_int_set(buf, sizeof buf, "\"Language\"", want) | json_int_set(buf, sizeof buf, "\"VoiceLanguage\"", want); if (!ch) return;
-    char tmp[1300]; snprintf(tmp, sizeof tmp, "%s.lang", path); f = fopen(tmp, "wb"); size_t m = strlen(buf);
-    if (!f || fwrite(buf, 1, m, f) != m) { if (f) fclose(f); LOG("【红】语言开关：写 %s 失败", tmp); return; }
-    fclose(f); if (rename(tmp, path)) { LOG("【红】语言开关：改名到 %s 失败", path); return; }
+    char tmp[1300];
+#ifdef __ANDROID__
+    snprintf(tmp,sizeof tmp,"%s.lang.XXXXXX",path);int fd=mkstemp(tmp);f=fd<0?NULL:fdopen(fd,"wb");
+    if(!f){if(fd>=0){close(fd);unlink(tmp);}return;}
+#else
+    snprintf(tmp, sizeof tmp, "%s.lang", path); f = fopen(tmp, "wb");
+#endif
+    size_t m = strlen(buf);
+    if (!f || fwrite(buf, 1, m, f) != m) { if (f) fclose(f); remove(tmp); LOG("【红】语言开关：写 %s 失败", tmp); return; }
+    if(fclose(f)||rename(tmp,path)){remove(tmp);LOG("【红】语言开关：提交到 %s 失败",path);return;}
     LOG("语言开关：设置文件的 Language / VoiceLanguage 改成 %d（%s；原文字语言 %d）", want, en ? "英文" : "简中", cur);
 }
-#endif // Apple-only save seed/settings modifications
 // 事务式存档当前的工作目录（游戏读写的那份；宿主自己的旁路文件写在这里才会随 Commit 进已提交版）。没挂载存档时返回 NULL
 // The current working directory of the transactional save (the copy the game reads and writes; the host's own side files must be written here to enter the committed version with Commit). Returns NULL when no save is mounted
 const char *dm_save_workdir(void) { for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].commit[0]) return g_mnt[i].dir; return NULL; }
@@ -505,7 +534,16 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 �
     const char *d = getenv("DM_SAVE");
     if (!d) die("未设 DM_SAVE：请指向一份存档目录的可写副本");
     char dd[1024]; strlcpy(dd, d, sizeof dd); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;   // 去掉结尾斜杠（.work / .new 拼在同级） | strip trailing slashes (.work / .new are appended at the same level)
-#ifndef __ANDROID__
+#ifdef __ANDROID__
+    /* Portable HLE never opts another title into D2R Settings.json or
+     * .fltr edits. The D2R module must have attached with its reviewed
+     * build identity and required observer/host gates before SDK startup. */
+    int dm_android_title_custom_settings(void) __attribute__((weak));
+    if(dm_android_title_custom_settings && dm_android_title_custom_settings()) {
+        settings_lang_apply(dd);
+        if(g_dm_mount_seed_hook)g_dm_mount_seed_hook(dd);
+    }
+#else
     stash_seed(dd);
     low_vision_off(dd);
     settings_seed(dd); settings_lang_apply(dd);
@@ -519,6 +557,15 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 �
 }
 void (*g_dm_pre_commit_hook[5])(const char *workdir);   // 提交前调（工作目录）：宿主旁路文件按工作目录里的存档内容核对后再写（[0] 个人仓库多页 dm_pages.c、[2] 百宝囊 dm_pouch.c、[1] 编年史仓库 dm_vault.c、[3] 秘境进度 dm_rift.c、[4] iCloud 收件箱并回 dm_cloudmerge.c） | Called before commit (working directory): host side files are checked against the save content in the working directory before being written ([0] personal stash multi-page dm_pages.c, [2] pouch dm_pouch.c, [1] Chronicle stash dm_vault.c, [3] Rift progress dm_rift.c, [4] iCloud inbox merge dm_cloudmerge.c)
 void (*g_dm_save_commit_hook)(const char *commit_dir);   // 存档提交成功后调（已提交目录）；iOS 的 iCloud 同步设它，宿主为空 | called after a save commit succeeds (committed directory); the iOS iCloud sync sets it, NULL on the host
+#ifdef __ANDROID__
+/* An explicit cloud enable must capture one complete committed generation,
+ * just like the post-Commit hook below. The caller must not hold its queue
+ * mutex: Commit already takes this FS lock before calling that hook. */
+void dm_fs_snapshot_committed(const char *directory,void (*consume)(const char *)) {
+    if(!directory||!consume)return;
+    pthread_mutex_lock(&g_lock);consume(directory);pthread_mutex_unlock(&g_lock);
+}
+#endif
 static _Atomic uint64_t g_save_commits;   // 成功提交过几次（前端进后台时等「游戏这次存盘已提交」用） | number of successful commits (used by the front end when going to background to wait for "the game's current save has been committed")
 uint64_t dm_fs_commit_count(void) { return atomic_load(&g_save_commits); }
 HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；事务式存档：工作目录整树 clone 后与已提交目录原子互换（renamex_np RENAME_SWAP）", Result, h_fs_Commit, const char *name) {
@@ -538,9 +585,7 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；事务式存档：工作目录整�
     if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_OK; }   // 非事务挂载：无可提交 | non-transactional mount: nothing to commit
 #endif
     uint64_t tc0 = clock_gettime_nsec_np(CLOCK_MONOTONIC), tw0 = atomic_exchange(&g_txn_first_ns, 0);
-#ifndef __ANDROID__
     for (int k = 0; k < 5; k++) if (g_dm_pre_commit_hook[k]) g_dm_pre_commit_hook[k](g_mnt[i].dir);
-#endif
     uint64_t tc1 = clock_gettime_nsec_np(CLOCK_MONOTONIC);   // 写进工作目录的旁路文件随这次提交一起原子换入 | side files written into the working directory are swapped in atomically together with this commit
     int perr = atomic_exchange(&g_save_poison, 0);
     if (perr) {                                                         // 本事务有写失败：拒绝提交、丢弃工作目录 | a write failed in this transaction: refuse the commit, discard the working directory
@@ -764,11 +809,63 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
     if (g_flag.fs) {   // 读取计量：每累计 64 MiB 或每 1000 次打一行 | Read metering: print a line every 64 MiB accumulated or every 1000 reads
         static uint64_t n, bytes, next_b = 64 << 20; static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
         pthread_mutex_lock(&m); n++; bytes += got;
+#ifdef __ANDROID__
+        if(n<=16) {uint32_t magic=0;if(got>=4)memcpy(&magic,buf,4);LOG("ANDROID_FS_READ fd=%d offset=%#llx requested=%zu received=%zu magic=%#x",(int)h,(unsigned long long)off,sz,got,magic);}
+#endif
         if (bytes >= next_b || n % 1000 == 0) { LOG("fs 读 累计 %llu 次 %.1f MiB（本次 fd %d 偏移 %#llx 长 %#zx）", (unsigned long long)n, bytes / 1048576.0, (int)h, (unsigned long long)off, got); if (bytes >= next_b) next_b += 64 << 20; }
         pthread_mutex_unlock(&m);
     }
     return RES_OK;
 }
+#ifdef __ANDROID__
+Result dm_android_fs_read_exact(uint64_t handle,int64_t offset,void *buffer,size_t size) {
+    size_t received=0;Result result=h_fs_ReadFile(&received,handle,offset,buffer,size);
+    return result?result:received==size?RES_OK:0x177a02u; // Original 1.1.0 SDK short-read result.
+}
+/* Keep the guest SDK's FILE and libc++ stream layouts. Only its cookie I/O
+ * callbacks cross to our checked mount/range handles; no Bionic FILE escapes. */
+typedef struct { uint64_t handle; int64_t position; } android_file_cookie;
+static Result h_fs_GetFileSize(int64_t *,uint64_t);
+static void h_fs_CloseFile(uint64_t);
+typedef struct {
+    ssize_t (*read)(void *,char *,size_t);
+    ssize_t (*write)(void *,const char *,size_t);
+    int (*seek)(void *,int64_t *,int);
+    int (*close)(void *);
+} android_cookie_functions;
+static ssize_t android_cookie_read(void *opaque,char *buffer,size_t size) {
+    android_file_cookie *cookie=opaque;
+    dm_guest_write_prepare(buffer,size);
+    ssize_t got=dm_data_pread((int)cookie->handle,buffer,size,cookie->position);
+    if(got>0)cookie->position+=got;
+    return got;
+}
+static int android_cookie_seek(void *opaque,int64_t *offset,int origin) {
+    android_file_cookie *cookie=opaque;int64_t base=0;
+    if(origin==SEEK_CUR)base=cookie->position;
+    else if(origin==SEEK_END){if(h_fs_GetFileSize(&base,cookie->handle))return -1;}
+    else if(origin!=SEEK_SET){errno=EINVAL;return -1;}
+    int64_t next;
+    if(__builtin_add_overflow(base,*offset,&next)||next<0){errno=EINVAL;return -1;}
+    cookie->position=*offset=next;return 0;
+}
+static int android_cookie_close(void *opaque) {
+    android_file_cookie *cookie=opaque;h_fs_CloseFile(cookie->handle);free(cookie);return 0;
+}
+void *dm_android_fs_open_guest_cookie(const char *path,const char *mode,void *create) {
+    if(!path||!mode||!create){errno=EINVAL;return NULL;}
+    if(strcmp(mode,"r")&&strcmp(mode,"rb")){LOG("Android guest stdio unsupported mode=%s path=%s",mode,path);errno=ENOTSUP;return NULL;}
+    uint64_t handle;
+    if(h_fs_OpenFile(&handle,path,MODE_READ)){errno=ENOENT;return NULL;}
+    android_file_cookie *cookie=calloc(1,sizeof *cookie);
+    if(!cookie){h_fs_CloseFile(handle);return NULL;}cookie->handle=handle;
+    android_cookie_functions callbacks={android_cookie_read,NULL,android_cookie_seek,android_cookie_close};
+    void *file=((void *(*)(void *,const char *,android_cookie_functions))create)(cookie,mode,callbacks);
+    if(!file)android_cookie_close(cookie);
+    if(g_flag.fs)LOG("ANDROID_GUEST_STDIO path=%s file=%p",path,file);
+    return file;
+}
+#endif
 HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp-srv → pwrite(2)", Result, h_fs_WriteFile, uint64_t h, int64_t off, const void *buf, size_t sz, const void *opt) {
     if (!h) return RES_FAIL;
     (void)opt; size_t put = 0;
@@ -802,7 +899,7 @@ HLE_FORCE("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", "fsp-srv → fstat(2)", 
 #ifdef __ANDROID__
     int image_result = romfs_image_fd_size((int)h, out);
     if (image_result < 0) return err_res("romfs range size", "fd");
-    if (image_result) return RES_OK;
+    if (image_result) {if(g_flag.fs)LOG("ANDROID_FS_SIZE fd=%d bytes=%lld",(int)h,(long long)*out);return RES_OK;}
 #endif
     struct stat st; if (fstat((int)h, &st)) return err_res("fstat", "fd");
     *out = (int)h < 4096 && g_hm[(int)h] ? g_hm[(int)h]->size : st.st_size; return RES_OK;
@@ -894,6 +991,9 @@ HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_
 }
 HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → stat(2)", Result, h_fs_GetEntryType, int32_t *out, const char *path) {
     HP(path); struct stat st;
+#ifdef __ANDROID__
+    if(g_flag.fs)LOG("ANDROID_FS_ENTRY %s",path);
+#endif
 #ifdef __ANDROID__
     int image_type, image_result = romfs_image_lookup(hp, &image_type, NULL);
     if (image_result < 0) return err_res("romfs entry", hp);
