@@ -16,7 +16,7 @@ final class RenderQuality {
         return scale==AUTO?"auto\n":Float.toString(parse(Float.toString(scale)))+"\n";
     }
     static String description(float scale){
-        if(scale==AUTO)return "自动（3D 动态 60%–100%）";
+        if(scale==AUTO)return "自动（75% 起，掉帧时最低降至 60%）";
         if(scale==ORIGINAL)return "原画质（100%）";
         if(scale==BALANCED)return "均衡模式（90%）";
         if(scale==PERFORMANCE)return "性能模式（75%）";
