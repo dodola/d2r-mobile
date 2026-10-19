@@ -934,6 +934,9 @@ static void attachment_ab_frame(uint64_t frame) {
         (unsigned long long)a->load_bytes_avoided,(unsigned long long)a->store_bytes_avoided);
     attachment_ab_poll(frame);
 }
+/* Hot-path environment lookups: getenv scans environ, so resolve the value once. */
+static const char *adapted_shader_dir(void){static int init;static const char *v;if(!init){v=getenv("DM_ADAPTED_SHADER_DIR");init=1;}return v;}
+static const char *frame_dump_dir(void){static int init;static const char *v;if(!init){v=getenv("DM_FRAME_DIR");init=1;}return v;}
 /* Diagnostic (profile_detail): depth-state mix of the draws in the current pass and the depth attachment ops. */
 static struct{uint8_t dt,dw,df,st,sf,fo,po,zo,wm,ref;uint32_t n;}dsmix[6];static int ndsmix;static int dbg_dload=-1,dbg_dstore=-1;
 static void dsmix_note(void){uint8_t dt=G.state.ds.dt,dw=G.state.ds.dw,df=G.state.ds.df,st=G.state.ds.st,sf=G.state.ds.sf_f,fo=G.state.ds.fail_f,po=G.state.ds.zpass_f,zo=G.state.ds.zfail_f,wm=(uint8_t)G.state.stencil_write[0],ref=(uint8_t)G.state.stencil_ref[0];int i;
@@ -2812,7 +2815,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
                if(p)fprintf(stderr,"[nvn-vulkan] FEEDBACK_SAMPLER min=%u mag=%u wrap=%u,%u,%u lod=%g,%g bias=%g aniso=%g compare=%u,%u\n",p->minf,p->magf,p->ws,p->wt,p->wr,p->lod_min,p->lod_max,p->lod_bias,p->aniso,p->cmp_mode,p->cmp_func);
                fprintf(stderr,"[nvn-vulkan] FEEDBACK_IMAGE_STATE serial=%llu source_target=%u source_format=%u source_extent=%u,%u,%u sampled_has_view=%u sampled_target=%u,%d attachment_has_view=%u attachment_target=%u,%d attachment_format=%u,%d attachment_swizzle=%u,%u,%u,%u,%u attachment_depth_mode=%u,%u raster_samples=%u samples=%u\n",(unsigned long long)t->serial,t->source.d.target,t->source.d.format,t->source.d.width,t->source.d.height,t->source.d.depth,slot->has_view,v->set_target,v->target,G.state.rt.has_dview,a->set_target,a->target,a->set_format,a->format,a->set_swizzle,a->swizzle[0],a->swizzle[1],a->swizzle[2],a->swizzle[3],a->set_depth_mode,a->depth_mode,G.state.ms.raster_samples,G.state.ms.samples);
            }
-           if(getenv("DM_ADAPTED_SHADER_DIR")&&!(s->texture_layout_logged&(1ull<<i))){
+           if(adapted_shader_dir()&&!(s->texture_layout_logged&(1ull<<i))){
                s->texture_layout_logged|=1ull<<i;
                const view_t *v=&slot->view;
                fprintf(stderr,"[nvn-vulkan] TEXTURE_LAYOUT shader=%s stage=%u binding=%u slot=%d tid=%u serial=%llu target=%u layers=%u levels=%u has_view=%u view_target=%u,%d view_layers=%u,%d,%d view_levels=%u,%d,%d\n",
@@ -3270,7 +3273,7 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
     /* A zero-color pass may still run fragment discard, depth export or
      * storage side effects. Only a program with no fragment stage omits it. */
     VShader *vs=program_stage(0),*ps=program_stage_optional(1);
-    if(ps&&getenv("DM_FRAME_DIR")&&((!strcmp(ps->key,"3749e309ce42949e")&&!strcmp(vs->key,"4a2526c0e38b227d"))||(!strcmp(ps->key,"73adabd418bb541e")&&!strcmp(vs->key,"72f3a02ea695e6be")))){
+    if(ps&&frame_dump_dir()&&((!strcmp(ps->key,"3749e309ce42949e")&&!strcmp(vs->key,"4a2526c0e38b227d"))||(!strcmp(ps->key,"73adabd418bb541e")&&!strcmp(vs->key,"72f3a02ea695e6be")))){
         char request[1200];snprintf(request,sizeof(request),"%s/%s",getenv("DM_FRAME_DIR"),!strcmp(ps->key,"3749e309ce42949e")?"feedback-request":"feedback-73ad-request");
         /* Empty/zero requests capture the first match. A positive integer
          * skips that many matching draws, enabling a later failing draw to be
@@ -3374,7 +3377,7 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
     for(unsigned l=0;l<16;l++)if(vs->vertex_inputs[l].type)locations|=1u<<l;
     for(uint32_t i=0;i<vs->h.na;i++) { unsigned location=vs->attr[i][0];if(location>=16)die("vertex attribute count",location);
         va_st v=G.state.attributes[location];if(v.stream>=16)die("vertex stream",v.stream);
-        if(getenv("DM_ADAPTED_SHADER_DIR")&&!vs->vertex_layout_logged)fprintf(stderr,"[nvn-vulkan] VERTEX_LAYOUT shader=%s location=%u shader_kind=%u format=%u kind=%u stream=%u offset=%u\n",vs->key,location,vs->attr[i][1],v.fmt,vertex_scalar_kind(v.fmt),v.stream,v.offset);
+        if(adapted_shader_dir()&&!vs->vertex_layout_logged)fprintf(stderr,"[nvn-vulkan] VERTEX_LAYOUT shader=%s location=%u shader_kind=%u format=%u kind=%u stream=%u offset=%u\n",vs->key,location,vs->attr[i][1],v.fmt,vertex_scalar_kind(v.fmt),v.stream,v.offset);
         if(G.trace_frame)fprintf(stderr,"[nvn-vulkan] VERTEX_INPUT draw=%llu location=%u shader_type=%u stream=%u format=%u offset=%u stride=%u divisor=%u address=%#llx size=%llu\n",(unsigned long long)G.draws,location,vs->attr[i][1],v.stream,v.fmt,v.offset,G.state.streams[v.stream].stride,G.state.streams[v.stream].divisor,(unsigned long long)G.state.vbuf[v.stream].address,(unsigned long long)G.state.vbuf[v.stream].size);
         if(v.fmt==NVN_FORMAT_NONE){has_default=1;continue;}
         NvnVkVertexFormat f=nvn_vk_vertex_format(v.fmt);if(!f.native)die("unsupported NVN vertex format",v.fmt);
