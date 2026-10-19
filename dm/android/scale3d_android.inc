@@ -30,8 +30,16 @@ int dm_android_render_scale_request(float scale) {
     atomic_store(&g_scale3d_resumed,1);
     pthread_mutex_unlock(&android_s3_lock);return 0;
 }
+int dm_android_render_scale_auto(void) {
+    pthread_mutex_lock(&android_s3_lock);
+    android_s3_manual=0;android_s3_requested=1.f;
+    android_s3_ctl.level=0;android_s3.level=0;
+    atomic_store(&g_scale3d_level,0);
+    atomic_store(&g_scale3d_resumed,1);
+    pthread_mutex_unlock(&android_s3_lock);return 0;
+}
 float dm_android_render_scale_requested(void) {
-    pthread_mutex_lock(&android_s3_lock);float scale=android_s3_manual?android_s3_requested:1.f;
+    pthread_mutex_lock(&android_s3_lock);float scale=android_s3_manual?android_s3_requested:0.f;
     pthread_mutex_unlock(&android_s3_lock);return scale;
 }
 

@@ -47,6 +47,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static native int nativeStart();
     private static native String nativeStatus();
     private static native int nativeRenderScale(float scale);
+    private static native int nativeRenderScaleAuto();
     private static native void nativeControllerCancelActions(long buttons,int lx,int ly,int rx,int ry);
     private static native String nativeSaveFailure();
     private static native String nativeKeyboardRequest();
@@ -72,7 +73,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private Button systemControl;
     private RendererSettingsDialog rendererSettings;
     private int appliedRendererFlags=RendererOptions.DEFAULT_FLAGS;
-    private float appliedRenderScale=RenderQuality.ORIGINAL;
+    private float appliedRenderScale=RenderQuality.AUTO;
     private GameUiStrings strings;
     private AndroidUpdateChecker updateChecker;
     private final GameDisplayMetrics.FpsSampler fpsSampler=new GameDisplayMetrics.FpsSampler();
@@ -168,7 +169,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         system.setOnClickListener(v -> {
             if(!configured||failed||rendererSettings!=null||keyboardDialog!=null||saveFailureDialog!=null)return;
             actionButtons=0;if(inputReady)nativeActions(0,0,0,0,0);touchControls.cancel();
-            rendererSettings=RendererSettingsDialog.show(this,appliedRendererFlags,appliedRenderScale,GameActivity::nativeRenderScale,system,() -> rendererSettings=null);
+            rendererSettings=RendererSettingsDialog.show(this,appliedRendererFlags,appliedRenderScale,
+                scale -> scale==RenderQuality.AUTO?nativeRenderScaleAuto():nativeRenderScale(scale),
+                system,() -> rendererSettings=null);
         });
         viewport.addView(system,systemParams);
         fps=new TextView(this);fps.setText("FPS —");fps.setTextColor(TouchControlsView.TEXT);

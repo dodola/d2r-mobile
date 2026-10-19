@@ -209,14 +209,14 @@ static char report_file[PATH_MAX], report_temp[PATH_MAX];
 static void path(char *out, size_t cap, const char *base, const char *leaf) {
     if (snprintf(out, cap, "%s/%s", base, leaf) >= (int)cap) die("Android private path too long");
 }
-/* Shared with the quality-mode menu. An absent file keeps
- * the original 1.0 scale; reject truncated values, NaN/Inf, and extra tokens. */
+/* Shared with the quality-mode menu. An absent file enables automatic
+ * dynamic scaling; reject truncated values, NaN/Inf, and extra tokens. */
 static int configure_render_scale(void) {
     char marker[PATH_MAX], text[64], value[32];
     path(marker,sizeof marker,port_root,"diagnostics/render-scale.txt");
     unsetenv("DM_3D_SCALE");
     FILE *f=fopen(marker,"r");
-    if (!f) return errno==ENOENT?dm_android_render_scale_request(1.0f):errno;
+    if (!f) return errno==ENOENT?dm_android_render_scale_auto():errno;
     size_t n=fread(text,1,sizeof text-1,f);
     int error=ferror(f)?EIO:0;
     int trailing=fgetc(f);
@@ -225,13 +225,18 @@ static int configure_render_scale(void) {
     if (error) return error;
     if (trailing!=EOF || memchr(text,'\0',n)) return EINVAL;
     text[n]='\0';
+    char *start=text, *end;
+    while (isspace((unsigned char)*start)) start++;
+    if (!strncmp(start,"auto",4)) {
+        end=start+4;
+        while (isspace((unsigned char)*end)) end++;
+        return *end?EINVAL:dm_android_render_scale_auto();
+    }
     /* Match the menu's decimal format; do not accept C hex floats or suffixes. */
     for (size_t i=0;i<n;i++) {
         unsigned char c=(unsigned char)text[i];
         if (!isspace(c) && !isdigit(c) && c!='.' && c!='+' && c!='-' && c!='e' && c!='E') return EINVAL;
     }
-    char *start=text, *end;
-    while (isspace((unsigned char)*start)) start++;
     errno=0; float scale=strtof(start,&end);
     if (end==start || errno==ERANGE || !isfinite(scale) || scale<0.50f || scale>1.0f) return EINVAL;
     while (isspace((unsigned char)*end)) end++;
@@ -944,4 +949,9 @@ JNIEXPORT jstring JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeStatus(JNI
 JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeRenderScale(JNIEnv *env,jclass cls,jfloat scale) {
     (void)env;(void)cls;
     return atomic_load(&configured)?dm_android_render_scale_request(scale):EAGAIN;
+}
+JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeRenderScaleAuto(
+        JNIEnv *env,jclass cls) {
+    (void)env;(void)cls;
+    return atomic_load(&configured)?dm_android_render_scale_auto():EAGAIN;
 }

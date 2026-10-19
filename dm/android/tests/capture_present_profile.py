@@ -57,8 +57,8 @@ def main():
         parser.error('Capture at least 30 seconds')
     if bool(args.scene_probe) != (args.level is not None) or (args.stationary and not args.scene_probe):
         parser.error('--scene-probe and --level must be supplied together; --stationary needs both')
-    if args.render_scale is not None and (not args.scene_probe or not math.isfinite(args.render_scale) or not .70 <= args.render_scale <= 1.0):
-        parser.error('--render-scale requires --scene-probe and a finite scale in 0.70..1.0')
+    if args.render_scale is not None and (not args.scene_probe or not math.isfinite(args.render_scale) or not .50 <= args.render_scale <= 1.0):
+        parser.error('--render-scale requires --scene-probe and a finite scale in 0.50..1.0')
     if args.scene_probe and not re.fullmatch(r'files/[A-Za-z0-9_./-]+', args.scene_probe):
         parser.error('--scene-probe must be an app-relative path under files/')
     out = args.output.resolve()

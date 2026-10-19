@@ -13,7 +13,7 @@ final class RenderQualityStore {
     private final AtomicFile file;
     RenderQualityStore(Context context){file=new AtomicFile(new File(context.getFilesDir(),"d2r-mobile/diagnostics/render-scale.txt"));}
     float read()throws IOException {
-        if(!file.getBaseFile().exists()&&!new File(file.getBaseFile()+".bak").exists())return RenderQuality.ORIGINAL;
+        if(!file.getBaseFile().exists()&&!new File(file.getBaseFile()+".bak").exists())return RenderQuality.AUTO;
         try(FileInputStream in=file.openRead()){
             ByteArrayOutputStream data=new ByteArrayOutputStream();
             for(int b;(b=in.read())!=-1;){if(data.size()==63)throw new IOException("画质设置过长");data.write(b);}

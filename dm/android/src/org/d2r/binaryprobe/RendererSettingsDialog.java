@@ -21,7 +21,7 @@ final class RendererSettingsDialog {
     private final RendererOptionsStore store;
     private final RenderQualityStore qualityStore;
     private final ScaleRequest scaleRequest;
-    private final RadioButton original,performance;
+    private final RadioButton automatic,original,balanced,performance;
     private final TextView qualityStatus;
     private final Switch clear,writeback;
     private final TextView status;
@@ -39,9 +39,11 @@ final class RendererSettingsDialog {
         LinearLayout body=new LinearLayout(activity);body.setOrientation(LinearLayout.VERTICAL);body.setPadding(dp(18),dp(8),dp(18),dp(12));
         text(body,"画质模式",18);
         RadioGroup quality=new RadioGroup(activity);quality.setOrientation(LinearLayout.VERTICAL);body.addView(quality);
+        automatic=qualityOption(quality,RenderQuality.description(RenderQuality.AUTO));
         original=qualityOption(quality,RenderQuality.description(RenderQuality.ORIGINAL));
+        balanced=qualityOption(quality,RenderQuality.description(RenderQuality.BALANCED));
         performance=qualityOption(quality,RenderQuality.description(RenderQuality.PERFORMANCE));
-        text(body,"原画质保持完整 3D 分辨率；性能模式降低 3D 分辨率，界面和文字保持原分辨率。选择后自动保存并应用，切换时可能短暂停顿。",14);
+        text(body,"自动模式在掉帧时动态降低 3D 分辨率；原画质固定 100%；均衡固定 90%；性能固定 75%。界面和文字保持当前输出分辨率。选择后自动保存并应用，切换时可能短暂停顿。",14);
         qualityStatus=text(body,"正在读取画质设置…",14);qualityStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         text(body,"图形优化",18);
         clear=option(body,"清屏合并","将符合条件的整屏清除并入绘制，减少独立清除和显存读取。关闭后恢复原清除路径。");
@@ -53,17 +55,19 @@ final class RendererSettingsDialog {
         dialog.setOnDismissListener(d->{closed.run();if(!activity.isFinishing())trigger.requestFocus();});
         clear.setOnCheckedChangeListener((v,on)->change(RendererOptions.CLEAR_MERGE,on));
         writeback.setOnCheckedChangeListener((v,on)->change(RendererOptions.STORE_ELIDE,on));
+        automatic.setOnClickListener(v->changeQuality(RenderQuality.AUTO));
         original.setOnClickListener(v->changeQuality(RenderQuality.ORIGINAL));
+        balanced.setOnClickListener(v->changeQuality(RenderQuality.BALANCED));
         performance.setOnClickListener(v->changeQuality(RenderQuality.PERFORMANCE));
         try{desiredScale=qualityStore.read();bindQuality();}
-        catch(IOException e){qualityReadFailed=true;qualityError="画质设置读取失败，请返回游戏后重新打开菜单。";original.setEnabled(false);performance.setEnabled(false);qualityFeedback();}
+        catch(IOException e){qualityReadFailed=true;qualityError="画质设置读取失败，请返回游戏后重新打开菜单。";automatic.setEnabled(false);original.setEnabled(false);balanced.setEnabled(false);performance.setEnabled(false);qualityFeedback();}
         reload();
     }
     static RendererSettingsDialog show(Activity activity,int applied,float scale,ScaleRequest request,View trigger,Runnable closed){
         RendererSettingsDialog panel=new RendererSettingsDialog(activity,applied,scale,request,trigger,closed);GameActivity.installDialogBack(panel.dialog);panel.dialog.show();
         panel.dialog.getWindow().setBackgroundDrawable(new ColorDrawable(0xff000000|TouchControlsView.INK));
         panel.dialog.getWindow().setLayout(Math.min(panel.dp(600),activity.getResources().getDisplayMetrics().widthPixels-panel.dp(36)),WindowManager.LayoutParams.WRAP_CONTENT);
-        panel.dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(TouchControlsView.TEXT);panel.original.requestFocus();return panel;
+        panel.dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(TouchControlsView.TEXT);panel.automatic.requestFocus();return panel;
     }
     private int dp(int n){return Math.round(n*activity.getResources().getDisplayMetrics().density);}
     private TextView text(LinearLayout body,String value,int size){
@@ -77,7 +81,11 @@ final class RendererSettingsDialog {
         group.addView(control,new RadioGroup.LayoutParams(-1,-2));return control;
     }
     private void bindQuality(){
-        original.setChecked(desiredScale==RenderQuality.ORIGINAL);performance.setChecked(desiredScale==RenderQuality.PERFORMANCE);qualityFeedback();
+        automatic.setChecked(desiredScale==RenderQuality.AUTO);
+        original.setChecked(desiredScale==RenderQuality.ORIGINAL);
+        balanced.setChecked(desiredScale==RenderQuality.BALANCED);
+        performance.setChecked(desiredScale==RenderQuality.PERFORMANCE);
+        qualityFeedback();
     }
     private void changeQuality(float scale){
         if(qualityReadFailed)return;
@@ -87,8 +95,10 @@ final class RendererSettingsDialog {
         bindQuality();
     }
     private void qualityFeedback(){
-        String value=qualityError!=null?qualityError:Math.abs(appliedScale-desiredScale)<0.0001f?
-            "已生效："+RenderQuality.description(appliedScale):"正在应用…\n当前生效："+RenderQuality.description(appliedScale);
+        String value=qualityError!=null?qualityError:desiredScale==RenderQuality.AUTO?
+            "自动模式已启用\n当前 3D 比例："+Math.round(appliedScale*100)+"%":
+            Math.abs(appliedScale-desiredScale)<0.0001f?"已生效："+RenderQuality.description(appliedScale):
+            "正在应用…\n当前生效："+RenderQuality.description(appliedScale);
         if(!value.contentEquals(qualityStatus.getText()))qualityStatus.setText(value);
     }
     private Switch option(LinearLayout body,String title,String detail){

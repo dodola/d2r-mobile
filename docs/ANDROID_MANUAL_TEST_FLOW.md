@@ -7,15 +7,15 @@
 当前候选包：
 
 ```text
-D:\AndroidSwitch\analysis\parity-20261019\d2r-new\test-apk-strict-v6\d2r-94012-test.apk
+D:\AndroidSwitch\analysis\parity-20261019\d2r-new\test-apk-strict-v8\d2r-94012-test.apk
 ```
 
 ```text
 APK SHA-256:
-bf664bf231024cdecfbda69b4aebd541ea46a7e9ac9d5e5cf7760ad8b85e248e
+bd8865b1d90baa0c2919c3cfcfc075e1d63f71613c433e3f1d85934ce94b802b
 
 native SHA-256:
-6021913ff6b027d1e84a2ccbe66149e79add23f505fd7b6cacdb2ec5469acc90
+6c412572ff57c60ad212d76b3a984d45396a61d72386a7367b7fc68a2297f12c
 
 游戏模块 Build ID:
 db0507f36b84200ac05f75d76ed5026f
@@ -35,7 +35,7 @@ $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 确认目标设备显示为 `device`。安装候选包时要保留应用数据：
 
 ```powershell
-& $adb install -r "D:\AndroidSwitch\analysis\parity-20261019\d2r-new\test-apk-strict-v6\d2r-94012-test.apk"
+& $adb install -r "D:\AndroidSwitch\analysis\parity-20261019\d2r-new\test-apk-strict-v8\d2r-94012-test.apk"
 & $adb shell dumpsys package org.d2r.newprobe | Select-String "versionCode|versionName|lastUpdateTime"
 ```
 
@@ -145,7 +145,7 @@ Select-String -Path "$env:TEMP\game-startup.log" -Pattern "ANDROID_INPUT_BIND|ph
 
 ## 6. 更新器
 
-当前 v6 候选包没有写入更新清单地址，因此不会请求更新。要验证更新器，使用打包工具的 `--update-url` 重新生成一个测试包，并把地址指向可返回 JSON 的 HTTPS 端点：
+当前 v8 候选包没有写入更新清单地址，因此不会请求更新。要验证更新器，使用打包工具的 `--update-url` 重新生成一个测试包，并把地址指向可返回 JSON 的 HTTPS 端点：
 
 ```json
 {
@@ -173,6 +173,8 @@ python dm/tools/android_d2r_apk.py `
 ```
 
 在角色选择页检查普通和紧急两种提示；点击提示或按 Y 应打开系统浏览器。相同或更旧的构建号不应留下旧提示。把地址改成 HTTP、错误主机或返回超限响应时，确认不会打开安装页，失败提示只在没有已有更新提示时出现。
+
+画质对比可在 `系统 → 画质模式` 中选择：自动、100%、90% 和 75%。自动模式允许游戏内动态降到 60%，100% 固定 1280×720 的 3D 内部尺寸；输出分辨率仍为 1280×720。
 
 ## 结果记录
 
