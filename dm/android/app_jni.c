@@ -10,11 +10,32 @@
 #include "d2r_mod_loader.h"
 #ifdef DM_ANDROID_D2R_UI
 #include "d2r_map_reveal.h"
+#include "d2r_ui_adapter.h"
 #endif
 #ifdef DM_ANDROID_DEBUG_CONSOLE
 #include "d2r_debug_mode.h"
 #endif
 #include "d2r_custom_android.h"
+#include <jni.h>
+#include "../host/dm_i18n.h"
+
+/* Android UI 只取队列和译文；原游戏控件留在游戏线程。
+ * Android UI reads only queued requests and translations; game widgets stay on the game thread. */
+JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeCustomSettingsRequest(JNIEnv *env,jclass cls) {
+    (void)env;(void)cls;return dm_android_custom_take_request()!=0;
+}
+JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeFrontendTouch(JNIEnv *env,jclass cls,jint phase,jfloat x,jfloat y) {
+    (void)env;(void)cls;
+#ifdef DM_ANDROID_D2R_UI
+    return dm_android_d2r_frontend_touch(phase,x,y)!=0;
+#else
+    return JNI_FALSE;
+#endif
+}
+JNIEXPORT jstring JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeUiText(JNIEnv *env,jclass cls,jstring key) {
+    (void)cls;if(!key)return NULL;const char *text=(*env)->GetStringUTFChars(env,key,NULL);if(!text)return NULL;
+    jstring result=(*env)->NewStringUTF(env,dm_ui(text));(*env)->ReleaseStringUTFChars(env,key,text);return result;
+}
 #include "lifecycle_android.h"
 #include "scale3d_android.h"
 #include "../gfx/nvn/nvn_vk_memory.h"

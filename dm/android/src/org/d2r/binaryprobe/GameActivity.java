@@ -17,8 +17,6 @@ import android.view.WindowManager;
 import android.view.KeyEvent;
 import android.widget.FrameLayout;
 import android.widget.TextView;
-import android.widget.Button;
-import android.content.res.ColorStateList;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -35,12 +33,16 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static native int nativeConfigure(String files, String locale,boolean touchRoute);
     private static native int nativeContentProfile(long romfsBytes,int[] addOnIndices);
     private static native int nativeTouch(int[] ids,float[] xs,float[] ys,boolean cancelled);
+    private static native boolean nativeFrontendTouch(int phase,float x,float y);
+    private static native void nativeTouchActivity();
+    private int frontendPointer=-1;
+    private boolean frontendGesture;
+    private float frontendX,frontendY;
     private static native int[] nativeTouchGameState();
     private static native int nativeActions(long buttons,int lx,int ly,int rx,int ry);
     private static native int nativeControllerButtons(long buttons);
     private static native int nativeControllerActions(long buttons,int lx,int ly,int rx,int ry);
     private static native boolean nativeControllerMode();
-    private static native void nativeTouchActivity();
     private static native void nativeControllerCancel(long buttons);
     private static native int nativeSurface(Surface surface,int width,int height,float density,float hz,int focus);
     private static native int nativeLifecycle(int event);
@@ -71,8 +73,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private volatile int surfaceGeneration;
     private SurfaceView game;
     private TextView status,fps;
-    private TextView modeControl;
-    private Button systemControl;
+    private static native boolean nativeCustomSettingsRequest();
+    static native String nativeUiText(String key);
     private RendererSettingsDialog rendererSettings;
     private int appliedRendererFlags=RendererOptions.DEFAULT_FLAGS;
     private float appliedRenderScale=RenderQuality.AUTO;
@@ -81,11 +83,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private final GameDisplayMetrics.FpsSampler fpsSampler=new GameDisplayMetrics.FpsSampler();
     private double displayedFps=Double.NaN;
     private TouchControlsView touchControls;
-    private final java.util.ArrayList<View> menuControls=new java.util.ArrayList<>();
     private boolean prepared, configured, surfaceReady, launched, resumed, failed;
     private long romfsBytes;
     private int[] addOnIndices=new int[0];
-    private boolean touchMode;
+    private boolean touchMode=true;
     private boolean inGame;
     private int width,height;
     private long actionButtons;
@@ -132,7 +133,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if(!touchMode) setTouchMode(true);
             // The SurfaceView owns this contact after DOWN even when the
             // overlay becomes visible. Forward the whole first gesture too.
-            if(touchControls!=null)return touchControls.onTouchEvent(event);
+            if(touchControls!=null&&inGame&&touchControls.onTouchEvent(event))return true;
+            if(!inGame&&frontendTouch(event))return true;
             int action=event.getActionMasked(),skip=action==MotionEvent.ACTION_POINTER_UP?event.getActionIndex():-1;
             int count=(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL)?0:event.getPointerCount()-(skip>=0?1:0);
             if(count>16){nativeTouch(new int[0],new float[0],new float[0],true);return true;}
@@ -145,41 +147,17 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if(rc!=0)fail(t("触摸输入不可用"),new Exception(t("错误 ")+rc));return true;
         });
         viewport.addView(game,new FrameLayout.LayoutParams(-1,-1));
-        addAction(viewport,"确认",1,Gravity.RIGHT|Gravity.BOTTOM,18,18);
-        addAction(viewport,"返回",2,Gravity.RIGHT|Gravity.BOTTOM,104,18);
-        addAction(viewport,"开始",1L<<10,Gravity.RIGHT|Gravity.TOP,18,18);
-        addAction(viewport,"↑",1L<<13,Gravity.LEFT|Gravity.BOTTOM,92,92);
-        addAction(viewport,"↓",1L<<15,Gravity.LEFT|Gravity.BOTTOM,92,18);
-        addAction(viewport,"←",1L<<12,Gravity.LEFT|Gravity.BOTTOM,18,55);
-        addAction(viewport,"→",1L<<14,Gravity.LEFT|Gravity.BOTTOM,166,55);
         touchControls=new TouchControlsView(this,() -> inputReady&&resumed&&!failed,strings);
         touchControls.setTouchActivation(() -> {
             if(inGame&&gameInputReady()){setTouchMode(true);return true;}
             return false;
         });
         viewport.addView(touchControls,new FrameLayout.LayoutParams(-1,-1));
-        TextView mode=new TextView(this);modeControl=mode;mode.setText(strings.modeLabel(touchMode));mode.setTextColor(0xffe9d9ba);mode.setTextSize(16);
-        mode.setGravity(Gravity.CENTER);mode.setBackgroundColor(0x8030241b);mode.setContentDescription(strings.modeDescription(touchMode));mode.setClickable(true);mode.setFocusable(true);
-        FrameLayout.LayoutParams modeParams=new FrameLayout.LayoutParams(dp(100),dp(48),Gravity.LEFT|Gravity.TOP);modeParams.leftMargin=dp(18);modeParams.topMargin=dp(18);
-        mode.setOnClickListener(v -> setTouchMode(!touchMode));
-        viewport.addView(mode,modeParams);
-        Button system=new Button(this);systemControl=system;
-        refreshSystemLabel();system.setTextColor(TouchControlsView.TEXT);system.setTextSize(16);
-        system.setBackgroundTintList(ColorStateList.valueOf(TouchControlsView.INK));
-        FrameLayout.LayoutParams systemParams=new FrameLayout.LayoutParams(dp(80),dp(48),Gravity.LEFT|Gravity.TOP);
-        systemParams.leftMargin=dp(134);systemParams.topMargin=dp(18);
-        system.setOnClickListener(v -> {
-            if(!configured||failed||rendererSettings!=null||keyboardDialog!=null||saveFailureDialog!=null)return;
-            actionButtons=0;if(inputReady)nativeActions(0,0,0,0,0);touchControls.cancel();
-            rendererSettings=RendererSettingsDialog.show(this,appliedRendererFlags,appliedRenderScale,
-                scale -> scale==RenderQuality.AUTO?nativeRenderScaleAuto():nativeRenderScale(scale),
-                system,() -> rendererSettings=null);
-        });
-        viewport.addView(system,systemParams);
         fps=new TextView(this);fps.setText("FPS —");fps.setTextColor(TouchControlsView.TEXT);
         fps.setTextSize(12);fps.setTypeface(Typeface.MONOSPACE);fps.setGravity(Gravity.CENTER);
         fps.setMinWidth(dp(84));fps.setPadding(dp(8),dp(4),dp(8),dp(4));fps.setBackgroundColor(TouchControlsView.INK);
         fps.setClickable(false);fps.setFocusable(false);
+        fps.setVisibility(showFps()?View.VISIBLE:View.GONE);
         FrameLayout.LayoutParams fpsParams=new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.CENTER_HORIZONTAL);
         fpsParams.topMargin=dp(10);viewport.addView(fps,fpsParams);
         status=new TextView(this);status.setTextColor(0xffe9d9ba);status.setTextSize(18);
@@ -193,21 +171,52 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         },"game-files").start();
     }
     private String t(String text){return strings.text(text);}
-    private void refreshSystemLabel(){
-        if(systemControl!=null){systemControl.setText(strings.chinese()?"系统":"System");systemControl.setContentDescription(strings.chinese()?"系统菜单":"System menu");}
+    // 局外由第一根手指驱动 iOS 同源点击队列；抬起、取消与失焦配对。
+    // One front-end finger drives the shared iOS click queue, paired with release/cancel/focus loss.
+    private boolean frontendTouch(MotionEvent event){
+        int action=event.getActionMasked();
+        if(action==MotionEvent.ACTION_DOWN){
+            frontendX=event.getX()/width;frontendY=event.getY()/height;
+            if(!nativeFrontendTouch(0,frontendX,frontendY))return false;
+            nativeTouchActivity();frontendGesture=true;frontendPointer=event.getPointerId(0);return true;
+        }
+        if(!frontendGesture)return false;
+        int index=event.findPointerIndex(frontendPointer);
+        if(index>=0){frontendX=event.getX(index)/width;frontendY=event.getY(index)/height;}
+        if(action==MotionEvent.ACTION_CANCEL){cancelFrontendTouch();return true;}
+        if(frontendPointer>=0&&(action==MotionEvent.ACTION_UP||(action==MotionEvent.ACTION_POINTER_UP&&event.getPointerId(event.getActionIndex())==frontendPointer))){
+            nativeFrontendTouch(2,frontendX,frontendY);frontendPointer=-1;
+        }else if(frontendPointer>=0&&action==MotionEvent.ACTION_MOVE)nativeFrontendTouch(1,frontendX,frontendY);
+        if(action==MotionEvent.ACTION_UP)frontendGesture=false;
+        return true;
     }
+    private void cancelFrontendTouch(){frontendGesture=false;frontendPointer=-1;nativeFrontendTouch(3,0,0);}
     private void refreshFrontendStrings(){
-        refreshSystemLabel();
         game.setContentDescription(t("游戏画面"));
-        if(modeControl!=null){modeControl.setText(strings.modeLabel(touchMode));modeControl.setContentDescription(strings.modeDescription(touchMode));}
-        for(View view:menuControls){TextView button=(TextView)view;String label=(String)button.getTag();button.setText(t(label));button.setContentDescription(strings.menuDescription(label));}
     }
     private int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
     private void setTouchMode(boolean on){
+        if(!on)cancelFrontendTouch();
         touchMode=on; actionButtons=0; if(inputReady)nativeActions(0,0,0,0,0);
-        if(touchControls!=null)touchControls.setActive(on);
-        for(View control:menuControls)control.setVisibility(on?View.GONE:View.VISIBLE);
-        if(modeControl!=null){modeControl.setText(strings.modeLabel(on));modeControl.setContentDescription(strings.modeDescription(on));}
+        syncTouchOverlay();
+    }
+    // 对齐 iOS：局外自动隐藏，局内根据触摸/实体手柄来源切换。
+    // Match iOS: hide outside a run and switch in-game with touch/physical-controller input.
+    private void syncTouchOverlay(){
+        if(touchControls!=null)touchControls.setActive(inGame&&touchMode&&gameInputReady()&&rendererSettings==null&&keyboardDialog==null&&saveFailureDialog==null);
+    }
+    boolean showFps(){return getSharedPreferences("hud",MODE_PRIVATE).getBoolean("show_fps",false);}
+    void setShowFps(boolean show){
+        getSharedPreferences("hud",MODE_PRIVATE).edit().putBoolean("show_fps",show).apply();
+        fps.setVisibility(show?View.VISIBLE:View.GONE);fpsSampler.reset();displayedFps=Double.NaN;
+    }
+    private void openCustomSettings(){
+        if(!gameInputReady()||rendererSettings!=null||keyboardDialog!=null||saveFailureDialog!=null)return;
+        clearControllers();actionButtons=0;nativeActions(0,0,0,0,0);touchControls.cancel();
+        rendererSettings=RendererSettingsDialog.show(this,appliedRendererFlags,appliedRenderScale,
+            scale -> scale==RenderQuality.AUTO?nativeRenderScaleAuto():nativeRenderScale(scale),
+            game,() -> {rendererSettings=null;syncTouchOverlay();});
+        syncTouchOverlay();
     }
     private void physicalInputSeen(){if(touchMode)setTouchMode(false);}
     private static long keyButton(int key) {
@@ -249,10 +258,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         nativeControllerCancelActions(state.buttons,state.lx,state.ly,state.rx,state.ry);
     }
     private void clearControllers(){
+        cancelFrontendTouch();
         backButtons.clear();controllers.clear();motionDevices.clear();controllerKeys.clear();controllerButtons=0;
         if(configured)nativeControllerCancel(0);
     }
-    private boolean gameInputReady() { return configured && surfaceReady && inputReady && resumed && hasWindowFocus() && !failed && !destroyed; }
+    private boolean gameInputReady() { return configured && surfaceReady && inputReady && resumed && hasWindowFocus() && !failed && !destroyed && rendererSettings==null && keyboardDialog==null && saveFailureDialog==null; }
     private void initializeUpdates(){
         final int ownBuild;
         String updateUrl="";
@@ -375,19 +385,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             return true;
         }
         return super.dispatchGenericMotionEvent(event);
-    }
-    private void addAction(FrameLayout root,String label,long mask,int gravity,int horizontal,int vertical){
-        TextView button=new TextView(this);button.setTag(label);button.setText(t(label));button.setContentDescription(strings.menuDescription(label));button.setTextColor(0xffeadfcd);
-        button.setGravity(Gravity.CENTER);button.setTextSize(17);button.setBackgroundColor(0x70443930);
-        FrameLayout.LayoutParams p=new FrameLayout.LayoutParams(dp(68),dp(58),gravity);
-        if((gravity&Gravity.RIGHT)==Gravity.RIGHT)p.rightMargin=dp(horizontal);else p.leftMargin=dp(horizontal);
-        if((gravity&Gravity.BOTTOM)==Gravity.BOTTOM)p.bottomMargin=dp(vertical);else p.topMargin=dp(vertical);
-        button.setOnTouchListener((v,e)->{if(!configured||!surfaceReady||!inputReady)return true;
-            int a=e.getActionMasked();if(a==MotionEvent.ACTION_DOWN){nativeTouchActivity();actionButtons|=mask;}
-            else if(a==MotionEvent.ACTION_UP||a==MotionEvent.ACTION_CANCEL)actionButtons&=~mask;
-            int rc=nativeActions(actionButtons,0,0,0,0);if(rc!=0)fail(t("操作输入不可用"),new Exception(t("错误 ")+rc));return true;});
-        root.addView(button,p);
-        menuControls.add(button);
     }
     private static String digest(File file)throws Exception {
         MessageDigest md=MessageDigest.getInstance("SHA-256");byte[] bytes=new byte[65536];
@@ -549,12 +546,15 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
                 mapNoticeSequence=map[0];
                 android.widget.Toast.makeText(GameActivity.this,RendererSettingsDialog.mapFeedback(map,strings.chinese()),android.widget.Toast.LENGTH_LONG).show();
             }
-            JSONObject scene=s.optJSONObject("scene");inGame=scene!=null&&scene.optInt("game",0)!=0;
+            JSONObject scene=s.optJSONObject("scene");boolean nextInGame=scene!=null&&scene.optInt("game",0)!=0;
+            if(inGame!=nextInGame)cancelFrontendTouch();inGame=nextInGame;
+            if(gameInputReady()&&nativeCustomSettingsRequest())openCustomSettings();
+            syncTouchOverlay();
             long frame=s.getLong("presented_frames");
             if(frame>0&&driverPending){driverPending=false;GraphicsDriverSettings.confirmStarted(GameActivity.this);}
             if(frame>0&&touchControls!=null&&touchControls.refreshLanguage())refreshFrontendStrings();
             if(frame>0)status.setVisibility(View.GONE);else status.setText(t(s.getString("phase")));
-            if(resumed){double current=fpsSampler.sample(frame,SystemClock.elapsedRealtime());
+            if(resumed&&fps.getVisibility()==View.VISIBLE){double current=fpsSampler.sample(frame,SystemClock.elapsedRealtime());
                 if(!Double.isNaN(current)&&Double.compare(current,displayedFps)!=0){
                     fps.setText(String.format(getResources().getConfiguration().getLocales().get(0),"FPS %.1f",current));
                     displayedFps=current;
@@ -578,9 +578,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         clearControllers();actionButtons=0;
         if(configured){nativeControllerCancel(0);nativeActions(0,0,0,0,0);}
         if(touchControls!=null)touchControls.cancel();
-    }}
+    }syncTouchOverlay();}
     @Override public void onResume(){super.onResume();resumed=true;fpsSampler.reset();nativeKeyboardReady(true);nativeUpdateForeground();if(configured)nativeAudioInterruption(false);if(configured)nativeLifecycle(2);configureAndStart();}
-    @Override public void onPause(){clearControllers();closeRendererSettings();if(configured){nativeLifecycle(0);nativeLifecycle(1);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}resumed=false;fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;controllerButtons=0;if(touchControls!=null)touchControls.cancel();if(configured){nativeActions(0,0,0,0,0);nativeControllerCancel(0);}if(configured&&surfaceReady)publishSurface();super.onPause();}
+    @Override public void onPause(){resumed=false;clearControllers();closeRendererSettings();if(configured){nativeLifecycle(0);nativeLifecycle(1);}nativeCustomSettingsRequest();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;controllerButtons=0;if(touchControls!=null)touchControls.cancel();syncTouchOverlay();if(configured){nativeActions(0,0,0,0,0);nativeControllerCancel(0);}if(configured&&surfaceReady)publishSurface();super.onPause();}
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}

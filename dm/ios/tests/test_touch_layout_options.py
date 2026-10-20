@@ -57,7 +57,15 @@ assert 'icloud' not in [key for key, _ in android_keys]
 assert 'TouchCustom_icloud' not in android_nodes
 assert 'TouchCustom_q3d' in android_nodes
 assert 'TouchCustom_touch_swap_above' in android_nodes
-assert android_height == ios_height - layout._CUSTOM_LINE_H
+assert android_height == ios_height
+assert 'TouchAndroidSettings' not in ios_nodes
+assert android_nodes['TouchAndroidSettings']['type'] == 'ButtonWidget'
+assert android_nodes['TouchAndroidSettings']['fields']['onClickMessage'] == 'PanelManager:ClosePanel:TouchAndroidSettings'
+assert android_nodes['TouchAndroidSettings']['fields']['rect']['y'] < android_nodes['TouchCustom_lang_Text']['fields']['rect']['y']
+for lang in ('Zh', 'En', 'Es', 'Ru'):
+    name = 'TouchCustomLang%s_Text' % lang
+    assert android_nodes[name]['fields']['style/pointSize'] == 36
+    assert 'style/pointSize' not in ios_nodes[name]['fields']
 
 for nodes in (ios_nodes, android_nodes):
     for name in ('TouchCustom_touch_swap_above', 'TouchCustom_touch_swap_above_near'):

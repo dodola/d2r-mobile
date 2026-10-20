@@ -1,6 +1,10 @@
 // 生成文件，勿手改：python3 dm/ios/tools/dm_i18n.py --header > dm/host/dm_i18n_tab.h（表 dm/i18n/ui_text.tsv）
 #pragma once
 static const struct { const char *k, *zh, *en, *es, *mx, *ru; } k_dm_i18n[] = {
+    { "dmAndroidSettings", "Android 设置", "Android settings", "Ajustes de Android", "Ajustes de Android", "Настройки Android" },
+    { "dmAndroidShowFps", "显示帧率", "Show frame rate", "Mostrar FPS", "Mostrar FPS", "Показывать FPS" },
+    { "dmAndroidHudHint", "默认隐藏帧率；触摸与手柄操控自动切换。", "Frame rate is hidden by default; touch and controller controls switch automatically.", "Los FPS se ocultan de forma predeterminada; el control táctil y el mando cambian automáticamente.", "Los FPS se ocultan de forma predeterminada; el control táctil y el mando cambian automáticamente.", "FPS скрыты по умолчанию; сенсорное управление и геймпад переключаются автоматически." },
+    { "dmAndroidBackCustom", "返回自定义", "Back to Custom", "Volver a Personalizar", "Volver a Personalizar", "Назад к настройкам" },
     { "dmPauseRestart", "一键重开", "Quick Restart", "Reinicio rápido", "Reinicio rápido", "Быстрый рестарт" },
     { "dmUpdBuild", "构建 %d", "Build %d", "Versión %d", "Versión %d", "Сборка %d" },
     { "dmUpdNew", "有新版本 %d · %s", "New version %d · %s", "Nueva versión %d · %s", "Nueva versión %d · %s", "Новая версия %d · %s" },

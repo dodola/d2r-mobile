@@ -41,6 +41,9 @@ final class RendererSettingsDialog {
         this.activity=activity;this.applied=applied;store=new RendererOptionsStore(activity);
         this.appliedScale=appliedScale;this.scaleRequest=scaleRequest;qualityStore=new RenderQualityStore(activity);
         LinearLayout body=new LinearLayout(activity);body.setOrientation(LinearLayout.VERTICAL);body.setPadding(dp(18),dp(8),dp(18),dp(12));
+        Switch fps=option(body,GameActivity.nativeUiText("dmAndroidShowFps"),GameActivity.nativeUiText("dmAndroidHudHint"));
+        fps.setChecked(((GameActivity)activity).showFps());
+        fps.setOnCheckedChangeListener((view,on)->((GameActivity)activity).setShowFps(on));
         text(body,"画质模式",18);
         RadioGroup quality=new RadioGroup(activity);quality.setOrientation(LinearLayout.VERTICAL);body.addView(quality);
         automatic=qualityOption(quality,RenderQuality.description(RenderQuality.AUTO));
@@ -63,7 +66,7 @@ final class RendererSettingsDialog {
         Button mods=new Button(activity);mods.setText(chinese?"选择 MOD（下次启动生效）":"Select MOD (next launch)");body.addView(mods);
         mods.setOnClickListener(v->chooseMod(chinese));refreshMod(chinese);refreshMap(chinese);
         ScrollView scroll=new ScrollView(activity);scroll.setFillViewport(false);scroll.addView(body);
-        dialog=new AlertDialog.Builder(activity).setTitle("系统菜单").setView(scroll).setPositiveButton("返回游戏",null).create();
+        dialog=new AlertDialog.Builder(activity).setTitle(GameActivity.nativeUiText("dmAndroidSettings")).setView(scroll).setPositiveButton(GameActivity.nativeUiText("dmAndroidBackCustom"),null).create();
         dialog.setOnDismissListener(d->{closed.run();if(!activity.isFinishing())trigger.requestFocus();});
         clear.setOnCheckedChangeListener((v,on)->change(RendererOptions.CLEAR_MERGE,on));
         writeback.setOnCheckedChangeListener((v,on)->change(RendererOptions.STORE_ELIDE,on));

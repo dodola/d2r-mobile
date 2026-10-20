@@ -1,4 +1,8 @@
 键	中文	English	Español	Español MX	Русский	用在哪
+dmAndroidSettings	Android 设置	Android settings	Ajustes de Android		Настройки Android	Android 自定义页的平台设置入口
+dmAndroidShowFps	显示帧率	Show frame rate	Mostrar FPS		Показывать FPS	Android 设置页的帧率显示开关
+dmAndroidHudHint	默认隐藏帧率；触摸与手柄操控自动切换。	Frame rate is hidden by default; touch and controller controls switch automatically.	Los FPS se ocultan de forma predeterminada; el control táctil y el mando cambian automáticamente.		FPS скрыты по умолчанию; сенсорное управление и геймпад переключаются автоматически.	Android 设置页的 HUD 说明
+dmAndroidBackCustom	返回自定义	Back to Custom	Volver a Personalizar		Назад к настройкам	Android 设置页返回游戏自定义选项
 dmPauseRestart	一键重开	Quick Restart	Reinicio rápido		Быстрый рестарт	暂停菜单按钮（touch_layout.py）
 dmUpdBuild	构建 %d	Build %d	Versión %d		Сборка %d	选角页左下角构建号（dm_update.c）
 dmUpdNew	有新版本 %d · %s	New version %d · %s	Nueva versión %d · %s		Новая версия %d · %s	选角页新版本提示；%s = 版本文件里的说明（服务端给，未翻）

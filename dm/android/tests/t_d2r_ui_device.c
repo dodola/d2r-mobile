@@ -46,6 +46,7 @@ int main(int argc,char **argv) {
     void (*events)(void *,const dm_android_touch_events *)=dlsym(lib,"dm_android_d2r_ui_events");
     int (*players)(void)=dlsym(lib,"dm_hud_requested_players");
     int (*active)(void)=dlsym(lib,"dm_ui_touch_active");
+    int (*frontend_touch)(int,float,float)=dlsym(lib,"dm_android_d2r_frontend_touch");
     void (*touch)(int,float,float)=dlsym(lib,"dm_ui_touch");
     int (*bind)(const dm_android_input_config *)=dlsym(lib,"dm_android_input_bind");
     int (*init)(void)=dlsym(lib,"dm_android_input_initialize_npad");
@@ -68,10 +69,17 @@ int main(int argc,char **argv) {
     void (*drag_move)(float,float)=dlsym(lib,"dm_ui_drag_move");
     void (*drag_end)(void)=dlsym(lib,"dm_ui_drag_end");
     assert(attach&&gate&&shown&&gen&&ref_get&&frame&&events&&players&&active&&touch&&bind&&init&&publish&&sample&&right&&pulse&&resize&&enable&&set_state&&contact&&get_events&&consume&&cancel&&alone&&ingame&&mouse_pump&&cursor_clear);
+    CHECK(frontend_touch && !frontend_touch(0,.5f,.5f));
     *nmods=1;strcpy(mods[0].name,"main");mods[0].size=0x3220000;mods[0].base=calloc(1,mods[0].size);assert(mods[0].base);
     CHECK(!attach(&mods[0]));strcpy(mods[0].build_id,"db0507f36b84200ac05f75d76ed5026f");
     CHECK(!attach(&mods[0]));gate(0x1000,"obs",OBS_UIMSG,0);gate(0x2000,"obs",OBS_TICK,0);gate(0x3000,"obs",OBS_C2S,0);
     CHECK(!attach(&mods[0]));gate(0x4000,"svc",SVC_HOST_C2S_DELIVER,0);CHECK(attach(&mods[0]));
+    CHECK(!frontend_touch(-1,.5f,.5f) && !frontend_touch(4,.5f,.5f) && !frontend_touch(0,NAN,.5f) && !active());
+    CHECK(frontend_touch(0,.25f,.75f) && active());
+    CHECK(frontend_touch(1,.3f,.7f) && frontend_touch(2,.3f,.7f));
+    CHECK(frontend_touch(3,0,0) && !active());
+    ingame(1);CHECK(!frontend_touch(0,.5f,.5f) && !active());
+    touch(0,.5f,.5f);CHECK(frontend_touch(3,0,0) && !active());ingame(0);
 
     uint8_t root[0x200],panel[0x200],leaf[0x200],nested[0x200];uint64_t children[2]={(uintptr_t)panel,(uintptr_t)nested},leaves[1]={(uintptr_t)leaf};
     widget(root,"root");widget(panel,"BankExpansionLayout");widget(leaf,"leaf");widget(nested,"other");

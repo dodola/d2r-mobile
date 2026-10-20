@@ -23,6 +23,8 @@ been removed. Gameplay measurements below refer to D2R.
 
 ## Android support — experimental
 
+Main-branch HUD update (2026-10-21): floating system/mode and extra menu controls are removed; touch and controller input switch automatically. Open **Options → Custom → Android settings** for platform settings and the optional FPS display, hidden by default. See the [HUD and Custom settings notes](docs/ANDROID_HUD_2026-10-21.zh-CN.md).
+
 ### 1.1.0 update · 2026-10-20
 
 These changes cover the **October 18–20** mainline work, compared with the earlier 91738 offline release:

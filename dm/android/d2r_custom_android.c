@@ -9,6 +9,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <stdatomic.h>
 
 enum { NODE_MAX=2048, ROOT_OFF=0x2f05458, NINE_TILE_VT=0x20bc048 };
 typedef struct {
@@ -22,6 +23,7 @@ static pthread_mutex_t owner_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_t owner;static int have_owner;
 static _Thread_local int scoped;
 static _Thread_local context current;
+static _Atomic int settings_request;
 
 static int read_vm(uint64_t p,void *out,size_t bytes) {return dm_tg_vm_read(p,out,bytes);}
 static int title_ok(void) {
@@ -29,6 +31,11 @@ static int title_ok(void) {
         !strcmp(title->name,"main")&&!strcmp(title->build_id,"db0507f36b84200ac05f75d76ed5026f");
 }
 int dm_android_title_custom_settings(void) {return title_ok();}
+void dm_android_custom_message(const char *category,const char *action,const char *argument) {
+    if(title_ok()&&category&&action&&argument&&!strcmp(category,"PanelManager")&&
+       !strcmp(action,"ClosePanel")&&!strcmp(argument,"TouchAndroidSettings"))atomic_store(&settings_request,1);
+}
+int dm_android_custom_take_request(void) {return atomic_exchange(&settings_request,0);}
 /* The shared graphics OBJECT is compiled without title-target macros. Its
  * weak callback resolves only in this D2R app, never in the generic shell. */
 int dm_android_d2r_fps_setting(void) {int dm_fps_setting(void);return dm_fps_setting();}
@@ -180,6 +187,11 @@ static void wheel(void *opaque,uint64_t w,int direction) {
 static int pad(void *opaque) {(void)opaque;int dm_padmode_current(void);return dm_padmode_current();}
 static uint64_t keys(void *opaque,uint64_t mask) {(void)opaque;uint64_t dm_padmode_page_keys(uint64_t);return dm_padmode_page_keys(mask);}
 static uint64_t frame(void *opaque) {(void)opaque;uint64_t dm_guest_frame(void);return dm_guest_frame();}
+static void platform_action(void *opaque,uint64_t w) {
+    context *c=opaque;int i=locate(c,w);
+    if(i>=0&&!strcmp(c->nodes[i].text,"TouchAndroidSettings")&&
+       c->nodes[i].vt==(uintptr_t)title->base+DM_VT_BUTTON&&live(c,(unsigned)i))atomic_store(&settings_request,1);
+}
 int dm_android_custom_ui_context(uint64_t root,dm_custom_ui_ops *out) {
     if(!scoped||!title_ok()||!root||!out)return 0;
     context *c=&current;memset(c,0,sizeof *c);c->root=root;c->generation=dm_ui_gen();
@@ -190,5 +202,5 @@ int dm_android_custom_ui_context(uint64_t root,dm_custom_ui_ops *out) {
         if(visible&&!children(c,i,1))return 0;
     }
     *out=(dm_custom_ui_ops){.opaque=c,.generation=c->generation,.find=find,.read=read_field,.toggle=set_toggle,
-        .rect=set_rect,.dirty=set_dirty,.wheel=wheel,.pad=pad,.keys=keys,.frame=frame};return epoch(c);
+        .rect=set_rect,.dirty=set_dirty,.wheel=wheel,.pad=pad,.keys=keys,.frame=frame,.action=platform_action};return epoch(c);
 }

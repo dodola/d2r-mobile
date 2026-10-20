@@ -263,6 +263,8 @@ static void d2r_uimsg(const uint64_t *regs) {
       if(!g_ui_enabled)
 #endif
       dm_custom_on_uimsg(category, action, argument); }
+    { void dm_android_custom_message(const char *,const char *,const char *);
+      dm_android_custom_message(category,action,argument); }
     dm_rift_ui_on_uimsg(category,action,argument);
     { void dm_padmode_on_uimsg(const char *,const char *,const char *);
       dm_padmode_on_uimsg(category,action,argument); }

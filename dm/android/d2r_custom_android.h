@@ -13,3 +13,7 @@ int dm_android_custom_overlay(const char *port_root,char *out,size_t capacity);
 /* Only the original game input callback enters this scope around actions.
  * UI/JNI threads have no scope and cannot access original widgets. */
 void dm_android_custom_scope(int enter);
+/* 只传递设置入口请求，不向 Android UI 线程暴露游戏控件。
+ * Pass settings-entry requests without exposing game widgets to the Android UI thread. */
+void dm_android_custom_message(const char *category,const char *action,const char *argument);
+int dm_android_custom_take_request(void);

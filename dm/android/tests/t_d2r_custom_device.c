@@ -200,6 +200,21 @@ int main(int argc,char **argv) {
     for(int i=0;i<4;i++)tick();CHECK(!page_filter(0)&&page_filter(DM_BTN_A)==DM_BTN_A);run();CHECK(!checked(box[1])&&!panel[0x1a0]);
     modal[0x50]=0;run();CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(checked(box[1])&&panel[0x1a0]);
     message("OptionsPanelMessage","CancelChanges","");run();
-    printf("ANDROID_D2R_CUSTOM_OK checks=%d shared_rows=16 android_navigable=15 checked_widget_transport=1 original_layout_call_recorded=1 apply_discard_defaults=1 radio_pairs=3 controller_page_keys=1 controller_repeat_guard=1 modal_release=1 dirty_original_contract=1 disk_commit=1 lifetime_guards=1 guest_thread_scope=1 synthetic_memory=1 original_game_not_claimed=1\n",checks);
+    /* 设置入口只排队：保留待应用值，确认框与错误控件类型不得触发。
+     * The settings entry only queues a request: preserve pending values and reject modal/wrong-class activation. */
+    int (*take_request)(void)=dlsym(lib,"dm_android_custom_take_request");
+    void (*platform_message)(const char *,const char *,const char *)=dlsym(lib,"dm_android_custom_message");
+    CHECK(take_request&&platform_message&&!take_request());
+    box[1][0xa88]=1;run();CHECK(panel[0x1a0]&&!get("auto_mana"));
+    uint8_t *settings=widget("TouchAndroidSettings",DM_VT_BUTTON,rows,470,15,470,128);
+    row_children[count++]=(uintptr_t)settings;put64(rows,0x60,count);generation(18);run();
+    CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(take_request()==1&&!take_request()&&panel[0x1a0]&&!get("auto_mana"));
+    CHECK(!page_filter(DM_BTN_A));run();CHECK(!take_request());
+    modal[0x50]=1;run();for(int i=0;i<4;i++)tick();CHECK(!page_filter(0)&&page_filter(DM_BTN_A)==DM_BTN_A);run();CHECK(!take_request());modal[0x50]=0;
+    put64(settings,0,base+DM_VT_TOGGLE);run();CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(!take_request());
+    put64(settings,0,base+DM_VT_BUTTON);
+    platform_message("PanelManager","OpenPanel","TouchAndroidSettings");CHECK(!take_request());
+    platform_message("PanelManager","ClosePanel","TouchAndroidSettings");CHECK(take_request()==1&&!take_request());
+    printf("ANDROID_D2R_CUSTOM_OK checks=%d shared_rows=16 android_navigable=15 checked_widget_transport=1 original_layout_call_recorded=1 apply_discard_defaults=1 radio_pairs=3 controller_page_keys=1 controller_repeat_guard=1 modal_release=1 dirty_original_contract=1 disk_commit=1 lifetime_guards=1 guest_thread_scope=1 platform_settings_entry=1 synthetic_memory=1 original_game_not_claimed=1\n",checks);
     return 0;
 }

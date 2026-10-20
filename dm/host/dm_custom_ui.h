@@ -19,4 +19,7 @@ typedef struct {
     int (*pad)(void *);
     uint64_t (*keys)(void *,uint64_t);
     uint64_t (*frame)(void *);
+    /* 平台设置入口；在游戏线程校验按钮后只提交请求。
+     * Platform settings entry; validate the button on the game thread, then only queue a request. */
+    void (*action)(void *,uint64_t);
 } dm_custom_ui_ops;

@@ -51,20 +51,26 @@ void dm_custom_ui_pump(unsigned long long root) {
     load_once();if(atomic_exchange(&g_repaint,0))memset(seen,0,sizeof seen);
     if(atomic_load(&g_lang_explicit)<0)atomic_store(&g_val[0],lang_running());
     int pad=o->pad?o->pad(o->opaque):0;
+    uint64_t platform_action=o->action?custom_find(o,sp,"TouchAndroidSettings"):0;
+    int has_action=custom_visible(o,platform_action);
     uint64_t cm=custom_find(o,root,"ConfirmationModal");
     if(custom_visible(o,cm))pad=0;
     static int selected;
     static uint64_t selected_panel;static uint32_t selected_generation;
     if(selected_panel!=sp || selected_generation!=o->generation) {
-        selected_panel=sp;selected_generation=o->generation;selected=custom_first_visible();
+        selected_panel=sp;selected_generation=o->generation;selected=has_action?-1:custom_first_visible();
     }
-    if(!custom_key_visible(selected))selected=custom_first_visible();
+    if(!custom_key_visible(selected)&&!(selected==-1&&has_action))selected=custom_first_visible();
     uint64_t selection=custom_find(o,sp,"TouchCustomSel"),tw=0,cw=0;
     char name[64];
     if(pad) {
         uint64_t ev=o->keys(o->opaque,DM_BTN_UP|DM_BTN_DOWN|DM_BTN_A);
-        if(ev&DM_BTN_DOWN)selected=custom_next_visible(selected,1);
-        else if(ev&DM_BTN_UP)selected=custom_next_visible(selected,-1);
+        if(ev&DM_BTN_DOWN)selected=selected==-1?custom_first_visible():custom_next_visible(selected,1);
+        else if(ev&DM_BTN_UP)selected=has_action&&selected==custom_first_visible()?-1:selected==-1?-1:custom_next_visible(selected,-1);
+        if(selected==-1) {
+            tw=cw=platform_action;
+            if(ev&DM_BTN_A)o->action(o->opaque,platform_action);
+        } else {
         snprintf(name,sizeof name,"TouchCustom_%s",k_keys[selected]);cw=custom_find(o,sp,selected==0?k_lang_box[LANG_N-1]:name);
         snprintf(name,sizeof name,"TouchCustom_%s_Text",k_keys[selected]);tw=custom_find(o,sp,name);
         if((ev&DM_BTN_A) && cw && seen[selected].w==cw && seen[selected].gen==o->generation) {
@@ -83,6 +89,7 @@ void dm_custom_ui_pump(unsigned long long root) {
                 }
             }
             }
+        }
         }
     }
     int32_t sr[4],tr[4],cr[4];int have_row=pad&&custom_visible(o,tw)&&custom_visible(o,cw)&&custom_rect(o,tw,tr)&&custom_rect(o,cw,cr);

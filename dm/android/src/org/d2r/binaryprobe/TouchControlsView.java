@@ -56,7 +56,7 @@ public final class TouchControlsView extends View {
         catch(UnsatisfiedLinkError unavailable){hudNative=false;}
         return false;
     }
-    public void setActive(boolean on){active=on;nativeEnable(on);if(!on)clearHud();if(on)resize();postInvalidateOnAnimation();}
+    public void setActive(boolean on){if(active==on)return;active=on;nativeEnable(on);if(!on)clearHud();if(on)resize();postInvalidateOnAnimation();}
     public void setTouchActivation(BooleanSupplier activation){touchActivation=activation;}
     private void clearHud(){if(hudNative)try{nativeHudRendered(null,0);}catch(UnsatisfiedLinkError unavailable){hudNative=false;}}
     public void cancel(){nativeCancel();clearHud();}
@@ -146,8 +146,8 @@ public final class TouchControlsView extends View {
         return !D2rHudRenderer.navigation(hudFrame)&&hudFrame[16]==0;
     }
     @Override public boolean onTouchEvent(MotionEvent event){
-        // This overlay remains above the legacy menu buttons in controller
-        // mode. Claim DOWN before those buttons can consume the first gesture.
+        // 实体手柄使用后，首个触摸手势立即接管并继续传递。
+        // After physical-controller input, the first touch takes over and continues through this gesture.
         if(!active&&(event.getActionMasked()!=MotionEvent.ACTION_DOWN||touchActivation==null||!touchActivation.getAsBoolean()))return false;
         if(!ready.getAsBoolean())return true;
         int action=event.getActionMasked(),skip=action==MotionEvent.ACTION_POINTER_UP?event.getActionIndex():-1;

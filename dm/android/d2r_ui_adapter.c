@@ -18,9 +18,17 @@
 #include "../ios/Sources/dm_touch_controls.h"
 #include <stdatomic.h>
 #include <string.h>
+#include <math.h>
 
 static int attached;
 static uint8_t *main_base;
+/* 局外直接复用 iOS 的鼠标消息队列，不把同一触点再送进游戏触摸屏。
+ * Front-end taps use the iOS mouse-message queue without duplicating touchscreen input. */
+int dm_android_d2r_frontend_touch(int phase,float x,float y) {
+    if(!attached || phase<0 || phase>3 || !isfinite(x) || !isfinite(y))return 0;
+    if(phase!=3 && dm_uiscreen_ingame())return 0;
+    dm_ui_touch(phase,x,y);return 1;
+}
 extern int dm_android_skill_flow_event(dm_tc_state *,uint32_t,int,int,double) __attribute__((weak));
 extern void dm_android_skill_flow_pump(void) __attribute__((weak));
 extern void dm_android_d2r_touch_shell_pump(void) __attribute__((weak));

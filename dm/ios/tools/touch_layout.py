@@ -1204,8 +1204,11 @@ _CUSTOM_TEST_ROWS = int(os.environ.get('DM_CUSTOM_TEST_ROWS', '0'))   # 测试�
 _CUSTOM_Q3D_H = 2 * _CUSTOM_LINE_H
 def _custom_geometry(keys):
     row_h = [(_CUSTOM_Q3D_H if k in ('q3d', 'touch_swap_above') else _CUSTOM_LINE_H) for k, _ in keys] + [_CUSTOM_LINE_H] * _CUSTOM_TEST_ROWS
-    y = [_CUSTOM_TITLE_H + sum(row_h[:i]) for i in range(len(row_h))]
-    return row_h, y, _CUSTOM_TITLE_H + sum(row_h)
+    # Android 顶部留一行原生按钮，iOS 的行序与布局保持原样。
+    # Reserve one native button row at the top on Android; keep the iOS row order and layout.
+    extra = _CUSTOM_LINE_H if 'icloud' not in {k for k, _ in keys} else 0
+    y = [_CUSTOM_TITLE_H + extra + sum(row_h[:i]) for i in range(len(row_h))]
+    return row_h, y, _CUSTOM_TITLE_H + extra + sum(row_h)
 def _custom_toggle_row(y, key, label):
     h = _CUSTOM_LINE_H
     return ('        { "type": "TextBoxWidget", "name": "TouchCustom_%s_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "%s", "style": "$StyleSettingsText", "style/options/newlineHandling": "standard" } },\n'
@@ -1230,9 +1233,11 @@ def _custom_lang_hint(y):
 # This row must show Chinese characters in every UI: the default Formal font of the English / Spanish / Russian UI has no Chinese glyphs, so these text widgets specify the original global font BlizzardGlobal
 # (the original title page, party names etc. likewise specify it per widget). The Русский checkbox stays in the checkbox column of the other rows (x 1315); Español, English and 中文 sit to its left in turn
 _LANG_ZH_X, _LANG_EN_X, _LANG_ES_X, _LANG_RU_X = (220, 430), (515, 725), (810, 1020), (1105, 1315)   # （文字 x，勾选框 x）；文字 200 宽：English / Español / Русский 在 180 宽里会被折成「Englis h」（真机截图）；四项一组，最后一格留在各行勾选框那一列（x 1315） | (text x, checkbox x); text 200 wide: at 180 wide English / Español / Русский wrap to "Englis h" (device screenshot); four options in a group, the last one stays in the checkbox column of the other rows (x 1315)
-def _custom_lang_row(y):
+def _custom_lang_row(y, compact=False):
     h = 112; cy = y + (h - 70) // 2   # 标签、两个选项排在这一行的上 112，下面 68 留给提示那一句 | The label and the two options go in the top 112 of this row; the bottom 68 is left for the hint sentence
-    def text(name, x, w, key): return ('        { "type": "TextBoxWidget", "name": "%s", "fields": { "rect": { "x": %d, "y": %d, "width": %d, "height": %d }, "text": "@%s", "style": "$StyleSettingsText", "style/fontFace": "BlizzardGlobal" } },\n' % (name, x, y, w, h, key))
+    # Android 的全球字体在 200 宽里会把西语/俄语末字折行，语言选项缩小字号。
+    # Android's global font wraps the last Spanish/Russian letter in 200 units; shrink the option labels.
+    def text(name, x, w, key): return ('        { "type": "TextBoxWidget", "name": "%s", "fields": { "rect": { "x": %d, "y": %d, "width": %d, "height": %d }, "text": "@%s", "style": "$StyleSettingsText", "style/fontFace": "BlizzardGlobal"%s } },\n' % (name, x, y, w, h, key, ', "style/pointSize": 36' if compact and name != 'TouchCustom_lang_Text' else ''))
     def box(name, x): return ('        { "type": "ToggleButtonWidget", "name": "%s", "fields": {\n'
             '            "rect": { "x": %d, "y": %d, "width": 70, "height": 70 }, "sound": "cursor_menu_select_hd",\n'
             '            "focusIndicatorPadding": "$OptionsToggleFocusIndicatorPadding", "focusIndicatorFilename": "$OptionsToggleFocusIndicatorFilename", "focusIndicatorOffset": { "x": 0, "y": -4 },\n'
@@ -1285,7 +1290,8 @@ def _custom_page(text, keys=None):
            '            { "type": "TableWidget", "name": "OptionsTable", "fields": { "columns": [ "$OptionsTableColumn1", "$OptionsTableColumn2" ], "rowHeight": %d }, "children": [\n' % _CUSTOM_TITLE_H
            + title + '            ] },\n'
            + '            { "type": "Widget", "name": "TouchCustomRows", "fields": { "rect": { "x": 0, "y": 0, "width": 1500, "height": %d } }, "children": [\n' % height
-           + _custom_lang_row(y[0]) + ''.join((_custom_q3d_row(y[i], k) if k in ('q3d', 'touch_swap_above') else _custom_toggle_row(y[i], k, l)) for i, (k, l) in enumerate(keys) if i) + _custom_lang_hint(y[0])
+           + (_btn('TouchAndroidSettings', _CUSTOM_TITLE_H + 15, '@dmAndroidSettings', 'PanelManager:ClosePanel:TouchAndroidSettings', x=470, anchor=False) if 'icloud' not in {k for k, _ in keys} else '')
+           + _custom_lang_row(y[0], compact='icloud' not in {k for k, _ in keys}) + ''.join((_custom_q3d_row(y[i], k) if k in ('q3d', 'touch_swap_above') else _custom_toggle_row(y[i], k, l)) for i, (k, l) in enumerate(keys) if i) + _custom_lang_hint(y[0])
            + ''.join('        { "type": "TextBoxWidget", "name": "TouchCustomTest%d_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "@KeyBindingTypeCustom", "style": "$StyleSettingsText" } },\n'
                      % (n, y[len(keys) + n], _CUSTOM_LINE_H) for n in range(_CUSTOM_TEST_ROWS)) +
            # 手柄模式的选中框（同符文之语清单 TouchRwSel）：框住十字键选中的那一行，宿主摆（dm_custom.c）；触屏模式一直在屏外（只把 x 挪出去、y 留在内容范围内：滚动区按子控件的范围算内容高度，y 放到 99999 会把可滚范围撑到十万）。和各行在同一个容器里，跟着滚
