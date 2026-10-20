@@ -75,17 +75,20 @@ int main(int argc,char **argv) {
     put64(root,0x58,(uintptr_t)top);put64(root,0x60,2);put64(panel,0x58,(uintptr_t)panel_children);put64(panel,0x60,1);
     put64(scroll,0x58,(uintptr_t)scroll_children);put64(scroll,0x60,1);put64(view,0x58,(uintptr_t)view_children);put64(view,0x60,1);
     put64(mods[0].base,0x2f05458,(uintptr_t)root);put64(mods[0].base,0x20c0000+7*8,base+0xae5f28);
-    const char *keys[]={"lang_en","auto_mana","merc_pot","drop_light","map_mark","item_notes","icloud","pot_pick","drop_haptic","gem_pick","store_btn","eco_fps","q3d","loot_filter","auto_buff","touch_swap_above"};
+    const char *keys[]={"lang","auto_mana","merc_pot","drop_light","map_mark","item_notes","icloud","pot_pick","drop_haptic","gem_pick","store_btn","eco_fps","q3d","loot_filter","auto_buff","touch_swap_above"};
     char names[32][64];uint8_t *box[16],*labels[16];int32_t row_y[16];unsigned count=0,visual=0;
     for(int i=0;i<16;i++) {
         row_y[i]=visual*180;
-        snprintf(names[i*2],64,"TouchCustom_%s",keys[i]);snprintf(names[i*2+1],64,"TouchCustom_%s_Text",keys[i]);
+        snprintf(names[i*2],64,"TouchCustom_%s",i?keys[i]:"lang_en");snprintf(names[i*2+1],64,"TouchCustom_%s_Text",keys[i]);
         box[i]=widget(names[i*2],DM_VT_TOGGLE,rows,1315,row_y[i]+30,70,70);box[i][0xa88]=127;
         labels[i]=widget(names[i*2+1],DM_VT_TEXT,rows,25,row_y[i],1000,180);
         row_children[count++]=(uintptr_t)box[i];row_children[count++]=(uintptr_t)labels[i];
         if(i!=6)visual+=(i==12||i==15)?2:1;
     }
     uint8_t *zh=widget("TouchCustom_lang_zh",DM_VT_TOGGLE,rows,905,30,70,70);
+    uint8_t *es=widget("TouchCustom_lang_es",DM_VT_TOGGLE,rows,1020,30,70,70);
+    uint8_t *ru=widget("TouchCustom_lang_ru",DM_VT_TOGGLE,rows,1315,30,70,70);
+    row_children[count++]=(uintptr_t)es;row_children[count++]=(uintptr_t)ru;
     uint8_t *smooth=widget("TouchCustom_q3d_smooth",DM_VT_TOGGLE,rows,1315,row_y[12]+180,70,70);
     uint8_t *near=widget("TouchCustom_touch_swap_above_near",DM_VT_TOGGLE,rows,1315,row_y[15]+180,70,70);
     uint8_t *hint_en=widget("TouchCustomLangHintEn",DM_VT_TEXT,rows,99999,112,1400,60);
@@ -113,7 +116,7 @@ int main(int argc,char **argv) {
     box[1][0xa88]=0;run();message("OptionsPanelMessage","CancelChanges","");run();CHECK(frames(box[1],1)&&get("auto_mana")==1&&!panel[0x1a0]);
     box[1][0xa88]=0;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(!get("auto_mana")&&!panel[0x1a0]);
     char path[1200],temporary[1210],saved[4096]={0};snprintf(path,sizeof path,"%s/sw_custom.txt",dir);snprintf(temporary,sizeof temporary,"%s.tmp",path);
-    FILE *f=fopen(path,"r");CHECK(f&&fread(saved,1,sizeof saved-1,f)>0);fclose(f);CHECK(strstr(saved,"auto_mana=0\n")&&!strstr(saved,"lang_en="));CHECK(access(temporary,F_OK)!=0);
+    FILE *f=fopen(path,"r");CHECK(f&&fread(saved,1,sizeof saved-1,f)>0);fclose(f);CHECK(strstr(saved,"auto_mana=0\n")&&!strstr(saved,"lang="));CHECK(access(temporary,F_OK)!=0);
     message("OptionsPanelMessage","ResetToDefaults","");run();CHECK(frames(box[1],1)&&panel[0x1a0]&&!get("auto_mana"));
     message("OptionsPanelMessage","CancelChanges","");run();CHECK(frames(box[1],0)&&!panel[0x1a0]);
     message("OptionsPanelMessage","ResetToDefaults","");run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("auto_mana")&&!panel[0x1a0]);
@@ -147,7 +150,12 @@ int main(int argc,char **argv) {
     /* Restore the committed radio state expected by the later page checks. */
     box[15][0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(!touch_event(NULL,NULL,NULL,0,0));
     box[0][0xa88]=1;run();int32_t hint_x;memcpy(&hint_x,hint_en+0x70,4);CHECK(checked(box[0])&&!checked(zh)&&panel[0x1a0]&&hint_x==25&&layouts>0);
-    message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("lang_en")==1&&!panel[0x1a0]);
+    message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("lang")==1&&!panel[0x1a0]);
+    es[0xa88]=1;run();CHECK(checked(es)&&!checked(zh)&&!checked(box[0])&&!checked(ru)&&get("lang")==1&&panel[0x1a0]);
+    message("OptionsPanelMessage","CancelChanges","");run();CHECK(checked(box[0])&&!checked(es)&&!panel[0x1a0]);
+    ru[0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("lang")==3&&checked(ru)&&!panel[0x1a0]);
+    es[0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("lang")==2&&checked(es)&&!panel[0x1a0]);
+    box[0][0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("lang")==1&&checked(box[0])&&!panel[0x1a0]);
     message("OptionsPanelMessage","ResetToDefaults","");run();CHECK(checked(box[0])&&!checked(zh));message("OptionsPanelMessage","CancelChanges","");run();
     box[1][0xa88]=0;run();CHECK(panel[0x1a0]);panel[0x50]=0;run();panel[0x50]=1;run();CHECK(frames(box[1],1)&&get("auto_mana")==1&&!panel[0x1a0]);
     box[1][0xa88]=0;run();message("OptionsPanelMessage","CancelChanges","");run();
@@ -162,7 +170,7 @@ int main(int argc,char **argv) {
     row_children[2]=(uintptr_t)panel;run();CHECK(!panel[0x1a0]);row_children[2]=original;
     uint64_t old_root=(uintptr_t)root;put64(mods[0].base,0x2f05458,1);box[1][0xa88]=0;run();CHECK(box[1][0xa88]==0&&!panel[0x1a0]);put64(mods[0].base,0x2f05458,old_root);box[1][0xa88]=1;
     box[1][0xa88]=0;pthread_t thread;CHECK(!pthread_create(&thread,NULL,wrong_thread,NULL)&&!pthread_join(thread,NULL));CHECK(!panel[0x1a0]&&get("auto_mana")==1);box[1][0xa88]=1;
-    uint64_t bad_fn=base+0xb79f54;put64(mods[0].base,DM_VT_TEXT+0x10,bad_fn);box[0][0xa88]=0;run();CHECK(get("lang_en")==1);memcpy(&hint_x,hint_zh+0x70,4);CHECK(hint_x==99999);
+    uint64_t bad_fn=base+0xb79f54;put64(mods[0].base,DM_VT_TEXT+0x10,bad_fn);box[0][0xa88]=0;run();CHECK(get("lang")==1);memcpy(&hint_x,hint_zh+0x70,4);CHECK(hint_x==99999);
     put64(mods[0].base,DM_VT_TEXT+0x10,base+0xb79f50);message("OptionsPanelMessage","CancelChanges","");run();
     /* Use the production controller mode bootstrap and page key ownership,
      * with isolated overlay markers and the original expected prefix bytes. */

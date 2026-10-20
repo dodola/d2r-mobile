@@ -14,6 +14,7 @@ void dm_prof_add(int id, uint64_t ns, uint64_t b) { (void)id; (void)ns; (void)b;
 void dm_guest_write_prepare(void *a, size_t n) { (void)a; (void)n; }
 /* Preserve the original game language in this filesystem-only fixture. */
 int dm_custom_lang_explicit(void) { return -1; }
+int dm_sys_lang(void) { return 8; }
 int dm_android_fs_verify(const char *, const char *);
 int main(int argc, char **argv) {
     if (argc != 2) return 2;

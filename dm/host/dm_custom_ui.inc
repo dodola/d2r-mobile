@@ -49,7 +49,7 @@ void dm_custom_ui_pump(unsigned long long root) {
         memset(seen,0,sizeof seen);return;
     }
     load_once();if(atomic_exchange(&g_repaint,0))memset(seen,0,sizeof seen);
-    if(atomic_load(&g_lang_explicit)<0)atomic_store(&g_val[0],!dm_lang_zh());
+    if(atomic_load(&g_lang_explicit)<0)atomic_store(&g_val[0],lang_running());
     int pad=o->pad?o->pad(o->opaque):0;
     uint64_t cm=custom_find(o,root,"ConfirmationModal");
     if(custom_visible(o,cm))pad=0;
@@ -65,9 +65,14 @@ void dm_custom_ui_pump(unsigned long long root) {
         uint64_t ev=o->keys(o->opaque,DM_BTN_UP|DM_BTN_DOWN|DM_BTN_A);
         if(ev&DM_BTN_DOWN)selected=custom_next_visible(selected,1);
         else if(ev&DM_BTN_UP)selected=custom_next_visible(selected,-1);
-        snprintf(name,sizeof name,"TouchCustom_%s",k_keys[selected]);cw=custom_find(o,sp,name);
+        snprintf(name,sizeof name,"TouchCustom_%s",k_keys[selected]);cw=custom_find(o,sp,selected==0?k_lang_box[LANG_N-1]:name);
         snprintf(name,sizeof name,"TouchCustom_%s_Text",k_keys[selected]);tw=custom_find(o,sp,name);
         if((ev&DM_BTN_A) && cw && seen[selected].w==cw && seen[selected].gen==o->generation) {
+            if(selected==0) {
+                int pd=atomic_load(&g_pend[0]),shown=pd>=0?pd:atomic_load(&g_val[0]);
+                atomic_store(&g_pend[0],(shown+1)%LANG_N);
+                for(int k=0;k<LANG_N;k++)o->toggle(o->opaque,custom_find(o,sp,k_lang_box[k]),k==(shown+1)%LANG_N);
+            } else {
             int on=custom_toggle_value(o,cw);
             uint64_t z=rev_box(selected)?custom_find(o,sp,rev_box(selected)):0;
             if(on>=0 && (!rev_box(selected)||custom_toggle_value(o,z)>=0)) {
@@ -76,6 +81,7 @@ void dm_custom_ui_pump(unsigned long long root) {
                 if(o->toggle(o->opaque,cw,to) && (!z||o->toggle(o->opaque,z,!to))) {
                     if(z)atomic_store(&g_pend[selected],to);
                 }
+            }
             }
         }
     }
@@ -100,6 +106,24 @@ void dm_custom_ui_pump(unsigned long long root) {
     }
     for(int i=0;i<NK;i++) {
         if(!custom_key_visible(i)){seen[i].w=seen[i].z=0;continue;}
+        if(i==0) {
+            /* 四项语言单选仍使用平台校验过的控件传输。
+             * The four language choices still use the platform-validated widget transport. */
+            static uint64_t language_boxes[LANG_N];
+            uint64_t boxes[LANG_N];int values[LANG_N],valid=1,changed=seen[0].gen!=o->generation;
+            for(int k=0;k<LANG_N;k++) {
+                boxes[k]=custom_find(o,sp,k_lang_box[k]);values[k]=custom_toggle_value(o,boxes[k]);
+                valid&=custom_visible(o,boxes[k])&&values[k]>=0;
+                changed|=language_boxes[k]!=boxes[k];
+            }
+            if(!valid){seen[0].w=0;memset(language_boxes,0,sizeof language_boxes);continue;}
+            int pd=atomic_load(&g_pend[0]),shown=pd>=0?pd:atomic_load(&g_val[0]),to=shown;
+            if(seen[0].w&&!changed)for(int k=0;k<LANG_N;k++)if(k!=shown&&values[k]){to=k;break;}
+            for(int k=0;k<LANG_N;k++)o->toggle(o->opaque,boxes[k],k==to);
+            if(to!=shown)atomic_store(&g_pend[0],to);
+            memcpy(language_boxes,boxes,sizeof boxes);seen[0].w=boxes[LANG_N-1];seen[0].gen=o->generation;
+            continue;
+        }
         snprintf(name,sizeof name,"TouchCustom_%s",k_keys[i]);uint64_t w=custom_find(o,sp,name);
         if(!custom_visible(o,w)||custom_toggle_value(o,w)<0){seen[i].w=seen[i].z=0;continue;}
         uint64_t z=rev_box(i)?custom_find(o,sp,rev_box(i)):0;
@@ -122,11 +146,11 @@ void dm_custom_ui_pump(unsigned long long root) {
             atomic_store(&g_pend[i],on);LOG("自定义设置：%s 勾选框 → %d（点应用生效）",k_keys[i],on);
         }
     }
-    uint64_t label=custom_find(o,sp,"TouchCustom_lang_en_Text");int32_t lr[4];
+    uint64_t label=custom_find(o,sp,"TouchCustom_lang_Text");int32_t lr[4];
     if(custom_rect(o,label,lr)) {
-        int pd=atomic_load(&g_pend[0]),shown=pd>=0?pd:atomic_load(&g_val[0]),diff=shown!=!dm_lang_zh();
-        for(int k=0;k<2;k++) {
-            uint64_t hint=custom_find(o,sp,k?"TouchCustomLangHintEn":"TouchCustomLangHintZh");int32_t r[4];
+        int pd=atomic_load(&g_pend[0]),shown=pd>=0?pd:atomic_load(&g_val[0]),diff=shown!=lang_running();
+        for(int k=0;k<LANG_N;k++) {
+            uint64_t hint=custom_find(o,sp,k_lang_hint[k]);int32_t r[4];
             if(custom_rect(o,hint,r)) {int x=diff&&shown==k?lr[0]:99999;if(r[0]!=x){r[0]=x;o->rect(o->opaque,hint,r);}}
         }
     }

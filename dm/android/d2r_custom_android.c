@@ -35,7 +35,9 @@ int dm_android_d2r_fps_setting(void) {int dm_fps_setting(void);return dm_fps_set
 const char *dm_android_custom_startup_locale(void) {
     /* app_jni is linked only by the D2R target. No guest access is needed
      * here: this executes before loading modules or initializing the SDK. */
-    int en=dm_custom_lang_explicit();return en<0?NULL:en?"en":"zh-Hans";
+    int selected=dm_custom_lang_explicit();
+    static const char *const locales[]={"zh-Hans","en","es","ru"};
+    return selected<0||selected>=4?NULL:locales[selected];
 }
 static int overlay_complete(const char *root) {
     static const char *files[]={"ctrl_touch","touch_strings.tsv","data/.build.config","data/00-00000007.data"};

@@ -6,9 +6,9 @@ Android 支持仍处于实验阶段，验证范围单独列在下方。
 
 iOS 版已打磨到可以天天玩、从开荒一路玩到终局；Android 版仍处于开发阶段。
 
-平台：Android（实验性，arm64-v8a、API 29+、Vulkan）· iPhone / iPad（iOS 26 起；iOS 18 – 25 用老接口版）· Mac（Apple 芯片，macOS 26 及以上；macOS 15 – 25 用老接口版）· Apple TV 4K（第三代 A15，社区移植，开发者预览）· 游戏版本：Switch 版「术士君临」1.0.34.0（对应 PC 版 3.3.94012）· 中文 / English · 许可证：MIT · **需要自备游戏文件**
+平台：Android（实验性，arm64-v8a、API 29+、Vulkan）· iPhone / iPad（iOS 26 起；iOS 18 – 25 用老接口版）· Mac（Apple 芯片，macOS 26 及以上；macOS 15 – 25 用老接口版）· Apple TV 4K（第三代 A15，社区移植，开发者预览）· 游戏版本：Switch 版「术士君临」1.0.34.0（对应 PC 版 3.3.94012）· 中文 / English / Español / Русский · 许可证：MIT · **需要自备游戏文件**
 
-English: [README.md](README.md)
+English: [README.md](README.md) · Español: [README.es.md](README.es.md)
 
 D2R Android 工作统一回归 `main`。当前 **1.1.0 / 游戏 94012** 已支持成套的离线 APK 与资源包；旧 91738 安装链属于独立版本，资源不能混用。实体手柄输入、事务存档和 iOS 触控/UI 桥的验证范围不同，具体见 [功能对齐记录](docs/ANDROID_IOS_PARITY.md) 与 [主线整合记录](docs/ANDROID_MAIN_INTEGRATION_2026-10-19.zh-CN.md)。
 
@@ -215,9 +215,9 @@ iPhone 与 iPad 共用一个安装包。
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/map.jpg" width="33%" alt="全屏地图">
 </p>
 
-### 中文与英文
+### 中文、英文、西班牙语与俄语
 
-整个游戏可在「选项 → 自定义」里切换为英文，重启后界面与语音都是英文：物品、技能、怪物名沿用原版英文，我们新增的内容——秘境、编年史、设置页、手柄提示——也全部配了英文。
+整个游戏可在「选项 → 自定义」里切换中文、英文、西班牙语或俄语，重启后界面就是所选语言；第一次打开时跟随设备语言（西班牙的西语用原版 esES 文字，其他地区的西语用拉美 esMX 文字；俄语用原版 ruRU 文字）。英文、西语和俄语下，物品、技能、怪物名沿用原版译名，我们新增的内容——秘境、编年史、设置页、手势提示、地图名牌——也全部配了对应语言（物品注释只有中文与西语）。语音：中文界面配中文语音；俄语界面在你的游戏文件里带俄语配音时（用完整游戏数据出的包都带）配原版俄语语音，否则配英文；其余配英文语音。
 
 <p align="center">
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/en_game.jpg" width="58%" alt="英文界面下的游戏画面">

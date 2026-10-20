@@ -38,12 +38,12 @@ int main(int argc,char **argv){
     void (*unmount)(const char *)=binding(lib,"_ZN2nn2fs7UnmountEPKc");
     uint64_t (*desired_language)(void)=binding(lib,"_ZN2nn2oe18GetDesiredLanguageEv");
     char root[]="/data/local/tmp/d2r-custom-consumers-XXXXXX",p[1400],save[1400],profile[1400],out[1400];CHECK(mkdtemp(root));
-    if(mode>=0){path(p,root,"sw_custom.txt");char text[160];snprintf(text,sizeof text,"lang_en=%d\nauto_buff=%d\nitem_notes=%d\ntouch_swap_above=%d\n",mode,mode,mode,mode);put(p,text);}
+    if(mode>=0){path(p,root,"sw_custom.txt");char text[160];snprintf(text,sizeof text,"lang=%d\nauto_buff=%d\nitem_notes=%d\ntouch_swap_above=%d\n",mode,mode,mode,mode);put(p,text);}
     CHECK(!setenv("DM_LANG","fr-FR",1));dm_custom_init(root);
     CHECK(dm_custom_get("auto_buff")== (mode<0?1:mode));CHECK(dm_custom_get("item_notes")== (mode<0?1:mode));
     const char *locale=dm_android_custom_startup_locale();CHECK(mode<0?!locale:locale&&!strcmp(locale,mode?"en":"zh-Hans"));
     if(locale)CHECK(!setenv("DM_LANG",locale,1));
-    dirs(root,"profile");path(profile,root,"profile");dm_android_platform_config config={.mode=DM_ANDROID_HOST_SHELL,.profile_directory=profile,.locale=locale?locale:"fr-FR",.locale_source=locale?"Custom.lang_en":"fixture-system"};
+    dirs(root,"profile");path(profile,root,"profile");dm_android_platform_config config={.mode=DM_ANDROID_HOST_SHELL,.profile_directory=profile,.locale=locale?locale:"fr-FR",.locale_source=locale?"Custom.lang":"fixture-system"};
     CHECK(!dm_android_platform_bind(&config));char code[8]={0};uint64_t value=desired_language();memcpy(code,&value,8);CHECK(!strcmp(code,mode<0?"fr":mode?"en":"zh-Hans"));CHECK(value==dm_android_platform_language_code());
     overlay(root,"romfs-overlay",0);dirs(root,"romfs-overlay-variants");overlay(root,"romfs-overlay-variants/item_notes",1);
     CHECK(dm_android_custom_overlay(root,out,sizeof out));CHECK(strstr(out,"romfs-overlay-variants/item_notes")!=NULL ? mode!=0 : mode==0);
@@ -73,6 +73,6 @@ int main(int argc,char **argv){
     /* Missing Settings.json gets valid minimal JSON on explicit English,
      * while an unapplied/default language never creates one. */
     dirs(root,"save-fresh");path(save,root,"save-fresh");CHECK(!setenv("DM_SAVE",save,1));CHECK(!mount_save("fresh",NULL));unmount("fresh");path(p,save,"Settings/Settings.json");
-    if(mode==1){CHECK(has(p,"\"Language\": 0")&&has(p,"\"VoiceLanguage\": 0"));CHECK(!has(p,",}"));}else CHECK(access(p,F_OK));
+    if(mode>=0){CHECK(has(p,mode?"\"Language\": 0":"\"Language\": 8")&&has(p,mode?"\"VoiceLanguage\": 0":"\"VoiceLanguage\": 8"));CHECK(!has(p,",}"));}else CHECK(access(p,F_OK));
     printf("ANDROID_D2R_CUSTOM_CONSUMERS_OK checks=%d mode=%d desired_language=1 original_mount_binding=1 preserve_existing_rules=1 overlay_selection=1 fallback=1 synthetic_memory=1 isolated_files=1 original_game_not_claimed=1\n",checks,mode);return 0;
 }
