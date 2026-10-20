@@ -27,8 +27,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class GameActivity extends Activity implements SurfaceHolder.Callback {
-    static native int nativeMapReveal();
-    static native long[] nativeMapStatus();
     static { System.loadLibrary("d2r_mobile_android"); }
     private static native int nativeConfigure(String files, String locale,boolean touchRoute);
     private static native int nativeContentProfile(long romfsBytes,int[] addOnIndices);
@@ -50,8 +48,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static native void nativeShutdown();
     private static native int nativeStart();
     private static native String nativeStatus();
-    private static native int nativeRenderScale(float scale);
-    private static native int nativeRenderScaleAuto();
     private static native void nativeControllerCancelActions(long buttons,int lx,int ly,int rx,int ry);
     private static native String nativeSaveFailure();
     private static native String nativeKeyboardRequest();
@@ -73,11 +69,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private volatile int surfaceGeneration;
     private SurfaceView game;
     private TextView status,fps;
-    private static native boolean nativeCustomSettingsRequest();
+    private static native boolean nativeShowFps();
     static native String nativeUiText(String key);
-    private RendererSettingsDialog rendererSettings;
-    private int appliedRendererFlags=RendererOptions.DEFAULT_FLAGS;
-    private float appliedRenderScale=RenderQuality.AUTO;
     private GameUiStrings strings;
     private AndroidUpdateChecker updateChecker;
     private final GameDisplayMetrics.FpsSampler fpsSampler=new GameDisplayMetrics.FpsSampler();
@@ -203,20 +196,20 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     // 对齐 iOS：局外自动隐藏，局内根据触摸/实体手柄来源切换。
     // Match iOS: hide outside a run and switch in-game with touch/physical-controller input.
     private void syncTouchOverlay(){
-        if(touchControls!=null)touchControls.setActive(inGame&&touchMode&&gameInputReady()&&rendererSettings==null&&keyboardDialog==null&&saveFailureDialog==null);
+        if(touchControls!=null)touchControls.setActive(inGame&&touchMode&&gameInputReady()&&keyboardDialog==null&&saveFailureDialog==null);
     }
-    boolean showFps(){return getSharedPreferences("hud",MODE_PRIVATE).getBoolean("show_fps",false);}
-    void setShowFps(boolean show){
-        getSharedPreferences("hud",MODE_PRIVATE).edit().putBoolean("show_fps",show).apply();
-        fps.setVisibility(show?View.VISIBLE:View.GONE);fpsSampler.reset();displayedFps=Double.NaN;
-    }
-    private void openCustomSettings(){
-        if(!gameInputReady()||rendererSettings!=null||keyboardDialog!=null||saveFailureDialog!=null)return;
-        clearControllers();actionButtons=0;nativeActions(0,0,0,0,0);touchControls.cancel();
-        rendererSettings=RendererSettingsDialog.show(this,appliedRendererFlags,appliedRenderScale,
-            scale -> scale==RenderQuality.AUTO?nativeRenderScaleAuto():nativeRenderScale(scale),
-            game,() -> {rendererSettings=null;syncTouchOverlay();});
-        syncTouchOverlay();
+    private boolean showFps(){return configured&&nativeShowFps();}
+    // 把旧 HUD 偏好迁到统一设置文件，首次读取原生设置之前完成。
+    // Migrate the old HUD preference to the shared file before native settings are first read.
+    private void migrateFps()throws java.io.IOException {
+        File file=new File(getFilesDir(),"d2r-mobile/sw_custom.txt");
+        String text=file.exists()?new String(java.nio.file.Files.readAllBytes(file.toPath()),StandardCharsets.UTF_8):"";
+        if(!java.util.regex.Pattern.compile("(?m)^show_fps=").matcher(text).find()){
+            text+=(text.isEmpty()||text.endsWith("\n")?"":"\n")+"show_fps="+(getSharedPreferences("hud",MODE_PRIVATE).getBoolean("show_fps",false)?1:0)+"\n";
+            File temp=new File(file.getParentFile(),"sw_custom.migrate");
+            try(FileOutputStream out=new FileOutputStream(temp)){out.write(text.getBytes(StandardCharsets.UTF_8));out.getFD().sync();}
+            java.nio.file.Files.move(temp.toPath(),file.toPath(),java.nio.file.StandardCopyOption.ATOMIC_MOVE,java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
     }
     private void physicalInputSeen(){if(touchMode)setTouchMode(false);}
     private static long keyButton(int key) {
@@ -262,7 +255,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         backButtons.clear();controllers.clear();motionDevices.clear();controllerKeys.clear();controllerButtons=0;
         if(configured)nativeControllerCancel(0);
     }
-    private boolean gameInputReady() { return configured && surfaceReady && inputReady && resumed && hasWindowFocus() && !failed && !destroyed && rendererSettings==null && keyboardDialog==null && saveFailureDialog==null; }
+    private boolean gameInputReady() { return configured && surfaceReady && inputReady && resumed && hasWindowFocus() && !failed && !destroyed && keyboardDialog==null && saveFailureDialog==null; }
     private void initializeUpdates(){
         final int ownBuild;
         String updateUrl="";
@@ -313,7 +306,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             android.util.Log.w("D2RUpdate","No HTTPS browser is available",unavailable);return false;
         }
     }
-    private void closeRendererSettings(){if(rendererSettings!=null){rendererSettings.dismiss();rendererSettings=null;}}
     static void installDialogBack(android.app.Dialog dialog){
         dialog.setOnKeyListener((d,key,event) -> {
             if(key!=KeyEvent.KEYCODE_BUTTON_B)return false;
@@ -324,7 +316,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         int key=event.getKeyCode(),action=event.getAction();
         if(BackButtonState.handles(key)){
-            if(rendererSettings!=null||keyboardDialog!=null||saveFailureDialog!=null){
+            if(keyboardDialog!=null||saveFailureDialog!=null){
                 if(action==KeyEvent.ACTION_UP&&!event.isCanceled())requestGameBack();
                 return true;
             }
@@ -355,7 +347,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         return super.dispatchKeyEvent(event);
     }
     private void requestGameBack(){
-        if(rendererSettings!=null){closeRendererSettings();return;}
         if(keyboardDialog!=null){keyboardDialog.dismiss();return;}
         if(saveFailureDialog!=null){saveFailureDialog.dismiss();return;}
         if(gameInputReady()){
@@ -501,7 +492,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if(!prepared||failed||destroyed)return;
         if(!configured){
             // Recover an interrupted main quality-setting write before native reads it.
-            try{new RenderQualityStore(this).read();}
+            try{new RenderQualityStore(this).read();migrateFps();}
             catch(java.io.IOException error){fail(strings.chinese()?"无法读取画质设置":"Could not read graphics quality settings",error);return;}
             int rc=nativeConfigure(getFilesDir().getAbsolutePath(),getResources().getConfiguration().getLocales().get(0).toLanguageTag(),
             getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_TOUCHSCREEN));
@@ -532,24 +523,16 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             }
         });
     }
-    private void fail(String title,Exception error){closeRendererSettings();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}failed=true;status.setVisibility(View.VISIBLE);status.setText(title+"\n"+error.getMessage());}
+    private void fail(String title,Exception error){nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}failed=true;status.setVisibility(View.VISIBLE);status.setText(title+"\n"+error.getMessage());}
     private boolean driverPending=true;
-    private long mapNoticeSequence;
     private final Runnable poll=new Runnable(){public void run(){
         if(!launched||failed)return;
         try{String raw=nativeStatus();JSONObject s=new JSONObject(raw);
-            appliedRendererFlags=s.optInt("renderer_flags",RendererOptions.DEFAULT_FLAGS);
-            appliedRenderScale=(float)s.optDouble("render_scale",RenderQuality.ORIGINAL);
-            if(rendererSettings!=null)rendererSettings.updateApplied(appliedRendererFlags,appliedRenderScale);
-            long[] map=nativeMapStatus();
-            if(resumed&&map!=null&&map.length>=7&&map[0]>mapNoticeSequence&&map[1]>=4){
-                mapNoticeSequence=map[0];
-                android.widget.Toast.makeText(GameActivity.this,RendererSettingsDialog.mapFeedback(map,strings.chinese()),android.widget.Toast.LENGTH_LONG).show();
-            }
             JSONObject scene=s.optJSONObject("scene");boolean nextInGame=scene!=null&&scene.optInt("game",0)!=0;
             if(inGame!=nextInGame)cancelFrontendTouch();inGame=nextInGame;
-            if(gameInputReady()&&nativeCustomSettingsRequest())openCustomSettings();
             syncTouchOverlay();
+            int fpsVisibility=showFps()?View.VISIBLE:View.GONE;
+            if(fps.getVisibility()!=fpsVisibility){fps.setVisibility(fpsVisibility);fpsSampler.reset();displayedFps=Double.NaN;}
             long frame=s.getLong("presented_frames");
             if(frame>0&&driverPending){driverPending=false;GraphicsDriverSettings.confirmStarted(GameActivity.this);}
             if(frame>0&&touchControls!=null&&touchControls.refreshLanguage())refreshFrontendStrings();
@@ -566,9 +549,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if(touchControls!=null){int[] ts=nativeTouchGameState();if(ts!=null&&ts.length>=10)
                 touchControls.setGameState(ts[0]!=0,ts[1],ts[2],ts[3]!=0,ts[4]!=0,ts[5],ts[6]!=0,ts[7],ts[8],ts[9]);}
             String request=nativeKeyboardRequest();if(request!=null&&resumed&&!destroyed){JSONObject k=new JSONObject(request);long id=k.getLong("id");
-                if(keyboardDialog==null||keyboardId!=id){closeRendererSettings();if(keyboardDialog!=null)keyboardDialog.dismiss();keyboardId=id;actionButtons=0;nativeActions(0,0,0,0,0);touchControls.cancel();
+                if(keyboardDialog==null||keyboardId!=id){if(keyboardDialog!=null)keyboardDialog.dismiss();keyboardId=id;actionButtons=0;nativeActions(0,0,0,0,0);touchControls.cancel();
                     keyboardDialog=ShellTextInputDialog.show(GameActivity.this,k.getString("title"),k.getString("subtitle"),k.getString("hint"),k.getString("initial"),k.getInt("min"),k.getInt("max"),strings,(ok,text)->{nativeKeyboardResult(id,ok,text);keyboardDialog=null;});}}
-            if(resumed&&!destroyed&&rendererSettings==null&&keyboardDialog==null&&saveFailureDialog==null){String message=nativeSaveFailure();if(message!=null){
+            if(resumed&&!destroyed&&keyboardDialog==null&&saveFailureDialog==null){String message=nativeSaveFailure();if(message!=null){
                 saveFailureDialog=new android.app.AlertDialog.Builder(GameActivity.this).setTitle(message)
                     .setPositiveButton(t("确认"),null).create();
                 saveFailureDialog.setOnDismissListener(dialog -> saveFailureDialog=null);installDialogBack(saveFailureDialog);saveFailureDialog.show();}}
@@ -580,9 +563,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if(touchControls!=null)touchControls.cancel();
     }syncTouchOverlay();}
     @Override public void onResume(){super.onResume();resumed=true;fpsSampler.reset();nativeKeyboardReady(true);nativeUpdateForeground();if(configured)nativeAudioInterruption(false);if(configured)nativeLifecycle(2);configureAndStart();}
-    @Override public void onPause(){resumed=false;clearControllers();closeRendererSettings();if(configured){nativeLifecycle(0);nativeLifecycle(1);}nativeCustomSettingsRequest();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;controllerButtons=0;if(touchControls!=null)touchControls.cancel();syncTouchOverlay();if(configured){nativeActions(0,0,0,0,0);nativeControllerCancel(0);}if(configured&&surfaceReady)publishSurface();super.onPause();}
+    @Override public void onPause(){resumed=false;clearControllers();if(configured){nativeLifecycle(0);nativeLifecycle(1);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;controllerButtons=0;if(touchControls!=null)touchControls.cancel();syncTouchOverlay();if(configured){nativeActions(0,0,0,0,0);nativeControllerCancel(0);}if(configured&&surfaceReady)publishSurface();super.onPause();}
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}
-    @Override public void onDestroy(){GraphicsDriverSettings.confirmStarted(this);if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();closeRendererSettings();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
+    @Override public void onDestroy(){GraphicsDriverSettings.confirmStarted(this);if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
 }

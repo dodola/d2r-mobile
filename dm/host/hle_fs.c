@@ -499,7 +499,10 @@ static int json_int_set(char *buf, size_t cap, const char *key, int val) {   // 
     size_t nl = strlen(num); if (strlen(buf) + nl + 1 >= cap) return 0;
     memmove(v + nl, e, strlen(e) + 1); memcpy(v, num, nl); return 1; }
 static void settings_lang_apply(const char *save_dir) {
-    int dm_custom_lang_explicit(void); int sel = dm_custom_lang_explicit(); if (sel < 0 || sel > 3) return;
+    int dm_custom_lang_explicit(void); int sel = dm_custom_lang_explicit();
+#ifndef __ANDROID__
+    if (sel < 0 || sel > 3) return;
+#endif
     char path[1200]; snprintf(path, sizeof path, "%s/Settings/Settings.json", save_dir);
 #ifdef __ANDROID__
     /* These edits precede the transaction clone's own link checks. Refuse
@@ -519,12 +522,22 @@ static void settings_lang_apply(const char *save_dir) {
         return;
 #endif
     } else {size_t n = fread(buf, 1, 65535, f);int bad=ferror(f);fclose(f);if(bad||n==65535)return;buf[n]=0;}
+    int ch=0;
+#ifdef __ANDROID__
+    /* 已验证的 D2R 触屏界面以常驻小地图为入口，移除地图键后仍须进局自动打开。
+     * The verified D2R touch UI uses the persistent minimap as its entry, so open it on load without a map key. */
+    ch=json_int_set(buf,sizeof buf,"\"AutoMap Open On Load\"",1);
+#endif
+    if(sel>=0&&sel<=3) {
     const char *k = strstr(buf, "\"Language\""), *c = k ? strchr(k + 10, ':') : NULL; int cur = c ? atoi(c + 1) : 8;   // 没写 = 游戏缺省（宿主报简中） | Not written = game default (the host reports Simplified Chinese)
     int in = sel == 0 ? (cur == 8 || cur == 9) : sel == 1 ? cur == 0 : sel == 3 ? cur == 7 : (cur == 2 || cur == 10);
     int dm_sys_lang(void); int want = in ? cur : sel == 0 ? 8 : sel == 1 ? 0 : sel == 3 ? 7 : (dm_sys_lang() == 10 ? 10 : 2);
     const char *vk = strstr(buf, "\"VoiceLanguage\""), *vc = vk ? strchr(vk + 15, ':') : NULL; int vcur = vc ? atoi(vc + 1) : -1;
     int voice = in && sel == 0 && vcur > 0 ? vcur : voice_for(want);
-    int ch = json_int_set(buf, sizeof buf, "\"Language\"", want) | json_int_set(buf, sizeof buf, "\"VoiceLanguage\"", voice); if (!ch) return;
+    ch |= json_int_set(buf, sizeof buf, "\"Language\"", want) | json_int_set(buf, sizeof buf, "\"VoiceLanguage\"", voice);
+    LOG("Settings language=%d voice=%d",want,voice);
+    }
+    if (!ch) return;
     char tmp[1300];
 #ifdef __ANDROID__
     snprintf(tmp,sizeof tmp,"%s.lang.XXXXXX",path);int fd=mkstemp(tmp);f=fd<0?NULL:fdopen(fd,"wb");
@@ -535,7 +548,7 @@ static void settings_lang_apply(const char *save_dir) {
     size_t m = strlen(buf);
     if (!f || fwrite(buf, 1, m, f) != m) { if (f) fclose(f); remove(tmp); LOG("【红】语言开关：写 %s 失败", tmp); return; }
     if(fclose(f)||rename(tmp,path)){remove(tmp);LOG("【红】语言开关：提交到 %s 失败",path);return;}
-    LOG("语言开关：设置文件的 Language / VoiceLanguage 改成 %d（%s；原文字语言 %d）", want, sel == 0 ? "中文" : sel == 1 ? "English" : sel == 2 ? "Español" : "Русский", cur);
+    LOG("Settings committed: %s",path);
 }
 // 事务式存档当前的工作目录（游戏读写的那份；宿主自己的旁路文件写在这里才会随 Commit 进已提交版）。没挂载存档时返回 NULL
 // The current working directory of the transactional save (the copy the game reads and writes; the host's own side files must be written here to enter the committed version with Commit). Returns NULL when no save is mounted

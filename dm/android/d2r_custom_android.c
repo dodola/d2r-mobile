@@ -23,7 +23,7 @@ static pthread_mutex_t owner_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_t owner;static int have_owner;
 static _Thread_local int scoped;
 static _Thread_local context current;
-static _Atomic int settings_request;
+#include "d2r_custom_settings.inc"
 
 static int read_vm(uint64_t p,void *out,size_t bytes) {return dm_tg_vm_read(p,out,bytes);}
 static int title_ok(void) {
@@ -32,10 +32,10 @@ static int title_ok(void) {
 }
 int dm_android_title_custom_settings(void) {return title_ok();}
 void dm_android_custom_message(const char *category,const char *action,const char *argument) {
-    if(title_ok()&&category&&action&&argument&&!strcmp(category,"PanelManager")&&
-       !strcmp(action,"ClosePanel")&&!strcmp(argument,"TouchAndroidSettings"))atomic_store(&settings_request,1);
+    if(!title_ok()||!category||!action||!argument||strcmp(category,"PanelManager")||strcmp(action,"ClosePanel"))return;
+    if(!strcmp(argument,"TouchCustom_mod"))atomic_fetch_or(&action_clicks,1);
+    if(!strcmp(argument,"TouchCustom_map_reveal"))atomic_fetch_or(&action_clicks,2);
 }
-int dm_android_custom_take_request(void) {return atomic_exchange(&settings_request,0);}
 /* The shared graphics OBJECT is compiled without title-target macros. Its
  * weak callback resolves only in this D2R app, never in the generic shell. */
 int dm_android_d2r_fps_setting(void) {int dm_fps_setting(void);return dm_fps_setting();}
@@ -189,18 +189,38 @@ static uint64_t keys(void *opaque,uint64_t mask) {(void)opaque;uint64_t dm_padmo
 static uint64_t frame(void *opaque) {(void)opaque;uint64_t dm_guest_frame(void);return dm_guest_frame();}
 static void platform_action(void *opaque,uint64_t w) {
     context *c=opaque;int i=locate(c,w);
-    if(i>=0&&!strcmp(c->nodes[i].text,"TouchAndroidSettings")&&
-       c->nodes[i].vt==(uintptr_t)title->base+DM_VT_BUTTON&&live(c,(unsigned)i))atomic_store(&settings_request,1);
+    if(i<0||c->nodes[i].vt!=(uintptr_t)title->base+DM_VT_BUTTON||!live(c,(unsigned)i))return;
+    if(!strcmp(c->nodes[i].text,"TouchCustom_mod")){void dm_custom_cycle_mod(void);dm_custom_cycle_mod();}
+    if(!strcmp(c->nodes[i].text,"TouchCustom_map_reveal"))dm_android_map_request_when_ready(NULL);
+}
+static int clicked(void *opaque,uint64_t w) {
+    context *c=opaque;int i=locate(c,w);if(i<0||!live(c,(unsigned)i))return 0;
+    unsigned bit=!strcmp(c->nodes[i].text,"TouchCustom_mod")?1:!strcmp(c->nodes[i].text,"TouchCustom_map_reveal")?2:0;
+    return bit&&(atomic_fetch_and(&action_clicks,~bit)&bit)!=0;
+}
+/* 文本只写入当前树中类型匹配的控件；地址来自 94012 的原版字符串赋值和刷新函数。
+ * Text writes target matching live widgets only; addresses are 94012's string assignment and refresh functions. */
+static int set_text(void *opaque,uint64_t w,const char *text) {
+    context *c=opaque;int i=locate(c,w);uint64_t base=(uintptr_t)title->base,pair[2];
+    if(i<0||(strcmp(c->nodes[i].text,"TouchCustom_mod_Text")&&strcmp(c->nodes[i].text,"TouchCustom_map_reveal_Text"))||c->nodes[i].vt!=base+DM_VT_TEXT||!live(c,(unsigned)i)||!read_vm(w+0x88,pair,16))return 0;
+    size_t n=strlen(text);char previous[256];if(n>=sizeof previous)return 0;
+    if(pair[1]==n&&read_vm(pair[0],previous,n)&&!memcmp(previous,text,n))return 1;
+    if(!live(c,(unsigned)i))return 0;
+    ((void *(*)(uint64_t,const char *,uint64_t))(base+0x136e5c))(w+0x88,text,n);
+    if(!live(c,(unsigned)i))return 0;
+    ((void (*)(uint64_t))(base+0xadc434))(w);return 1;
 }
 int dm_android_custom_ui_context(uint64_t root,dm_custom_ui_ops *out) {
     if(!scoped||!title_ok()||!root||!out)return 0;
     context *c=&current;memset(c,0,sizeof *c);c->root=root;c->generation=dm_ui_gen();
     unsigned root_index;if(!epoch(c)||!add_node(c,root,0,0,0,&root_index)||!children(c,0,0))return 0;
-    unsigned count=c->count;
+    unsigned count=c->count;int panel_visible=0;
     for(unsigned i=1;i<count;i++)if(!strcmp(c->nodes[i].text,"VideoOptionsPanel")) {
         uint8_t visible=0;if(!read_vm(c->nodes[i].w+0x50,&visible,1))return 0;
-        if(visible&&!children(c,i,1))return 0;
+        panel_visible|=visible!=0;if(visible&&!children(c,i,1))return 0;
+        if(!visible)atomic_store(&action_clicks,0);
     }
+    if(!panel_visible)atomic_store(&action_clicks,0);
     *out=(dm_custom_ui_ops){.opaque=c,.generation=c->generation,.find=find,.read=read_field,.toggle=set_toggle,
-        .rect=set_rect,.dirty=set_dirty,.wheel=wheel,.pad=pad,.keys=keys,.frame=frame,.action=platform_action};return epoch(c);
+        .rect=set_rect,.dirty=set_dirty,.wheel=wheel,.pad=pad,.keys=keys,.frame=frame,.action=platform_action,.clicked=clicked,.text=set_text};return epoch(c);
 }

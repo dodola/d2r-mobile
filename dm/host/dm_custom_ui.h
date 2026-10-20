@@ -19,7 +19,9 @@ typedef struct {
     int (*pad)(void *);
     uint64_t (*keys)(void *,uint64_t);
     uint64_t (*frame)(void *);
-    /* 平台设置入口；在游戏线程校验按钮后只提交请求。
-     * Platform settings entry; validate the button on the game thread, then only queue a request. */
+    /* 页内地图与 MOD 操作以及动态文字；各平台在调用前校验当前控件。
+     * Inline map/MOD actions and dynamic text; each platform validates current widgets before calls. */
     void (*action)(void *,uint64_t);
+    int (*clicked)(void *,uint64_t);
+    int (*text)(void *,uint64_t,const char *);
 } dm_custom_ui_ops;

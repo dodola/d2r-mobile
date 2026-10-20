@@ -21,8 +21,8 @@
 
 /* Android UI 只取队列和译文；原游戏控件留在游戏线程。
  * Android UI reads only queued requests and translations; game widgets stay on the game thread. */
-JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeCustomSettingsRequest(JNIEnv *env,jclass cls) {
-    (void)env;(void)cls;return dm_android_custom_take_request()!=0;
+JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeShowFps(JNIEnv *env,jclass cls) {
+    (void)env;(void)cls;int dm_custom_get(const char *);return dm_custom_get("show_fps")!=0;
 }
 JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeFrontendTouch(JNIEnv *env,jclass cls,jint phase,jfloat x,jfloat y) {
     (void)env;(void)cls;

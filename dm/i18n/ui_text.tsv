@@ -1,8 +1,4 @@
 键	中文	English	Español	Español MX	Русский	用在哪
-dmAndroidSettings	Android 设置	Android settings	Ajustes de Android		Настройки Android	Android 自定义页的平台设置入口
-dmAndroidShowFps	显示帧率	Show frame rate	Mostrar FPS		Показывать FPS	Android 设置页的帧率显示开关
-dmAndroidHudHint	默认隐藏帧率；触摸与手柄操控自动切换。	Frame rate is hidden by default; touch and controller controls switch automatically.	Los FPS se ocultan de forma predeterminada; el control táctil y el mando cambian automáticamente.		FPS скрыты по умолчанию; сенсорное управление и геймпад переключаются автоматически.	Android 设置页的 HUD 说明
-dmAndroidBackCustom	返回自定义	Back to Custom	Volver a Personalizar		Назад к настройкам	Android 设置页返回游戏自定义选项
 dmPauseRestart	一键重开	Quick Restart	Reinicio rápido		Быстрый рестарт	暂停菜单按钮（touch_layout.py）
 dmUpdBuild	构建 %d	Build %d	Versión %d		Сборка %d	选角页左下角构建号（dm_update.c）
 dmUpdNew	有新版本 %d · %s	New version %d · %s	Nueva versión %d · %s		Новая версия %d · %s	选角页新版本提示；%s = 版本文件里的说明（服务端给，未翻）
@@ -389,3 +385,23 @@ dmCustomTouchSwapFarHint	位于技能区左上，松手后切换	Above-left of s
 dmDoorRift	大秘境	Greater Rift	Grieta superior	Grieta mayor	Великий рифт	城里大秘境传送门头顶的名牌（dm_rift.c dm_door_label）
 dmDoorRiftTown	回城	Return to Town	Volver a la ciudad		Портал в город	秘境图里回城门头顶的名牌（dm_rift.c dm_door_label）
 dmDoorBossRush	Boss 连战	Boss Rush	Ronda de jefes		Босс-раш	城里 Boss 连战门头顶的名牌（dm_bossrush.c dm_door_label）
+dmCustomShowFps	显示帧率	Show frame rate	Mostrar FPS		Показывать FPS	Android 自定义页内设置
+dmCustomRenderMode0	3D 画质：自动	3D quality: Automatic	Calidad 3D: Automática		Качество 3D: Авто	Android 自定义页内设置
+dmCustomRenderMode1	3D 画质：原画质（100%）	3D quality: Original (100%)	Calidad 3D: Original (100%)		Качество 3D: Исходное (100%)	Android 自定义页内设置
+dmCustomRenderMode2	3D 画质：均衡（90%）	3D quality: Balanced (90%)	Calidad 3D: Equilibrada (90%)		Качество 3D: Баланс (90%)	Android 自定义页内设置
+dmCustomRenderMode3	3D 画质：性能（75%）	3D quality: Performance (75%)	Calidad 3D: Rendimiento (75%)		Качество 3D: Скорость (75%)	Android 自定义页内设置
+dmCustomClearMerge	图形优化：清屏合并	Graphics: Merge clears	Gráficos: Combinar borrados		Графика: Объединять очистки	Android 自定义页内设置
+dmCustomStoreElide	图形优化：省略无用写回	Graphics: Skip unused stores	Gráficos: Omitir escrituras sin uso		Графика: Пропускать ненужные записи	Android 自定义页内设置
+dmCustomMod	MOD（下次启动生效）	MOD (next launch)	MOD (próximo inicio)		MOD (при следующем запуске)	Android 自定义页内设置
+dmCustomModNext	切换 MOD	Next MOD	Cambiar MOD		Следующий MOD	Android 自定义页内设置
+dmCustomModNone	不加载 MOD	No MOD	Sin MOD		Без MOD	Android 自定义页内设置
+dmCustomModStatus	MOD：%s（下次启动）	MOD: %s (next launch)	MOD: %s (próximo inicio)		MOD: %s (следующий запуск)	Android 自定义页内设置
+dmCustomMapReveal	展开当前地图	Reveal current map	Revelar mapa actual		Открыть текущую карту	Android 自定义页内设置
+dmCustomMapRevealAction	展开地图	Reveal map	Revelar mapa		Открыть карту	Android 自定义页内设置
+dmCustomMapReady	返回游戏后展开当前区域	Reveal the area on return to game	Revelar al volver al juego		Открыть после возврата в игру	Android 自定义页内设置
+dmCustomMapWaiting	已请求，返回游戏后展开	Queued; return to game to reveal	En cola; vuelve al juego		В очереди; вернитесь в игру	Android 自定义页内设置
+dmCustomMapBusy	正在展开：%u / %u	Revealing: %u / %u	Revelando: %u / %u		Открытие: %u / %u	Android 自定义页内设置
+dmCustomMapDone	地图已展开：%u 个房间	Map revealed: %u rooms	Mapa revelado: %u salas		Карта открыта: %u комнат	Android 自定义页内设置
+dmCustomMapFailed	地图未全部展开，请在区域内重试	Map incomplete; retry in the area	Mapa incompleto; vuelve a intentarlo		Карта неполная; повторите в области	Android 自定义页内设置
+dmCustomMapUnavailable	请进入游戏后展开地图	Enter a game to reveal the map	Entra en una partida para revelar		Войдите в игру, чтобы открыть карту	Android 自定义页内设置
+dmCustomSaveError	保存失败，请重试应用	Save failed; retry Apply	Error al guardar; pulsa Aplicar		Ошибка записи; нажмите Применить	Android 自定义页内设置

@@ -2,7 +2,9 @@
 #include "../d2r_host_modules.h"
 #include "../input_backend.h"
 #include "../../host/dm.h"
+#include "../../host/dm_input.h"
 #include <math.h>
+#include <string.h>
 #include <unistd.h>
 
 struct dm_flags g_flag;uint64_t g_t0_ns;
@@ -11,12 +13,13 @@ static unsigned checks;
 static int pumping,free_cursor=1,full,bind,touch,pending,busy,world_result=-1,scene_nav;
 static uint32_t ui=1;static uint64_t scene=1,world=1;static unsigned world_seq,world_asked,full_on,full_off;
 static float asked_x,asked_y;
+static float mini[4]={.6f,.08f,.9f,.35f};
 static int ready(void *p){(void)p;return 1;}
 uint32_t dm_ui_gen(void){CHECK(pumping);return ui;}
 int dm_padmode_busy(void){CHECK(pumping);return busy;}
 int dm_ui_free_cursor(void){CHECK(pumping);return free_cursor;}
 int dm_ui_map_is_full(void){CHECK(pumping);return full;}
-int dm_ui_minimap_rect(float r[4]){CHECK(pumping);r[0]=.6f;r[1]=.08f;r[2]=.9f;r[3]=.35f;return 1;}
+int dm_ui_minimap_rect(float r[4]){CHECK(pumping);memcpy(r,mini,sizeof mini);return 1;}
 int dm_ui_bind_active(void){CHECK(pumping);return bind;}
 int dm_ui_touch_active(void){CHECK(pumping);return touch;}
 int dm_cursor_pending(void){return pending;} /* portable transport may read this atomic-only guard */
@@ -55,6 +58,21 @@ int main(void){
     tap(.7f,.1f);pump();world_result=0;world++;pump();CHECK(full_on==1); /* stale world answer. */
     pump();full=1;pump();tap(.5f,.2f);pump();CHECK(full_off==2&&!full); /* full map blank tap exits. */
     full=1;pump();contact(.15f,.7f);CHECK(snap().controls.joy_slot>=0);lift(.15f,.7f);pump();CHECK(full_off==2);full=0;
+    /* 原地图键覆盖小地图时仍可开关全屏，拖技能到同一区域仍取消施法。
+     * Minimap taps work under the former map key, while dragging a skill there still cancels it. */
+    mode(0);dm_android_touch_snapshot ms=snap();
+    CHECK(!(ms.controls.enabled_targets&(1u<<DM_TC_MAP)));
+    float mx=ms.controls.layout.target[DM_TC_MAP].x/ms.controls.layout.width;
+    float my=ms.controls.layout.target[DM_TC_MAP].y/ms.controls.layout.height;
+    mini[0]=mx-.06f;mini[1]=my-.01f;mini[2]=1;mini[3]=my+.3f;pump();
+    unsigned requests=world_asked,on=full_on,off=full_off;
+    tap(mx,my);CHECK(!(snap().controls.buttons&DM_BTN_MINUS));pump();CHECK(world_asked==requests+1);
+    world_result=0;pump();CHECK(full_on==on+1&&full);pump();
+    tap(mx,my);pump();CHECK(full_off==off+1&&!full);pump();
+    float sx=ms.controls.layout.target[DM_TC_SKILL1].x/ms.controls.layout.width;
+    float sy=ms.controls.layout.target[DM_TC_SKILL1].y/ms.controls.layout.height;
+    contact(sx,sy);contact(mx,my);CHECK(snap().controls.map_cancel_active&&snap().controls.finger[0].aim_cancelled);
+    lift(mx,my);pump();CHECK(world_asked==requests+1&&!snap().controls.map_cancel_active);
     mode(1);CHECK(!parked());usleep(320000);pump();CHECK(parked()); /* default belt focus yields. */
     free_cursor=0;mode(1);usleep(320000);pump();CHECK(!parked());free_cursor=1;pump();usleep(320000);bind=1;pump();CHECK(!parked());bind=0;touch=1;pump();CHECK(!parked());touch=0;pending=1;pump();CHECK(!parked());pending=0;holding(1);pump();CHECK(!parked());holding(0);pump();CHECK(parked());
     /* Plain item taps keep their descriptions until another touch. */

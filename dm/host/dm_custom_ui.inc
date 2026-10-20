@@ -23,9 +23,9 @@ static int custom_key_visible(int i) {
 #if defined(DM_ANDROID_HOST) && DM_ANDROID_HOST
     /* Keep the shared key table and its indices intact; Android has no cloud
      * implementation, so the iOS-only row must not participate in the UI. */
-    return strcmp(k_keys[i],"icloud")!=0;
+    return (i<K_SHOW_FPS||dm_android_custom_settings_apply)&&(!dm_android_custom_settings_apply||i!=K_Q3D)&&strcmp(k_keys[i],"icloud")!=0;
 #else
-    return 1;
+    return i<K_SHOW_FPS;
 #endif
 }
 static int custom_first_visible(void) {
@@ -51,30 +51,31 @@ void dm_custom_ui_pump(unsigned long long root) {
     load_once();if(atomic_exchange(&g_repaint,0))memset(seen,0,sizeof seen);
     if(atomic_load(&g_lang_explicit)<0)atomic_store(&g_val[0],lang_running());
     int pad=o->pad?o->pad(o->opaque):0;
-    uint64_t platform_action=o->action?custom_find(o,sp,"TouchAndroidSettings"):0;
-    int has_action=custom_visible(o,platform_action);
+
     uint64_t cm=custom_find(o,root,"ConfirmationModal");
     if(custom_visible(o,cm))pad=0;
     static int selected;
     static uint64_t selected_panel;static uint32_t selected_generation;
     if(selected_panel!=sp || selected_generation!=o->generation) {
-        selected_panel=sp;selected_generation=o->generation;selected=has_action?-1:custom_first_visible();
+        selected_panel=sp;selected_generation=o->generation;selected=custom_first_visible();
     }
-    if(!custom_key_visible(selected)&&!(selected==-1&&has_action))selected=custom_first_visible();
+    if(!custom_key_visible(selected))selected=custom_first_visible();
     uint64_t selection=custom_find(o,sp,"TouchCustomSel"),tw=0,cw=0;
     char name[64];
     if(pad) {
         uint64_t ev=o->keys(o->opaque,DM_BTN_UP|DM_BTN_DOWN|DM_BTN_A);
-        if(ev&DM_BTN_DOWN)selected=selected==-1?custom_first_visible():custom_next_visible(selected,1);
-        else if(ev&DM_BTN_UP)selected=has_action&&selected==custom_first_visible()?-1:selected==-1?-1:custom_next_visible(selected,-1);
-        if(selected==-1) {
-            tw=cw=platform_action;
-            if(ev&DM_BTN_A)o->action(o->opaque,platform_action);
-        } else {
-        snprintf(name,sizeof name,"TouchCustom_%s",k_keys[selected]);cw=custom_find(o,sp,selected==0?k_lang_box[LANG_N-1]:name);
+        if(ev&DM_BTN_DOWN)selected=custom_next_visible(selected,1);
+        else if(ev&DM_BTN_UP)selected=custom_next_visible(selected,-1);
+        snprintf(name,sizeof name,"TouchCustom_%s",k_keys[selected]);cw=custom_find(o,sp,selected==0?k_lang_box[LANG_N-1]:selected==K_RENDER_MODE?"TouchCustom_render_mode_3":name);
         snprintf(name,sizeof name,"TouchCustom_%s_Text",k_keys[selected]);tw=custom_find(o,sp,name);
-        if((ev&DM_BTN_A) && cw && seen[selected].w==cw && seen[selected].gen==o->generation) {
-            if(selected==0) {
+        if((ev&DM_BTN_A) && cw && (selected==K_MOD||selected==K_MAP_REVEAL)) {
+            if(o->action)o->action(o->opaque,cw);
+        } else if((ev&DM_BTN_A) && cw && seen[selected].w==cw && seen[selected].gen==o->generation) {
+            if(selected==K_RENDER_MODE) {
+                int pd=atomic_load(&g_pend[selected]),shown=pd>=0?pd:atomic_load(&g_val[selected]);
+                atomic_store(&g_pend[selected],(shown+1)%4);
+                for(int k=0;k<4;k++){snprintf(name,sizeof name,"TouchCustom_render_mode_%d",k);o->toggle(o->opaque,custom_find(o,sp,name),k==(shown+1)%4);}
+            } else if(selected==0) {
                 int pd=atomic_load(&g_pend[0]),shown=pd>=0?pd:atomic_load(&g_val[0]);
                 atomic_store(&g_pend[0],(shown+1)%LANG_N);
                 for(int k=0;k<LANG_N;k++)o->toggle(o->opaque,custom_find(o,sp,k_lang_box[k]),k==(shown+1)%LANG_N);
@@ -89,7 +90,6 @@ void dm_custom_ui_pump(unsigned long long root) {
                 }
             }
             }
-        }
         }
     }
     int32_t sr[4],tr[4],cr[4];int have_row=pad&&custom_visible(o,tw)&&custom_visible(o,cw)&&custom_rect(o,tw,tr)&&custom_rect(o,cw,cr);
@@ -113,6 +113,29 @@ void dm_custom_ui_pump(unsigned long long root) {
     }
     for(int i=0;i<NK;i++) {
         if(!custom_key_visible(i)){seen[i].w=seen[i].z=0;continue;}
+        if(i==K_MOD||i==K_MAP_REVEAL) {
+#if defined(DM_ANDROID_HOST) && DM_ANDROID_HOST
+            snprintf(name,sizeof name,"TouchCustom_%s",k_keys[i]);uint64_t w=custom_find(o,sp,name);
+            if(!custom_visible(o,w))continue;
+            int pressed=o->clicked&&o->clicked(o->opaque,w);
+            if(pressed&&!custom_visible(o,cm)&&o->action)o->action(o->opaque,w);
+            int pd=atomic_load(&g_pend[K_MOD]),shown=pd>=0?pd:atomic_load(&g_val[K_MOD]);char text[256];
+            if(!dm_android_custom_status)continue;dm_android_custom_status(i==K_MOD,shown,text,sizeof text);
+            snprintf(name,sizeof name,"TouchCustom_%s_Text",k_keys[i]);
+            if(o->text)o->text(o->opaque,custom_find(o,sp,name),text);
+#endif
+            continue;
+        }
+        if(i==K_RENDER_MODE) {
+            uint64_t boxes[4];int values[4],valid=1;
+            for(int k=0;k<4;k++){snprintf(name,sizeof name,"TouchCustom_render_mode_%d",k);boxes[k]=custom_find(o,sp,name);values[k]=custom_toggle_value(o,boxes[k]);valid&=custom_visible(o,boxes[k])&&values[k]>=0;}
+            if(!valid){seen[i].w=0;continue;}
+            int pd=atomic_load(&g_pend[i]),shown=pd>=0?pd:atomic_load(&g_val[i]),to=shown;
+            if(seen[i].w==boxes[3]&&seen[i].gen==o->generation)for(int k=0;k<4;k++)if(k!=shown&&values[k]){to=k;break;}
+            for(int k=0;k<4;k++)o->toggle(o->opaque,boxes[k],k==to);
+            if(to!=shown)atomic_store(&g_pend[i],to);
+            seen[i].w=boxes[3];seen[i].gen=o->generation;continue;
+        }
         if(i==0) {
             /* 四项语言单选仍使用平台校验过的控件传输。
              * The four language choices still use the platform-validated widget transport. */

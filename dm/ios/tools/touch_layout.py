@@ -1182,9 +1182,11 @@ def _custom_key(key): return 'dmCustom' + ''.join(w.capitalize() for w in key.sp
 # Android deliberately has no platform cloud-sync implementation. Keep the
 # shared key table and its indices unchanged, but omit the iCloud row from the
 # Android layout. The default (iOS/macOS) keeps the complete row list.
+_ANDROID_KEYS = ('show_fps', 'render_mode', 'clear_merge', 'store_elide', 'mod', 'map_reveal')
+
 def _custom_keys(platform=None):
     platform = (platform or os.environ.get('DM_PLATFORM', 'ios')).strip().lower()
-    return (('lang', '@dmCustomLang'),) + tuple((k, '@' + _custom_key(k)) for k in _CUSTOM_KEYS if not (platform == 'android' and k == 'icloud'))
+    return (('lang', '@dmCustomLang'),) + tuple((k, '@' + _custom_key(k)) for k in _CUSTOM_KEYS if not (platform == 'android' and k in ('icloud', 'q3d'))) + tuple((k, '@' + _custom_key(k)) for k in _ANDROID_KEYS if platform == 'android')
 # 视频页的类会把它不认识的表格行整行隐藏（控件树：我们的行 +0x50 = 0，只剩没有勾选框的标题行可见），所以各行不进表格；
 # 但它不动滚动区里别的控件——各行包在一个容器 TouchCustomRows 里、挂在原版滚动区 ScrollView 下，内容多高原版就滚多高、滚出列表框的由原版裁掉
 # （和别的选项页同一套滚动：拖动、滚动条、滚轮）。原先各行直接钉在面板上、不在滚动区里，列表框只有 1260 高，11 行把行高压到了 98。
@@ -1204,11 +1206,10 @@ _CUSTOM_TEST_ROWS = int(os.environ.get('DM_CUSTOM_TEST_ROWS', '0'))   # 测试�
 _CUSTOM_Q3D_H = 2 * _CUSTOM_LINE_H
 def _custom_geometry(keys):
     row_h = [(_CUSTOM_Q3D_H if k in ('q3d', 'touch_swap_above') else _CUSTOM_LINE_H) for k, _ in keys] + [_CUSTOM_LINE_H] * _CUSTOM_TEST_ROWS
-    # Android 顶部留一行原生按钮，iOS 的行序与布局保持原样。
-    # Reserve one native button row at the top on Android; keep the iOS row order and layout.
-    extra = _CUSTOM_LINE_H if 'icloud' not in {k for k, _ in keys} else 0
-    y = [_CUSTOM_TITLE_H + extra + sum(row_h[:i]) for i in range(len(row_h))]
-    return row_h, y, _CUSTOM_TITLE_H + extra + sum(row_h)
+    row_h = [(4 * _CUSTOM_LINE_H if k == 'render_mode' else h) for (k, _), h in zip(keys, row_h)] + [_CUSTOM_LINE_H] * _CUSTOM_TEST_ROWS
+    y = [_CUSTOM_TITLE_H + sum(row_h[:i]) for i in range(len(row_h))]
+    return row_h, y, _CUSTOM_TITLE_H + sum(row_h)
+
 def _custom_toggle_row(y, key, label):
     h = _CUSTOM_LINE_H
     return ('        { "type": "TextBoxWidget", "name": "TouchCustom_%s_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "%s", "style": "$StyleSettingsText", "style/options/newlineHandling": "standard" } },\n'
@@ -1274,6 +1275,18 @@ def _custom_q3d_row(y, setting="q3d"):
         yy = y + k * h
         out += text(nm + '_Label', yy + 10, 100, key, False) + text(nm + '_Hint', yy + 100, 70, key + 'Hint', True) + box(nm, yy + 15)
     return out
+def _custom_android_row(y, key, label):
+    if key in ('mod', 'map_reveal'):
+        row = _custom_toggle_row(y, key, label)
+        start = row.index('        { "type": "ToggleButtonWidget"')
+        action = _btn('TouchCustom_' + key, y + 25, '@dmCustom' + ('ModNext' if key == 'mod' else 'MapRevealAction'),
+                      'PanelManager:ClosePanel:TouchCustom_' + key, x=1010, anchor=False)
+        return row[:start] + action
+    if key == 'render_mode':
+        return ''.join(_custom_toggle_row(y + k * _CUSTOM_LINE_H, 'render_mode_' + str(k), '@dmCustomRenderMode' + str(k))
+                       for k in range(4)) + ('{ "type": "TextBoxWidget", "name": "TouchCustom_render_mode_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "", "style": "$StyleSettingsText" } },\n' % (y, 4 * _CUSTOM_LINE_H))
+    return _custom_toggle_row(y, key, label)
+
 def _custom_page(text, keys=None):
     if '"name": "VideoOptionsPanel"' not in text or '"name": "OptionsTable"' not in text: raise SystemExit('touch_layout：主机版视频页不是原样（原版布局变了？），自定义页没换')
     keys = tuple(keys if keys is not None else _custom_keys())
@@ -1290,8 +1303,7 @@ def _custom_page(text, keys=None):
            '            { "type": "TableWidget", "name": "OptionsTable", "fields": { "columns": [ "$OptionsTableColumn1", "$OptionsTableColumn2" ], "rowHeight": %d }, "children": [\n' % _CUSTOM_TITLE_H
            + title + '            ] },\n'
            + '            { "type": "Widget", "name": "TouchCustomRows", "fields": { "rect": { "x": 0, "y": 0, "width": 1500, "height": %d } }, "children": [\n' % height
-           + (_btn('TouchAndroidSettings', _CUSTOM_TITLE_H + 15, '@dmAndroidSettings', 'PanelManager:ClosePanel:TouchAndroidSettings', x=470, anchor=False) if 'icloud' not in {k for k, _ in keys} else '')
-           + _custom_lang_row(y[0], compact='icloud' not in {k for k, _ in keys}) + ''.join((_custom_q3d_row(y[i], k) if k in ('q3d', 'touch_swap_above') else _custom_toggle_row(y[i], k, l)) for i, (k, l) in enumerate(keys) if i) + _custom_lang_hint(y[0])
+           + _custom_lang_row(y[0], compact='icloud' not in {k for k, _ in keys}) + ''.join((_custom_q3d_row(y[i], k) if k in ('q3d', 'touch_swap_above') else _custom_android_row(y[i], k, l) if k in _ANDROID_KEYS else _custom_toggle_row(y[i], k, l)) for i, (k, l) in enumerate(keys) if i) + _custom_lang_hint(y[0])
            + ''.join('        { "type": "TextBoxWidget", "name": "TouchCustomTest%d_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "@KeyBindingTypeCustom", "style": "$StyleSettingsText" } },\n'
                      % (n, y[len(keys) + n], _CUSTOM_LINE_H) for n in range(_CUSTOM_TEST_ROWS)) +
            # 手柄模式的选中框（同符文之语清单 TouchRwSel）：框住十字键选中的那一行，宿主摆（dm_custom.c）；触屏模式一直在屏外（只把 x 挪出去、y 留在内容范围内：滚动区按子控件的范围算内容高度，y 放到 99999 会把可滚范围撑到十万）。和各行在同一个容器里，跟着滚

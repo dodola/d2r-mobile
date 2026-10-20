@@ -38,7 +38,7 @@ host = (root / 'host/dm_custom.c').read_text(encoding='utf-8')
 host_keys = re.findall(
     r'"([a-z_0-9]+)"',
     re.search(r'k_keys\[\].*?=\s*\{(.*?)\}', host, re.S)[1])
-assert host_keys == [key for key, _ in layout._CUSTOM_ALL]
+assert host_keys == [key for key, _ in layout._CUSTOM_ALL] + list(layout._ANDROID_KEYS)
 defaults = [int(x) for x in re.search(
     r'k_def\[NK\].*?=\s*\{(.*?)\}', host, re.S)[1].split(',')]
 assert len(defaults) == len(host_keys)
@@ -55,13 +55,18 @@ assert 'TouchCustom_icloud' in ios_nodes
 android_keys, android_nodes, android_height = generated_page('android')
 assert 'icloud' not in [key for key, _ in android_keys]
 assert 'TouchCustom_icloud' not in android_nodes
-assert 'TouchCustom_q3d' in android_nodes
+assert 'TouchCustom_q3d' not in android_nodes
 assert 'TouchCustom_touch_swap_above' in android_nodes
-assert android_height == ios_height
-assert 'TouchAndroidSettings' not in ios_nodes
-assert android_nodes['TouchAndroidSettings']['type'] == 'ButtonWidget'
-assert android_nodes['TouchAndroidSettings']['fields']['onClickMessage'] == 'PanelManager:ClosePanel:TouchAndroidSettings'
-assert android_nodes['TouchAndroidSettings']['fields']['rect']['y'] < android_nodes['TouchCustom_lang_Text']['fields']['rect']['y']
+assert android_height > ios_height
+assert 'TouchAndroidSettings' not in ios_nodes and 'TouchAndroidSettings' not in android_nodes
+for key in ('show_fps', 'clear_merge', 'store_elide'):
+    assert android_nodes['TouchCustom_' + key]['type'] == 'ToggleButtonWidget'
+for mode in range(4):
+    assert android_nodes['TouchCustom_render_mode_' + str(mode)]['type'] == 'ToggleButtonWidget'
+for key in ('mod', 'map_reveal'):
+    assert android_nodes['TouchCustom_' + key]['type'] == 'ButtonWidget'
+    assert android_nodes['TouchCustom_' + key]['fields']['onClickMessage'].endswith('TouchCustom_' + key)
+assert android_nodes['TouchCustom_lang_Text']['fields']['rect']['y'] == layout._CUSTOM_TITLE_H
 for lang in ('Zh', 'En', 'Es', 'Ru'):
     name = 'TouchCustomLang%s_Text' % lang
     assert android_nodes[name]['fields']['style/pointSize'] == 36

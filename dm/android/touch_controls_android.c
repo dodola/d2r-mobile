@@ -105,6 +105,9 @@ static void restrict_layout(void) {
         controls.belt_rows=game_state.belt_rows>0?game_state.belt_rows:4;
         mask=target_mask;
         if (!mask) mask=game_state.navigation ? dm_tc_nav_mask(!(game_state.panel_bits & 4)) : ((1u<<DM_TC_COUNT)-1);
+        /* 与 iOS 一致，使用小地图手势；保留右上几何供拖技能取消。
+         * Match iOS: use minimap gestures, retaining the geometry for skill-drag cancellation. */
+        mask&=~(1u<<DM_TC_MAP);
     }
     if(ready && controls.enabled_targets!=mask)cancel_for_reason(DM_ATF_RESET_SCENE);
     dm_tc_enable_targets(&controls,mask);

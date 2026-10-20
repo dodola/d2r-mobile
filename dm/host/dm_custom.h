@@ -22,3 +22,7 @@ void dm_custom_init(const char *dir);   // 设置文件所在目录（iOS 外壳
 // The following are only for the UI wiring of the custom page
 void dm_custom_on_uimsg(const char *cat, const char *act, const char *arg);   // 选项页应用 / 默认 / 放弃（dm_cursor.c 的界面消息回调转来） | Options page apply / default / discard (forwarded from the UI message callback in dm_cursor.c)
 void dm_custom_ui_pump(unsigned long long root);                               // 游戏主线程每帧：选项页开着时读各行勾选框（控件名 TouchCustom_<键>） | Game main thread, every frame: while the options page is open, read the checkbox of each row (widget name TouchCustom_<key>)
+
+// Android 页内设置：show_fps、render_mode（0 自动 / 1 原画质 / 2 均衡 / 3 性能）、clear_merge、store_elide、mod；共用应用 / 放弃 / 默认。
+// Android inline settings: show_fps, render_mode (0 auto / 1 original / 2 balanced / 3 performance), clear_merge, store_elide, mod; share Apply / Discard / Default.
+void dm_custom_cycle_mod(void);

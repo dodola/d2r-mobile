@@ -17,19 +17,21 @@
 static int checks,layouts;
 #define CHECK(x) do{++checks;if(!(x)){fprintf(stderr,"Custom fixture failed line=%d\n",__LINE__);return 1;}}while(0)
 static void put64(void *w,size_t off,uint64_t value){memcpy((unsigned char *)w+off,&value,8);}
-static uint8_t *widgets[80];static unsigned used;static uint64_t base;
+static uint8_t *widgets[100];static unsigned used;static uint64_t base;
 static uint8_t *widget(const char *name,uint64_t vt,uint8_t *parent,int x,int y,int width,int height) {
-    assert(used<80);uint8_t *w=calloc(1,0xb00);assert(w);widgets[used++]=w;
+    assert(used<100);uint8_t *w=calloc(1,0xb00);assert(w);widgets[used++]=w;
     put64(w,0,base+vt);put64(w,8,(uintptr_t)name);put64(w,0x30,(uintptr_t)parent);w[0x50]=w[0x51]=1;
     int32_t rect[4]={x,y,width,height};memcpy(w+0x70,rect,16);return w;
 }
 static void layout_record(uint64_t w){assert(w);layouts++;}
-static void trampoline(uint8_t *memory,size_t offset) {
-    uint32_t instructions[2]={0x58000050,0xd61f0200};uint64_t fn=(uintptr_t)layout_record;
+static void trampoline_to(uint8_t *memory,size_t offset,void *target) {
+    uint32_t instructions[2]={0x58000050,0xd61f0200};uint64_t fn=(uintptr_t)target;
     memcpy(memory+offset,instructions,8);memcpy(memory+offset+8,&fn,8);
     __builtin___clear_cache((char *)memory+offset,(char *)memory+offset+16);
     uintptr_t page=((uintptr_t)memory+offset)&~4095ull;assert(!mprotect((void *)page,4096,PROT_READ|PROT_EXEC));
 }
+static void trampoline(uint8_t *memory,size_t offset){trampoline_to(memory,offset,layout_record);}
+static void *text_assign(uint64_t at,const char *text,uint64_t n){char *copy=calloc(1,n+1);assert(copy);memcpy(copy,text,n);put64((void *)at,0,(uintptr_t)copy);put64((void *)at,8,n);return (void *)at;}
 static void (*scope)(int);static void (*pump)(unsigned long long);static uint8_t *root;
 static void run(void){scope(1);pump((uintptr_t)root);scope(0);}
 static void *wrong_thread(void *unused){(void)unused;run();return NULL;}
@@ -71,7 +73,7 @@ int main(int argc,char **argv) {
     uint8_t *scroll=widget("ScrollView",DM_VT_BUTTON,panel,0,0,1500,1260);
     uint8_t *view=widget("view",DM_VT_BUTTON,scroll,0,0,1500,3200);
     uint8_t *rows=widget("TouchCustomRows",DM_VT_BUTTON,view,0,0,1500,3200);
-    uint64_t top[2]={(uintptr_t)panel,(uintptr_t)modal},panel_children[1]={(uintptr_t)scroll},scroll_children[1]={(uintptr_t)view},view_children[1]={(uintptr_t)rows},row_children[64];
+    uint64_t top[2]={(uintptr_t)panel,(uintptr_t)modal},panel_children[1]={(uintptr_t)scroll},scroll_children[1]={(uintptr_t)view},view_children[1]={(uintptr_t)rows},row_children[96];
     put64(root,0x58,(uintptr_t)top);put64(root,0x60,2);put64(panel,0x58,(uintptr_t)panel_children);put64(panel,0x60,1);
     put64(scroll,0x58,(uintptr_t)scroll_children);put64(scroll,0x60,1);put64(view,0x58,(uintptr_t)view_children);put64(view,0x60,1);
     put64(mods[0].base,0x2f05458,(uintptr_t)root);put64(mods[0].base,0x20c0000+7*8,base+0xae5f28);
@@ -104,8 +106,8 @@ int main(int argc,char **argv) {
     gate(0x8100,"svc",SVC_HOST_C2S_DELIVER,0);size_t size=mods[0].size;mods[0].size=0x1000;CHECK(!attach(&mods[0]));mods[0].size=size;CHECK(attach(&mods[0]));
     pump((uintptr_t)root);CHECK(box[1][0xa88]==127);run();
     CHECK(box[6][0xa88]==127);
-    for(int i=0;i<16;i++){if(i==6)continue;int def=i!=0&&i!=11&&i!=12&&i!=15;CHECK(frames(box[i],def)&&get(keys[i])==def);}
-    CHECK(frames(zh,1)&&frames(smooth,1)&&frames(near,1)&&!panel[0x1a0]);
+    for(int i=0;i<16;i++){if(i==6||i==12)continue;int def=i!=0&&i!=11&&i!=12&&i!=15;CHECK(frames(box[i],def)&&get(keys[i])==def);}
+    CHECK(frames(zh,1)&&frames(near,1)&&!panel[0x1a0]);
     CHECK(fps_setting()==60);box[11][0xa88]=1;run();CHECK(panel[0x1a0]&&fps_setting()==60);
     message("OptionsPanelMessage","CancelChanges","");run();CHECK(fps_setting()==60&&!checked(box[11]));
     box[11][0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(fps_setting()==30);
@@ -120,14 +122,7 @@ int main(int argc,char **argv) {
     message("OptionsPanelMessage","ResetToDefaults","");run();CHECK(frames(box[1],1)&&panel[0x1a0]&&!get("auto_mana"));
     message("OptionsPanelMessage","CancelChanges","");run();CHECK(frames(box[1],0)&&!panel[0x1a0]);
     message("OptionsPanelMessage","ResetToDefaults","");run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("auto_mana")&&!panel[0x1a0]);
-    CHECK(quality_mode()==0);
-    smooth[0xa88]=0;run();CHECK(frames(smooth,1)&&!checked(box[12])&&!panel[0x1a0]&&quality_mode()==0);
-    box[12][0xa88]=1;run();CHECK(checked(box[12])&&!checked(smooth)&&panel[0x1a0]&&!get("q3d")&&quality_mode()==0);
-    message("OptionsPanelMessage","CancelChanges","");run();CHECK(frames(box[12],0)&&frames(smooth,1)&&!panel[0x1a0]&&quality_mode()==0);
-    box[12][0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("q3d")==1&&quality_mode()==1&&!panel[0x1a0]);
-    smooth[0xa88]=1;run();CHECK(quality_mode()==1&&get("q3d")==1&&panel[0x1a0]);
-    message("OptionsPanelMessage","CancelChanges","");run();CHECK(quality_mode()==1&&checked(box[12]));
-    smooth[0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("q3d")==0&&quality_mode()==0&&!panel[0x1a0]);
+    CHECK(quality_mode()==0&&box[12][0xa88]==127);
     near[0xa88]=0;run();CHECK(frames(near,1)&&!checked(box[15])&&!panel[0x1a0]);
     box[15][0xa88]=1;run();CHECK(checked(box[15])&&!checked(near)&&panel[0x1a0]&&!get("touch_swap_above"));
     message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("touch_swap_above")&&!panel[0x1a0]);
@@ -200,21 +195,55 @@ int main(int argc,char **argv) {
     for(int i=0;i<4;i++)tick();CHECK(!page_filter(0)&&page_filter(DM_BTN_A)==DM_BTN_A);run();CHECK(!checked(box[1])&&!panel[0x1a0]);
     modal[0x50]=0;run();CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(checked(box[1])&&panel[0x1a0]);
     message("OptionsPanelMessage","CancelChanges","");run();
-    /* 设置入口只排队：保留待应用值，确认框与错误控件类型不得触发。
-     * The settings entry only queues a request: preserve pending values and reject modal/wrong-class activation. */
-    int (*take_request)(void)=dlsym(lib,"dm_android_custom_take_request");
-    void (*platform_message)(const char *,const char *,const char *)=dlsym(lib,"dm_android_custom_message");
-    CHECK(take_request&&platform_message&&!take_request());
-    box[1][0xa88]=1;run();CHECK(panel[0x1a0]&&!get("auto_mana"));
-    uint8_t *settings=widget("TouchAndroidSettings",DM_VT_BUTTON,rows,470,15,470,128);
-    row_children[count++]=(uintptr_t)settings;put64(rows,0x60,count);generation(18);run();
-    CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(take_request()==1&&!take_request()&&panel[0x1a0]&&!get("auto_mana"));
-    CHECK(!page_filter(DM_BTN_A));run();CHECK(!take_request());
-    modal[0x50]=1;run();for(int i=0;i<4;i++)tick();CHECK(!page_filter(0)&&page_filter(DM_BTN_A)==DM_BTN_A);run();CHECK(!take_request());modal[0x50]=0;
-    put64(settings,0,base+DM_VT_TOGGLE);run();CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(!take_request());
-    put64(settings,0,base+DM_VT_BUTTON);
-    platform_message("PanelManager","OpenPanel","TouchAndroidSettings");CHECK(!take_request());
-    platform_message("PanelManager","ClosePanel","TouchAndroidSettings");CHECK(take_request()==1&&!take_request());
-    printf("ANDROID_D2R_CUSTOM_OK checks=%d shared_rows=16 android_navigable=15 checked_widget_transport=1 original_layout_call_recorded=1 apply_discard_defaults=1 radio_pairs=3 controller_page_keys=1 controller_repeat_guard=1 modal_release=1 dirty_original_contract=1 disk_commit=1 lifetime_guards=1 guest_thread_scope=1 platform_settings_entry=1 synthetic_memory=1 original_game_not_claimed=1\n",checks);
+    /* 页内设置共享待定语义；原生按钮和文字写回仍由校验传输控制。
+     * Inline settings share pending semantics; checked transport still controls buttons and text writes. */
+    void (*platform_message)(const char *,const char *,const char *)=dlsym(lib,"dm_android_custom_message");CHECK(platform_message);
+    uint8_t *fps=widget("TouchCustom_show_fps",DM_VT_TOGGLE,rows,1315,3000,70,70);
+    uint8_t *clear=widget("TouchCustom_clear_merge",DM_VT_TOGGLE,rows,1315,4000,70,70);
+    uint8_t *store=widget("TouchCustom_store_elide",DM_VT_TOGGLE,rows,1315,4200,70,70);
+    row_children[count++]=(uintptr_t)fps;row_children[count++]=(uintptr_t)clear;row_children[count++]=(uintptr_t)store;
+    const char *mode_names[]={"TouchCustom_render_mode_0","TouchCustom_render_mode_1","TouchCustom_render_mode_2","TouchCustom_render_mode_3"};uint8_t *mode[4];
+    for(int k=0;k<4;k++){mode[k]=widget(mode_names[k],DM_VT_TOGGLE,rows,1315,3200+k*180,70,70);row_children[count++]=(uintptr_t)mode[k];}
+    uint8_t *mod=widget("TouchCustom_mod",DM_VT_BUTTON,rows,1010,4400,470,128);
+    uint8_t *map=widget("TouchCustom_map_reveal",DM_VT_BUTTON,rows,1010,4600,470,128);
+    uint8_t *mod_text=widget("TouchCustom_mod_Text",DM_VT_TEXT,rows,0,4400,1000,180);
+    uint8_t *map_text=widget("TouchCustom_map_reveal_Text",DM_VT_TEXT,rows,0,4600,1000,180);
+    row_children[count++]=(uintptr_t)mod;row_children[count++]=(uintptr_t)map;row_children[count++]=(uintptr_t)mod_text;row_children[count++]=(uintptr_t)map_text;
+    put64(rows,0x60,count);trampoline_to(mods[0].base,0x136e5c,text_assign);trampoline(mods[0].base,0xadc434);run();
+    CHECK(!checked(fps)&&checked(clear)&&checked(store)&&checked(mode[0])&&!panel[0x1a0]);
+    fps[0xa88]=1;clear[0xa88]=0;store[0xa88]=0;mode[2][0xa88]=1;run();
+    CHECK(panel[0x1a0]&&!get("show_fps")&&get("clear_merge")&&get("render_mode")==0);
+    message("OptionsPanelMessage","CancelChanges","");run();CHECK(!checked(fps)&&checked(clear)&&checked(store)&&checked(mode[0])&&!checked(mode[2])&&!panel[0x1a0]);
+    fps[0xa88]=1;clear[0xa88]=0;mode[2][0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();
+    CHECK(get("show_fps")&&!get("clear_merge")&&get("store_elide")&&get("render_mode")==2&&quality_mode()==1&&!panel[0x1a0]);
+    snprintf(path,sizeof path,"%s/diagnostics/render-scale.txt",dir);f=fopen(path,"r");CHECK(f&&fgets(saved,sizeof saved,f)&&!strcmp(saved,"0.9\n"));fclose(f);
+    snprintf(path,sizeof path,"%s/diagnostics/attachment-mode.txt",dir);f=fopen(path,"r");unsigned long long seq;int flags;CHECK(f&&fscanf(f,"%llu %d",&seq,&flags)==2&&seq>0&&flags==2);fclose(f);
+    mode[3][0xa88]=1;run();CHECK(checked(mode[3])&&!checked(mode[2])&&get("render_mode")==2);
+    message("OptionsPanelMessage","ResetToDefaults","");run();CHECK(!checked(fps)&&checked(clear)&&checked(store)&&checked(mode[0])&&get("render_mode")==2);
+    message("OptionsPanelMessage","CancelChanges","");run();CHECK(checked(fps)&&!checked(clear)&&checked(mode[2])&&!panel[0x1a0]);
+    message("OptionsPanelMessage","ResetToDefaults","");run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("render_mode")==0&&quality_mode()==0&&!get("show_fps")&&get("clear_merge"));
+    char mods_path[1200];snprintf(mods_path,sizeof mods_path,"%s/mods/example",dir);CHECK(!mkdir(mods_path,0700));snprintf(path,sizeof path,"%s/package.txt",mods_path);f=fopen(path,"w");CHECK(f);fclose(f);
+    void (*settings_init)(const char *)=dlsym(lib,"dm_android_custom_settings_init");CHECK(settings_init);settings_init(dir);
+    platform_message("PanelManager","OpenPanel","TouchCustom_mod");run();CHECK(!panel[0x1a0]);
+    platform_message("PanelManager","ClosePanel","TouchCustom_mod");run();CHECK(panel[0x1a0]&&!get("mod"));
+    CHECK(strstr(*(char **)(mod_text+0x88),"example"));
+    message("OptionsPanelMessage","CancelChanges","");run();CHECK(!get("mod")&&!panel[0x1a0]);
+    put64(mod,0,base+DM_VT_TOGGLE);platform_message("PanelManager","ClosePanel","TouchCustom_mod");run();CHECK(!panel[0x1a0]);put64(mod,0,base+DM_VT_BUTTON);
+    platform_message("PanelManager","ClosePanel","TouchCustom_mod");run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("mod")==1&&!panel[0x1a0]);
+    snprintf(path,sizeof path,"%s/mods/active.txt",dir);f=fopen(path,"r");CHECK(f&&fgets(saved,sizeof saved,f)&&!strcmp(saved,"example\n"));fclose(f);
+    mode[1][0xa88]=1;run();snprintf(path,sizeof path,"%s/diagnostics/render-scale.txt.custom-tmp",dir);CHECK(!mkdir(path,0700));message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("render_mode")==0&&panel[0x1a0]&&checked(mode[1]));CHECK(!rmdir(path));
+    message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("render_mode")==1&&!panel[0x1a0]);
+    generation(18);run();
+    for(int k=0;k<15;k++){CHECK(!page_filter(0)&&!page_filter(DM_BTN_DOWN));run();}
+    CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(checked(mode[2])&&get("render_mode")==1&&panel[0x1a0]);
+    message("OptionsPanelMessage","CancelChanges","");run();CHECK(checked(mode[1])&&!panel[0x1a0]);
+    for(int k=0;k<3;k++){CHECK(!page_filter(0)&&!page_filter(DM_BTN_DOWN));run();}
+    CHECK(!page_filter(0)&&!page_filter(DM_BTN_A));run();CHECK(panel[0x1a0]&&get("mod")==1);
+    message("OptionsPanelMessage","CancelChanges","");run();CHECK(!panel[0x1a0]);
+    modal[0x50]=1;platform_message("PanelManager","ClosePanel","TouchCustom_mod");run();modal[0x50]=0;run();CHECK(!panel[0x1a0]);
+    int loaded_mode=0,loaded_clear=0,loaded_store=0,loaded_mod=0;
+    void (*settings_load)(int *,int *,int *,int *)=dlsym(lib,"dm_android_custom_settings_load");CHECK(settings_load);
+    settings_load(&loaded_mode,&loaded_clear,&loaded_store,&loaded_mod);CHECK(loaded_mode==1&&loaded_clear&&loaded_store&&loaded_mod==1);
+    printf("ANDROID_D2R_CUSTOM_OK checks=%d inline_settings=1 four_quality_choices=1 fps=1 graphics_flags=1 mod_cycle=1 apply_discard_defaults=1 persistence_failure_retry=1 checked_transport=1 synthetic_memory=1\n",checks);
     return 0;
 }

@@ -5,6 +5,7 @@
 static unsigned checks,initialized,revealed;
 static uint64_t test_now=1000000000;
 static int held,rift,fail_init;
+static int hud_area=2;
 static uint8_t player[512],path[64],active[64],extra[160],level[512],map[0x840],rooms[20][160];
 static dm_android_d2r_scene_status scene={.game=1,.world_epoch=1};
 static dm_android_window_state window={.focus=1};
@@ -13,6 +14,7 @@ static void ptr(void *base,size_t off,void *value){uint64_t p=(uintptr_t)value;m
 static void u32(void *base,size_t off,uint32_t value){memcpy((char *)base+off,&value,4);}
 uint64_t now_ns(void){return test_now;}
 uint32_t dm_hud_held(void){return held;}
+void dm_hud_get(dm_hud_info *out){*out=(dm_hud_info){.valid=scene.game,.area=hud_area};}
 int dm_rift_active(void){return rift;}
 void dm_android_d2r_scene_status_get(dm_android_d2r_scene_status *out){*out=scene;}
 void dm_android_platform_get_window(dm_android_window_state *out){*out=window;}
@@ -48,6 +50,30 @@ int main(void){
     unsigned before=revealed;test_now+=31000000000ull;pump();CHECK(status().error==ETIMEDOUT&&revealed==before);pump();
     fail_init=1;ptr(rooms[0],0x58,NULL);CHECK(!dm_android_map_request(NULL));pump();CHECK(status().state==DM_MAP_FAILED&&status().error==EIO);fail_init=0;pump();
     CHECK(!dm_android_map_request(NULL));pump();CHECK(status().done==8);scene.world_epoch++;pump();CHECK(status().state==DM_MAP_CANCELLED&&status().done==8);
+    /* 设置页中仅排队，解除暂停后执行；换区、退出和超时撤销。
+     * Options enqueue only; unpause to execute, or cancel on area change, exit or timeout. */
+    scene.navigation=1;module.base[0x2d5ff51]=1;pump();before=revealed;
+    CHECK(!status().ready&&status().game);CHECK(dm_android_map_request(NULL)==EAGAIN);
+    CHECK(!dm_android_map_request_when_ready(&seq));CHECK(status().state==DM_MAP_WAITING);
+    CHECK(dm_android_map_request_when_ready(NULL)==EBUSY&&dm_android_map_request(NULL)==EBUSY);
+    pump();CHECK(status().state==DM_MAP_WAITING&&revealed==before);
+    scene.navigation=0;pump();CHECK(status().state==DM_MAP_WAITING&&revealed==before);
+    module.base[0x2d5ff51]=0;window.focus=3;pump();CHECK(status().state==DM_MAP_WAITING&&revealed==before);
+    window.focus=1;pump();CHECK(status().state==DM_MAP_RUNNING&&status().done==8&&status().area==2);
+    pump();pump();CHECK(status().state==DM_MAP_DONE&&revealed==before+20);pump();
+    scene.navigation=1;pump();CHECK(status().state==DM_MAP_DONE&&status().done==20);
+    scene.navigation=0;pump();CHECK(status().state==DM_MAP_DONE);
+    for(unsigned i=0;i<4;i++) {
+        scene.navigation=1;module.base[0x2d5ff51]=1;pump();before=revealed;
+        CHECK(!dm_android_map_request_when_ready(NULL));
+        if(i==0)scene.world_epoch++;if(i==1)scene.game=0;if(i==2)test_now+=31000000000ull;
+        if(i==3)hud_area=3;
+        pump();CHECK(status().state==(i==2?DM_MAP_FAILED:DM_MAP_CANCELLED)&&revealed==before);
+        CHECK(status().error==(i==2?ETIMEDOUT:ECANCELED));
+        if(i==1)CHECK(dm_android_map_request_when_ready(NULL)==EAGAIN);
+        hud_area=2;scene.game=1;scene.navigation=0;module.base[0x2d5ff51]=0;pump();
+    }
+    test_now+=600000000;CHECK(dm_android_map_request_when_ready(NULL)==EAGAIN);
     printf("{\"passed\":true,\"checks\":%u,\"original_game_executed\":false}\n",checks);
     free(module.base);return 0;
 }

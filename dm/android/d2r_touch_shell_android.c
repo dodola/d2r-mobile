@@ -36,6 +36,9 @@ void dm_android_d2r_touch_shell_event(dm_tc_state *s,uint32_t generation,int slo
         shell_observation *o=&shell.cache;
         if(s->navigation_mode||!recent(o,now)||!o->game||o->navigation||o->pad||o->scope.generation!=generation||s->layout.width<=0||s->layout.height<=0)return;
         int hit=dm_tc_hit(&s->layout,f->x,f->y);
+        /* 隐藏的地图键不占小地图点击区；技能拖动仍沿用其取消区域。
+         * The hidden map key yields to minimap taps; skill drags keep their cancellation region. */
+        if(hit==DM_TC_MAP && !(s->enabled_targets&(1u<<DM_TC_MAP)))hit=DM_TC_NONE;
         if(hit>=0||hit==DM_TC_SWAP||f->target==DM_TC_DIFF||f->target==DM_TC_EDGE)return;
         float band=(o->mini[3]-o->mini[1])*s->layout.height/4;
         if(band<30)band=fminf(30,(o->mini[3]-o->mini[1])*s->layout.height*.4f);

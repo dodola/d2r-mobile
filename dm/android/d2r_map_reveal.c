@@ -17,7 +17,7 @@ static dm_android_map_status map_status;
 static struct {
     uint64_t sampled,world,player,level,callback,deadline;
     uint64_t rooms[MAP_ROOMS];
-    uint32_t id,version;
+    uint32_t id,version,area;
 } map_job;
 static int map_read(uint64_t object,size_t offset,void *out,size_t size) {
     if(!object || object>UINT64_MAX-offset || object+offset>UINT64_MAX-size)return 0;
@@ -52,19 +52,21 @@ void dm_android_map_status_get(dm_android_map_status *out) {
     if(!out)return;
     pthread_mutex_lock(&map_lock);*out=map_status;pthread_mutex_unlock(&map_lock);
 }
-int dm_android_map_request(uint64_t *sequence) {
+static int map_request(uint64_t *sequence,int defer) {
     pthread_mutex_lock(&map_lock);
     uint64_t now=now_ns();int error=0;
-    if(map_status.state==DM_MAP_QUEUED || map_status.state==DM_MAP_RUNNING)error=EBUSY;
-    else if(!map_status.ready || now<map_job.sampled || now-map_job.sampled>500000000ull)error=EAGAIN;
+    if(map_status.state==DM_MAP_WAITING || map_status.state==DM_MAP_QUEUED || map_status.state==DM_MAP_RUNNING)error=EBUSY;
+    else if(!(defer?(map_status.game&&map_job.area):map_status.ready) || now<map_job.sampled || now-map_job.sampled>500000000ull)error=EAGAIN;
     else {
-        map_status.sequence++;map_status.state=DM_MAP_QUEUED;
+        map_status.sequence++;map_status.state=defer?DM_MAP_WAITING:DM_MAP_QUEUED;
         map_status.total=map_status.done=0;map_status.error=0;map_status.ready=0;
         map_job.deadline=now+30000000000ull;
         if(sequence)*sequence=map_status.sequence;
     }
     pthread_mutex_unlock(&map_lock);return error;
 }
+int dm_android_map_request(uint64_t *sequence){return map_request(sequence,0);}
+int dm_android_map_request_when_ready(uint64_t *sequence){return map_request(sequence,1);}
 static uint64_t map_level(uint64_t player) {
     uint64_t path=0,room=0,extra=0,level=0;
     if(map_read(player,0x38,&path,8)&&map_read(path,0x20,&room,8)&&
@@ -89,6 +91,7 @@ void dm_android_map_pump(void) {
     /* Only this original-thread function reads guest pointers. */
     dm_android_d2r_scene_status scene;dm_android_d2r_scene_status_get(&scene);
     dm_android_window_state window;dm_android_platform_get_window(&window);
+    dm_hud_info hud;dm_hud_get(&hud);
     uint64_t player=0,level=0,map=0,callback=0;uint32_t id=0,mode=0,area=0;
     uint8_t version=0,paused=1,rift_pause=1;
     int ready=scene.game && !scene.navigation && window.focus==1 && !dm_rift_active() && !dm_hud_held();
@@ -103,6 +106,24 @@ void dm_android_map_pump(void) {
         callback>=(uintptr_t)map_image->base && callback-(uintptr_t)map_image->base<map_image->text_end && !(callback&3);
     uint64_t now=now_ns();
     pthread_mutex_lock(&map_lock);
+    map_status.game=scene.game;
+    /* 等待期间不调用游戏函数；换区、退出或超时会撤销请求。
+     * Waiting never invokes guest callbacks; changing area, exiting or timing out cancels it. */
+    if(map_status.state==DM_MAP_WAITING) {
+        if(!scene.game || scene.world_epoch!=map_job.world ||
+           (hud.valid && hud.area>0 && (uint32_t)hud.area!=map_job.area) || (ready && area!=map_job.area)) {
+            map_status.state=DM_MAP_CANCELLED;map_status.error=ECANCELED;
+        } else if(now>=map_job.deadline) {
+            map_status.state=DM_MAP_FAILED;map_status.error=ETIMEDOUT;
+        } else if(!ready) {
+            map_status.ready=0;pthread_mutex_unlock(&map_lock);return;
+        } else {
+            map_job.player=player;map_job.id=id;map_job.level=level;
+            map_job.callback=callback;map_job.version=version;
+            map_status.area=area;
+            map_status.state=DM_MAP_QUEUED;
+        }
+    }
     int busy=map_status.state==DM_MAP_QUEUED || map_status.state==DM_MAP_RUNNING;
     int changed=player!=map_job.player || id!=map_job.id || level!=map_job.level || scene.world_epoch!=map_job.world;
     if(busy && (!ready || player!=map_job.player || id!=map_job.id || level!=map_job.level ||
@@ -111,10 +132,18 @@ void dm_android_map_pump(void) {
     }
     if(busy && now>=map_job.deadline){map_status.state=DM_MAP_FAILED;map_status.error=ETIMEDOUT;busy=0;}
     if(!busy) {
-        if(changed && map_status.state==DM_MAP_DONE){map_status.state=DM_MAP_IDLE;map_status.done=map_status.total=0;}
-        map_job.player=player;map_job.id=id;map_job.level=level;map_job.world=scene.world_epoch;
-        map_job.callback=callback;map_job.version=version;
-        map_job.sampled=now;map_status.ready=ready;map_status.area=area;
+        /* 打开设置不清完成状态；换区、退局或玩家身份变化才清。
+         * Preserve completion in options; clear it on area/exit/player changes. */
+        if(map_status.state==DM_MAP_DONE && (!scene.game || scene.world_epoch!=map_job.world ||
+           (hud.valid&&hud.area>0&&(uint32_t)hud.area!=map_job.area) || (ready&&changed))) {
+            map_status.state=DM_MAP_IDLE;map_status.done=map_status.total=0;
+        }
+        if(map_status.state!=DM_MAP_DONE || ready) {
+            map_job.player=player;map_job.id=id;map_job.level=level;map_job.world=scene.world_epoch;
+            map_job.callback=callback;map_job.version=version;
+            map_job.area=area?area:hud.valid&&hud.area>0?(uint32_t)hud.area:0;
+        }
+        map_job.sampled=now;map_status.ready=ready;map_status.area=map_job.area;
         pthread_mutex_unlock(&map_lock);return;
     }
     if(map_status.state==DM_MAP_QUEUED) {

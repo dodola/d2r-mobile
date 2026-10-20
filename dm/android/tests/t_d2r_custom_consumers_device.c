@@ -58,7 +58,7 @@ int main(int argc,char **argv){
     dm_lootfilter_seed(save);CHECK(!setenv("DM_SAVE",save,1));CHECK(!mount_save("linked",NULL));unmount("linked");
     path(p,out,"Settings.json");CHECK(has(p,"\"Language\": 8")&&has(p,"\"sentinel\": 91"));path(p,out,"DmLite.fltr");CHECK(access(p,F_OK));
     dirs(root,"save-verified");path(save,root,"save-verified");dirs(save,"Settings");
-    path(p,save,"Settings/Settings.json");put(p,mode==0?"{ \"Language\": 0, \"VoiceLanguage\": 0, \"user\": 77 }":"{ \"Language\": 8, \"VoiceLanguage\": 8, \"user\": 77 }");
+    path(p,save,"Settings/Settings.json");put(p,mode==0?"{ \"Language\": 0, \"VoiceLanguage\": 0, \"user\": 77, \"AutoMap Open On Load\": 0 }":"{ \"Language\": 8, \"VoiceLanguage\": 8, \"user\": 77 }");
     path(p,save,"Settings/DmLite.fltr");put(p,"user custom rule\n");path(p,save,"Settings/UserNamed.fltr");put(p,"user named rule\n");path(p,save,"Settings/DmHeavy.fltr");CHECK(!symlink("UserNamed.fltr",p));
     /* Seed preserves a link rather than following/replacing it. The Android
      * transaction layer deliberately refuses links, so remove this isolated
@@ -67,12 +67,14 @@ int main(int argc,char **argv){
     path(p,save,"Settings/DmLiteBow.fltr");CHECK(!unlink(p));path(p,save,"Settings/DmHeavyBow.fltr");CHECK(!unlink(p));
     CHECK(!setenv("DM_SAVE",save,1));CHECK(!mount_save("verified",NULL));unmount("verified");
     path(p,save,"Settings/Settings.json");CHECK(has(p,mode==1?"\"Language\": 0":"\"Language\": 8"));CHECK(has(p,mode==1?"\"VoiceLanguage\": 0":"\"VoiceLanguage\": 8"));CHECK(has(p,"\"user\": 77"));
+    CHECK(has(p,"\"AutoMap Open On Load\": 1"));
     path(p,save,"Settings/DmLite.fltr");CHECK(has(p,"user custom rule"));path(p,save,"Settings/DmLiteBow.fltr");CHECK(has(p,"\"name\": \"DmLiteBow\"")&&!has(p,"HIDE ammo"));path(p,save,"Settings/DmHeavyBow.fltr");CHECK(has(p,"SHOW socketed or ethereal")&&!has(p,"HIDE ammo"));
     path(p,save,"Settings/DmHeavy.fltr");CHECK(has(p,"user heavy rule"));path(p,save,"Settings/UserNamed.fltr");CHECK(has(p,"user named rule"));
     path(p,save,"Settings/DmLiteBow.fltr");put(p,"");dm_lootfilter_seed(save);CHECK(!stat(p,&st)&&!st.st_size);CHECK(!mount_save("repeat",NULL));unmount("repeat");CHECK(!stat(p,&st)&&!st.st_size);
     /* Missing Settings.json gets valid minimal JSON on explicit English,
      * while an unapplied/default language never creates one. */
     dirs(root,"save-fresh");path(save,root,"save-fresh");CHECK(!setenv("DM_SAVE",save,1));CHECK(!mount_save("fresh",NULL));unmount("fresh");path(p,save,"Settings/Settings.json");
-    if(mode>=0){CHECK(has(p,mode?"\"Language\": 0":"\"Language\": 8")&&has(p,mode?"\"VoiceLanguage\": 0":"\"VoiceLanguage\": 8"));CHECK(!has(p,",}"));}else CHECK(access(p,F_OK));
+    if(mode>=0){CHECK(has(p,mode?"\"Language\": 0":"\"Language\": 8")&&has(p,mode?"\"VoiceLanguage\": 0":"\"VoiceLanguage\": 8"));}else CHECK(!has(p,"\"Language\"")&&!has(p,"\"VoiceLanguage\""));
+    CHECK(has(p,"\"AutoMap Open On Load\": 1")&&!has(p,",}"));
     printf("ANDROID_D2R_CUSTOM_CONSUMERS_OK checks=%d mode=%d desired_language=1 original_mount_binding=1 preserve_existing_rules=1 overlay_selection=1 fallback=1 synthetic_memory=1 isolated_files=1 original_game_not_claimed=1\n",checks,mode);return 0;
 }

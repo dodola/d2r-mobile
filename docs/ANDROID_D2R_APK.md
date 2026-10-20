@@ -1,5 +1,31 @@
 # D2R Android APK packaging
 
+Android settings are embedded in the game's **Options → Custom** list: FPS
+display, automatic/100%/90%/75% rendering, clear merging, store elision, MOD
+selection and map reveal. Apply/Discard/Defaults use the original options
+controls; MOD changes take effect at the next launch. FPS display is separate
+from the existing 30 fps power-saving option. Previous Android settings files
+and the FPS preference are retained/migrated. The Android settings dialog and
+its extra entry button have been removed.
+
+Android 设置已集成到游戏的**选项 → 自定义**列表：显示帧率、自动/100%/90%/75%
+画质、清屏合并、存储省略、MOD 选择和地图展开。沿用原版的应用/放弃/默认按钮；
+MOD 在下次启动时生效。显示帧率与原有的 30 帧省电选项独立。兼容既有 Android
+设置文件并迁移帧率显示偏好，移除了 Android 设置弹窗及额外入口按钮。
+
+The extra top-right map key is hidden when the verified UI bridge is active,
+matching iOS. Its touch region yields to the minimap gesture: tap the minimap
+name strip to open the fullscreen map and tap again to return. The minimap
+opens automatically when entering a game. Skill dragging
+still uses the same top-right cancellation region. Map reveal from Custom
+queues for up to 30 seconds until the game resumes in the same area; exiting
+or changing area cancels it. Guest callbacks stay on the original input thread.
+
+通过已验证的 UI 桥接运行时，右上额外地图键与 iOS 一样隐藏，其触摸区让位给
+小地图手势：进局自动打开小地图，点名称区域切换全屏，再点返回。拖动技能到右上角仍可
+取消施法。自定义页的地图展开请求最多等待 30 秒，回到同一区域且解除暂停后
+执行；退出或换区会取消请求。游戏回调仍只在原输入线程上执行。
+
 `dm/tools/android_d2r_apk.py` packages prepared D2R 3.3.94012 inputs. It compiles
 all Java sources, creates the APK, aligns native libraries for 16 KiB pages,
 debug-signs it, verifies the signature/alignment and compares every packaged
