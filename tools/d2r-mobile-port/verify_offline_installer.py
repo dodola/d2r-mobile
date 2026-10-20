@@ -40,9 +40,13 @@ def main():
     tests = REPO / 'dm/android/tests'
     run(JAVA/'bin/javac.exe', '--release', '8', '-encoding', 'UTF-8', '-d', BUILD, core,
         tests/'OfflinePackageInstallerTest.java', tests/'OfflinePackageFullTest.java',
-        core.with_name('GraphicsDriverPolicy.java'), tests/'GraphicsDriverPolicyTest.java')
+        core.with_name('GraphicsDriverPolicy.java'), tests/'GraphicsDriverPolicyTest.java',
+        core.with_name('OfflineInstallState.java'), tests/'OfflineInstallStateTest.java',
+        core.with_name('ModSelectionStore.java'), tests/'ModSelectionStoreTest.java')
     report = {'host': run(JAVA/'bin/java.exe', '-Xmx64m', '-cp', BUILD, 'org.d2r.binaryprobe.OfflinePackageInstallerTest').strip()}
     report['graphics_driver'] = run(JAVA/'bin/java.exe', '-cp', BUILD, 'org.d2r.binaryprobe.GraphicsDriverPolicyTest').strip()
+    report['launcher_state'] = run(JAVA/'bin/java.exe', '-cp', BUILD, 'org.d2r.binaryprobe.OfflineInstallStateTest').strip()
+    report['mod_selection'] = run(JAVA/'bin/java.exe', '-cp', BUILD, 'org.d2r.binaryprobe.ModSelectionStoreTest').strip()
     if args.full:
         manifest = RELEASE/'offline-manifest.json'
         tsv = BUILD/'manifest-files.tsv'

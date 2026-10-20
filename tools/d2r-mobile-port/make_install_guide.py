@@ -53,7 +53,7 @@ def main():
     C=canvas.Canvas(str(OUT),pagesize=A4,pageCompression=1)
     C.setTitle('D2R Mobile 安卓离线安装图文指南')
     C.setAuthor('D2R Mobile 安装指南')
-    C.setSubject('APK 安装、离线资源包选择、导入校验、自动启动与常见问题')
+    C.setSubject('APK 安装、离线资源包选择、导入校验、启动设置与常见问题')
 
     cover()
     install()
@@ -146,7 +146,7 @@ def cover():
     new_page('cover','暗黑离线安装指南',dark=True)
     p('D2R MOBILE  /  ANDROID',M,45,CW-110,10,color=GOLD,bold=True)
     p('暗黑离线安装指南',M,83,CW-90,30,leading=40,color=PARCHMENT,bold=True)
-    p('安装 APK，首次选一次资源包，随后自动启动。',M,137,CW-90,12.2,color=PARCHMENT,maxh=42)
+    p('安装 APK，首次导入资源包，完成后点击启动。',M,137,CW-90,12.2,color=PARCHMENT,maxh=42)
     image(REPO/'dm/android/artwork/d2r-icon-preview.png',W-M-91,56,91,91)
     gap=14;card=(CW-gap)/2
     for x,label,name,detail in [(M,'文件 1 · 应用安装包','D2R-Mobile.apk','约 69 MB · 点击它开始安装'),
@@ -158,13 +158,13 @@ def cover():
     p('建议先预留约 20 GB 手机空间',M,326,CW,17,leading=23,color=PARCHMENT,bold=True)
     p('包含下载和导入后的副本；资源包已在手机上时，还需额外约 9.5 GB。',M,359,CW,10.5,color=GOLD,maxh=32)
     stepw=(CW-24)/3
-    for index,(label,key) in enumerate([('安装 APK','install'),('选择资源包','choose'),('等待自动启动','import')]):
+    for index,(label,key) in enumerate([('安装 APK','install'),('选择资源包','choose'),('校验后启动','import')]):
         x=M+index*(stepw+12);circle_number(index+1,x,411,color=RED)
         p(label,x+32,412,stepw-32,11.5,color=PARCHMENT,bold=True,maxh=35)
         C.linkRect('',key,(x,H-455,x+stepw,H-401),relative=0,thickness=0)
     p('无需解压资源包，也不用连接电脑。',M,457,CW,11,color=GOLD)
     image(SHOTS/'automatic-game-start.png',M,493,CW,crop=(0,80,2560,1520))
-    p('实机截图：导入完成后自动进入原游戏主菜单。',M,786,CW,8.5,leading=12,color=GOLD)
+    p('旧版实机截图：游戏主菜单。新版导入完成后需点击启动。',M,786,CW,8.5,leading=12,color=GOLD)
     end_page()
 
 
@@ -248,18 +248,18 @@ def importing():
     p('实机截图：资源包刚打开时显示 0%，随后开始导入。',M,top+height+12,CW,9.2,color=MUTED)
     col=(CW-24)/2
     p('保持这个页面打开',M,590,col,14,bold=True,color=RED)
-    p('导入时不要切到后台。离开页面会停止导入，可重新打开应用，再选同一资源包重试。',M,622,col,11.8,leading=19,maxh=93)
+    p('切到后台不会主动取消。如系统回收应用，重新打开后选择同一资源包重试，已校验文件会复用。',M,622,col,11.8,leading=19,maxh=93)
     p('末尾也要等一会儿',M+col+24,590,col,14,bold=True,color=RED)
-    p('进度接近完成时，仍可能在处理图形缓存。以应用最终完成并自动启动游戏为准。',M+col+24,622,col,11.8,leading=19,maxh=93)
+    p('进度接近完成时，仍可能在处理图形缓存。等待显示“游戏已准备好”，再点击“启动游戏”。',M+col+24,622,col,11.8,leading=19,maxh=93)
     note('中断后可以重试',
          '已经校验完成的文件会复用；被中断的单个文件需要重新导入。导入完成后，才可以删除下载的资源包。',M,710,CW,84)
     end_page()
 
 
 def finished():
-    new_page('finish','05  自动进入游戏','看到原游戏主菜单，说明本次安装和资源准备流程已经完成。')
+    new_page('finish','05  点击启动游戏','导入完成后可确认驱动和 MOD 设置，再点击“启动游戏”。')
     top=182;height=image(SHOTS/'automatic-game-start.png',M,top,CW,crop=(0,80,2560,1520))
-    p('实机截图：完整导入后，自动进入原游戏主菜单。',M,top+height+12,CW,9.2,color=MUTED)
+    p('旧版实机截图：原游戏主菜单，新版入口需手动点击启动。',M,top+height+12,CW,9.2,color=MUTED)
     rows=[('以后从入口启动游戏','打开桌面图标，选择驱动并点击“启动游戏”。无需重复导入资源。'),
           ('资源包可以删除','确认安装成功后，可以删除下载目录中的 .d2rpack，释放约 9.24 GB。'),
           ('更新请覆盖安装','保留应用本身再安装新版 APK；卸载应用会删除游戏数据和存档。')]
@@ -275,9 +275,9 @@ def driver_selection():
     new_page('driver','06  选择图形驱动','启动失败时可从入口更换，默认保留“自动推荐”。')
     shot=ROOT/'analysis/d2r-mobile-port/TNA_AN00/startup-driver-fix/cold-1-entry.png'
     height=image(shot,M,180,200)
-    p('实机截图：TNA-AN00 启动入口。',M,180+height+12,210,9,color=MUTED)
+    p('旧版实机截图：新版先展开“启动设置”。',M,180+height+12,210,9,color=MUTED)
     x=M+228;width=CW-228
-    rows=[('自动推荐（推荐）','默认使用系统驱动，也可在入口手动选择兼容驱动。'),
+    rows=[('自动推荐（推荐）','按设备选择驱动；连续启动失败后会尝试系统驱动。'),
           ('系统驱动','使用手机自带的驱动。如启动失败，可在入口查看错误并手动选择其他驱动。'),
           ('内置兼容驱动（Turnip）','手动使用安装包内的驱动，适用于部分骁龙设备。其他设备建议使用自动推荐。')]
     for i,(title,body) in enumerate(rows):
@@ -285,7 +285,7 @@ def driver_selection():
         p(title,x,top,width,13,bold=True,leading=20,maxh=44)
         p(body,x,top+49,width,11.5,leading=19,maxh=78)
     note('选择会自动记住',
-         '选择驱动后点击“启动游戏”。更换驱动在重新启动游戏时生效；首次导入完成后仍会自动启动，无需重新选择资源包。',M,694,CW,104)
+         '展开“启动设置”选择驱动或已安装 MOD，再点击“启动游戏”。首次导入完成后也需点击启动；以后无需重复导入资源包。',M,694,CW,104)
     end_page()
 
 
@@ -297,7 +297,7 @@ def problems():
           ('手机空间不足','清理空间后重新选择。资源包已经在手机上时，导入还需额外约 9.5 GB。'),
           ('资源包版本不匹配','重新取得同一份发布资料中的 APK 与资源包，成套使用。'),
           ('文件不完整/校验失败','重新下载完整资源包。保留 .d2rpack 扩展名，无需解压。'),
-          ('取消/切到后台后停止','重新打开应用，再选原资源包。已校验完成的文件会复用。'),
+          ('停止或系统回收后重试','切到后台不会主动取消；如已停止，再选原资源包复用已校验文件。'),
           ('导入后游戏启动失败','重新打开入口，切回自动推荐或尝试其他驱动。仍失败时保留机型和错误截图。')]
     for i,(title,body) in enumerate(rows):
         top=355+i*60
@@ -306,7 +306,7 @@ def problems():
         p(body,M+157,top+10,CW-169,10.7,leading=16.4,maxh=45)
         line(M,top+60,W-M,top+60)
     p('验证与截图说明',M,736,CW,10,bold=True,color=MUTED)
-    p('本流程已在 ROD-W09 平板完成整包校验和自动进入主菜单测试。其他机型、全部关卡与长时间运行仍需分别验证。截图来自本次实机测试；系统安装弹窗和文件路径图均为标注的示意图。',M,758,CW,9.3,leading=14.3,color=MUTED,maxh=44)
+    p('截图来自旧版 ROD-W09 实机测试。新版启动器完成代码和离线验证，页面交互仍待真机确认；系统安装弹窗和文件路径图为示意图。',M,758,CW,9.3,leading=14.3,color=MUTED,maxh=44)
     end_page()
 
 

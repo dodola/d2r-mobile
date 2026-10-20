@@ -24,13 +24,10 @@ final class OfflineInstallSession {
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private OfflinePackageInstaller.Manifest manifest;
     private Observer observer;
-    private volatile boolean cancelled;
+    final OfflineInstallState state=new OfflineInstallState();
     private volatile InputStream source;
     private long lastProgress;
     private int currentFile,fileCount;
-    private boolean queued;
-    boolean busy=true,ready=false;
-    volatile boolean committing=false;
     String title="正在检查游戏文件",detail="首次打开时会自动检查已安装的资源。";
     long done=0,total=0,requiredBytes=0;
     private OfflineInstallSession(Context context) {this.context=context;worker.execute(this::prepare);}
@@ -42,7 +39,7 @@ final class OfflineInstallSession {
             public void update(String phase,long current,long total){progress(phase,current,total);}
             public void file(int current,int count){currentFile=current;fileCount=count;}
         };
-        return new OfflinePackageInstaller(context.getFilesDir(),manifest,listener,()->cancelled,()->context.getFilesDir().getUsableSpace());
+        return new OfflinePackageInstaller(context.getFilesDir(),manifest,listener,state::cancelled,()->context.getFilesDir().getUsableSpace());
     }
     /** The APK's pinned resource manifest; also used by the game to recognise a receipt-verified install. */
     static OfflinePackageInstaller.Manifest readManifest(Context context)throws Exception {
@@ -69,41 +66,44 @@ final class OfflineInstallSession {
         }catch(Exception e){error(e);}
     }
     void start(Uri uri) {
-        if(busy||queued||manifest==null)return;
-        queued=true;busy=true;ready=false;cancelled=false;committing=false;done=0;total=manifest.total;
+        if(manifest==null||!state.beginImport())return;
+        done=0;total=0;lastProgress=0;currentFile=0;fileCount=0;
         requiredBytes=0;
-        title="正在打开资源包";detail="导入时请保持此页面打开，完成后会自动启动游戏。";notifyObserver();
+        title="正在打开资源包";detail="导入完成后，点击“启动游戏”进入。建议保持此页面打开。";notifyObserver();
         worker.execute(()->{
             try(InputStream in=context.getContentResolver().openInputStream(uri)) {
                 if(in==null)throw new IOException("Cannot open selected document");source=in;
-                installer().install(in);finishReady();
-            }catch(Exception e){error(e);}finally{source=null;}
+                installer().install(in);
+            }catch(Exception e){error(e);return;}finally{source=null;}
+            finishReady();
         });
     }
     void cancel() {
-        if(!busy||committing)return;cancelled=true;
+        if(!state.requestCancel())return;
         InputStream in=source;
         // A provider may block in read(). Closing from another thread unblocks it.
         if(in!=null)new Thread(()->{try{in.close();}catch(IOException ignored){}},"cancel-import").start();
         title="正在停止导入";detail="已校验的文件会保留，可重新选择资源包重试。";notifyObserver();
     }
     private void progress(String phase,long current,long max) {
-        if("commit".equals(phase))committing=true;
+        if("commit".equals(phase))state.beginCommit();
         long now=SystemClock.elapsedRealtime();
         if(!"commit".equals(phase)&&current!=max&&now-lastProgress<250)return;lastProgress=now;
         final String count="正在处理第 "+currentFile+" / "+fileCount+" 个文件。";
         ui.post(()->{
+            if(state.cancelled()||(state.phase()==OfflineInstallState.Phase.COMMITTING&&!"commit".equals(phase)))return;
             done=current;total=max;
             title="commit".equals(phase)?"正在完成安装":"verify".equals(phase)?"正在校验已有文件":"正在导入并校验";
-            detail="commit".equals(phase)?"校验已通过，正在保存安装结果。":count+"\n请保持此页面打开，完成后会自动启动游戏。";
+            detail="commit".equals(phase)?"校验已通过，正在保存安装结果。此时无法取消，请稍候。":count+"\n完成后请点击“启动游戏”。建议保持此页面打开。";
             notifyObserver();
         });
     }
-    private void finishReady() {ui.post(()->{queued=false;busy=false;ready=true;committing=false;title="游戏文件已就绪";detail="即将启动游戏。首次加载可能需要一些时间。";done=total;notifyObserver();});}
-    private void idle(String heading,String text) {ui.post(()->{queued=false;busy=false;committing=false;title=heading;detail=text;done=0;total=0;notifyObserver();});}
+    private void finishReady() {ui.post(()->{state.finishReady();title="游戏已准备好";detail="资源检查已完成。确认下方设置后即可启动，首次加载可能需要一些时间。";done=total;notifyObserver();});}
+    private void idle(String heading,String text) {ui.post(()->{state.finishWaiting();title=heading;detail=text;done=0;total=0;notifyObserver();});}
     private void error(Exception exception) {
         String message;
-        if(cancelled)message="导入已停止。请重新选择资源包重试；已校验的文件会复用。";
+        boolean stopped=state.cancelled();
+        if(stopped)message="导入已停止。请重新选择资源包重试；已校验的文件会复用。";
         else if(exception instanceof OfflinePackageInstaller.Failure) {
             OfflinePackageInstaller.Failure failure=(OfflinePackageInstaller.Failure)exception;
             switch(failure.reason) {
@@ -116,8 +116,9 @@ final class OfflineInstallSession {
         }else if(manifest==null)message="APK 缺少有效的安装清单。请重新下载配套 APK 后覆盖安装。";
         else message="无法读取资源包或保存文件。请确认文件已完整下载到手机，并检查可用空间后重试。";
         android.util.Log.e("D2ROfflineInstall","Offline preparation failed",exception);
-        idle(cancelled?"导入已停止":"暂时无法完成安装",message);
+        final String text=message;
+        ui.post(()->{state.finishFailed();title=stopped?"导入已停止":"暂时无法完成安装";detail=text;done=0;total=0;notifyObserver();});
     }
     long payloadBytes(){return manifest==null?0:manifest.total;}
-    boolean canSelect(){return manifest!=null&&!busy;}
+    boolean canSelect(){return manifest!=null&&state.canSelect();}
 }
