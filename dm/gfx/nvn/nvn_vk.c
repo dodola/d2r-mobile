@@ -158,6 +158,10 @@ typedef struct { Range range;VBuffer *buffer;int write_count; } ReadSnapshot;
 typedef struct { uint32_t hash;VBuffer *buffer; } DriverTable;
 typedef struct { uint64_t serial; unsigned roles; } ImageUse;
 typedef struct { const uint8_t *entry;uint64_t hash; } ShaderEntry;
+/* Per-draw shader identity memo (full-code identity, index v2). The key is the guest object, not its content: a hit
+ * still re-verifies the control block and the code bytes against the indexed entry, so a rewritten shader misses. */
+typedef struct { const void *control;uint64_t address;const uint8_t *entry;uint32_t stage,code_size; } ShaderLookup;
+#define SHADER_LOOKUP 2048
 typedef struct { uint64_t hash;VShader *shader;VkDescriptorSet set;uint32_t nb,off; } DescEntry;
 /* Vulkan returns selected statistics in ascending flag-bit order: input
  * vertices, input primitives, vertex invocations, fragment invocations. */
@@ -269,7 +273,7 @@ static struct {
     NvnVkGpuProfile profile; NvnVkQuirkRegistry quirks;
     NvnVkPipelineCacheKey pipeline_cache_key;
     uint8_t *shader_index; size_t index_bytes;uint32_t shader_index_version;int shader_code_identity; char shader_root[1024]; ANativeWindow *window;int vi_crop[4];
-    ShaderEntry *shader_entries;size_t shader_entry_capacity;
+    ShaderEntry *shader_entries;size_t shader_entry_capacity;ShaderLookup shader_lookup[SHADER_LOOKUP];
     VkSurfaceKHR surface; VkSwapchainKHR swapchain; VkImage *swap_images; VkImageLayout *swap_layouts;
     uint32_t nswap; VkFormat swap_format; VkExtent2D swap_extent; int display_hz;
     VTexture present_encoding_bridge;
@@ -2010,21 +2014,34 @@ static const uint8_t *shader_entry(const void *control,uint32_t stage,uint64_t a
         fprintf(stderr,"[nvn-vulkan] SHADER_CONTROL_INDEX version=%u entries=%u slots=%zu bytes=%zu full_code_verified=%d\n",G.shader_index_version,count,capacity,capacity*sizeof(*G.shader_entries),G.shader_index_version==2);
     }
     uint32_t code_size=0;const uint8_t *code=NULL;
-    uint64_t hash=control_hash(control,stage);
+    ShaderLookup *memo=NULL;
     if(G.shader_index_version==2) {
         uint32_t nvn_stage;memcpy(&nvn_stage,(const uint8_t *)control+0x714,4);
         if(nvn_stage!=stage)return NULL;
         memcpy(&code_size,(const uint8_t *)control+0x704,4);uint64_t offset=0;
         VPool *pool=pool_find(address,code_size,&offset);
         if(!pool || !code_size || code_size>16*1024*1024)die("shader identity GPU code range",address);
-        code=pool->guest+offset;hash=shader_code_hash(hash,code,code_size);
+        code=pool->guest+offset;
+        uint64_t mix=(((uint64_t)(uintptr_t)control>>4)^(address*0x9e3779b97f4a7c15ULL)^((uint64_t)stage<<56))*0xbf58476d1ce4e5b9ULL;
+        memo=&G.shader_lookup[(mix>>40)&(SHADER_LOOKUP-1)];
+        if(memo->entry&&memo->control==control&&memo->address==address&&memo->stage==stage&&memo->code_size==code_size) {
+            /* Same verification as the hashed lookup below, without hashing ~2 KB of control and the whole code. */
+            const uint8_t *ctrl=indexed_control(memo->entry);
+            if(!memcmp(ctrl,control,0x880)&&!memcmp(ctrl+0x880,code,code_size)){G.profile_control_hits++;return memo->entry;}
+        }
+        G.profile_control_misses++;
     }
+    uint64_t hash=control_hash(control,stage);
+    if(code)hash=shader_code_hash(hash,code,code_size);
     size_t slot=hash&(G.shader_entry_capacity-1);
     while(G.shader_entries[slot].entry){ShaderEntry *candidate=&G.shader_entries[slot];uint32_t st;memcpy(&st,candidate->entry+16,4);
         const uint8_t *ctrl=indexed_control(candidate->entry);
         if(candidate->hash==hash&&st==stage&&!memcmp(ctrl,control,0x880)) {
             uint32_t stored=0;if(G.shader_index_version==2)memcpy(&stored,candidate->entry+20,4);
-            if(G.shader_index_version==1 || (stored==code_size && !memcmp(ctrl+0x880,code,code_size)))return candidate->entry;
+            if(G.shader_index_version==1 || (stored==code_size && !memcmp(ctrl+0x880,code,code_size))) {
+                if(memo)*memo=(ShaderLookup){control,address,candidate->entry,stage,code_size};
+                return candidate->entry;
+            }
         }
         slot=(slot+1)&(G.shader_entry_capacity-1);}
     return NULL;
