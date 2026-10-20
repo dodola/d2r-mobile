@@ -75,3 +75,49 @@ Validation tests:
 $env:PYTHONPATH="dm/tools"
 python -m unittest discover -s dm/tools/tests -p test_android_d2r_apk.py -v
 ```
+
+## Offline release build (game 94012)
+
+Passing `--offline-manifest` switches the packager from the diagnostic test APK to the installer-launched offline
+release: package `org.d2r.mobile` (coexists with `org.d2r.newprobe`), launcher `InstallerActivity`, launcher icons,
+non-debuggable, release-signed. The diagnostic mode above is unchanged.
+
+Extra inputs for the offline mode:
+
+- `--offline-manifest`: the `offline-manifest.json` written next to `D2R-Offline-94012.d2rpack` by
+  `tools/d2r-mobile-port/build_offline_package.py`. It must be format 1, `game_build` 94012, list only paths the
+  on-device installer accepts (`game.romfs`, `d2r-mobile/shaders/…`), and its `game.romfs` size/SHA-256 must equal the
+  `romfs` entry of the module manifest.
+- `--overlay-base` / `--overlay-item-notes`: the touch-UI overlay directories. Exactly `ctrl_touch`,
+  `touch_strings.tsv`, `data/.build.config`, `data/00-00000007.data` (base) plus `dm_textbox_plain.tsv` and
+  `features.txt` (item-notes variant). They are packaged under `assets/overlay/` and copied by `GameActivity` to
+  `files/d2r-mobile/romfs-overlay[-variants/item_notes]` on launch. Without them the native host logs
+  `ANDROID_CUSTOM_OVERLAY base_unavailable=1` and runs with no touch-UI data.
+- `--driver-libs`: a directory with exactly the seven bundled driver libraries (`libd2r_turnip.so` pinned to SHA-256
+  `c2dc3ff0…8e9e`, `libadrenotools.so`, `libc++_shared.so` and the four hook libraries), all 16 KiB compatible.
+  No validation layer is shipped.
+- `--keystore-properties`: `key=value` file with `storeFile`, `alias`, `storePassword`, `keyPassword`. The passwords
+  reach `apksigner` through the environment (`env:`), so they never appear in `commands.json`. An offline release is
+  never debug-signed. `--expect-cert-sha256` makes the build fail if the signer differs.
+- `--version-code`, `--version-name` (default `1`, `1.0.0-94012`); `--update-url` is optional and empty by default.
+- `--debuggable` (diagnostics only): same identity and signature but debuggable, so `run-as` can read
+  `files/d2r-mobile/diagnostics/game-startup.log`; installs over the release with `adb install -r`, keeping the
+  imported game data. Never distribute it.
+
+Typical sequence (see `docs/ANDROID_PERFORMANCE_2026-10-20_SHADER_LOOKUP.zh-CN.md` for measurement parameters):
+
+```powershell
+$env:ANDROID_SWITCH_WORKSPACE="D:/AndroidSwitch"
+python tools/d2r-mobile-port/build_offline_package.py          # -> release-94012/pack/D2R-Offline-94012.d2rpack
+python dm/tools/android_d2r_apk.py --native <libd2r_mobile_android.so> --images <modules> --hud-assets <hud> `
+  --offline-manifest <pack>/offline-manifest.json --overlay-base <romfs_overlay> `
+  --overlay-item-notes <romfs_overlay_variants/item_notes> --driver-libs <driver-libs> `
+  --keystore-properties $env:USERPROFILE/.android/d2r-release.properties --expect-cert-sha256 <hex> --out <fresh-dir>
+python tools/d2r-mobile-port/write_release_notes.py             # installation notes + SHA256SUMS
+python tools/d2r-mobile-port/verify_offline_installer.py        # host installer checks (40)
+```
+
+`build_offline_package.py` pins the 94012 RomFS (8,973,550,584 bytes, SHA-256 `f5f3bcfb…2785`) and checks the shader
+cache against its recorded `cache-checksums.sha256`. `GameActivity` no longer has a size-only RomFS fallback and skips
+re-hashing the image when the installer receipt covers it. The 91738 offline chain still exists in the repository until
+it is retired separately; its resource package must never be mixed with 94012 modules.
