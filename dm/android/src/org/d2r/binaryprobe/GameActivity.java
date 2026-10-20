@@ -29,6 +29,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class GameActivity extends Activity implements SurfaceHolder.Callback {
+    static native int nativeMapReveal();
+    static native long[] nativeMapStatus();
     static { System.loadLibrary("d2r_mobile_android"); }
     private static native int nativeConfigure(String files, String locale,boolean touchRoute);
     private static native int nativeContentProfile(long romfsBytes,int[] addOnIndices);
@@ -535,12 +537,18 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     }
     private void fail(String title,Exception error){closeRendererSettings();nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}failed=true;status.setVisibility(View.VISIBLE);status.setText(title+"\n"+error.getMessage());}
     private boolean driverPending=true;
+    private long mapNoticeSequence;
     private final Runnable poll=new Runnable(){public void run(){
         if(!launched||failed)return;
         try{String raw=nativeStatus();JSONObject s=new JSONObject(raw);
             appliedRendererFlags=s.optInt("renderer_flags",RendererOptions.DEFAULT_FLAGS);
             appliedRenderScale=(float)s.optDouble("render_scale",RenderQuality.ORIGINAL);
             if(rendererSettings!=null)rendererSettings.updateApplied(appliedRendererFlags,appliedRenderScale);
+            long[] map=nativeMapStatus();
+            if(resumed&&map!=null&&map.length>=7&&map[0]>mapNoticeSequence&&map[1]>=4){
+                mapNoticeSequence=map[0];
+                android.widget.Toast.makeText(GameActivity.this,RendererSettingsDialog.mapFeedback(map,strings.chinese()),android.widget.Toast.LENGTH_LONG).show();
+            }
             JSONObject scene=s.optJSONObject("scene");inGame=scene!=null&&scene.optInt("game",0)!=0;
             long frame=s.getLong("presented_frames");
             if(frame>0&&driverPending){driverPending=false;GraphicsDriverSettings.confirmStarted(GameActivity.this);}

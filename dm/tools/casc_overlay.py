@@ -382,6 +382,16 @@ def ekey_for(encoded, chunk, archive, offset):
     return hashlib.md5(encoded[:header_size]).digest()[:9] + bytes((chunk, archive)) + offset.to_bytes(5, "big")   # EKey 前 9 字节 = MD5(BLTE 头)，后 7 字节 = 块号 / 档号 / 偏移（key-layout 8 8 40） | First 9 bytes of EKey = MD5(BLTE header), last 7 bytes = chunk number / archive number / offset (key-layout 8 8 40)
 
 
+def encoding_spec(table, offset):
+    # CFT stores a byte offset, not an ordinal: z=0, n=2, b:64K*=n=4.
+    if offset >= len(table) or (offset and table[offset - 1] != 0):
+        die("invalid TVFS encoding-spec offset")
+    end = table.find(b"\0", offset)
+    if end < 0:
+        die("unterminated TVFS encoding spec")
+    return table[offset:end].decode()
+
+
 def write_pack(source, output, replacements, location):
     """独立数据档：replacements 逐条按其 TVFS 条目的编码规格写进 output/<块号>-<档号>.data，出条目表 output/pack_index.tsv。
     location = (块号, 档号)，须是原 RomFS 里没用过的位置。各条编码互不依赖，用多进程并行压缩
@@ -397,13 +407,13 @@ def write_pack(source, output, replacements, location):
     manifest = read_manifest(source)
     cft_offset, cft_size = struct.unpack(">II", vfs_content[28:36])
     est_off, est_size = struct.unpack(">II", vfs_content[38:46])
-    especs = bytes(vfs_content[est_off:est_off + est_size]).split(b"\0")
+    espec_table = bytes(vfs_content[est_off:est_off + est_size])
     items = []
     for logical, replacement in replacements.items():
         if logical.startswith("+"):
             die("pack 不支持新增路径: " + logical)
         pos = cft_position(vfs_content, cft_offset, cft_offset + cft_size, manifest, logical)
-        items.append((logical, replacement, especs[vfs_content[pos + 20]].decode()))
+        items.append((logical, replacement, encoding_spec(espec_table, vfs_content[pos + 20])))
     output.mkdir(parents=True, exist_ok=True)
     offset = 0
     with (output / name).open("wb") as data, (output / "pack_index.tsv").open("w", encoding="utf-8") as index, cf.ProcessPoolExecutor() as pool:
@@ -432,7 +442,7 @@ def read_prebuilt(filename):
     return result
 
 
-def rewrite_tvfs(source, output, replacements, prebuilt=None):
+def rewrite_tvfs(source, output, replacements, prebuilt=None, *, link_unchanged=True):
     data_dir = source / "data"
     config = data_dir / ".build.config"
     lines, values = config_values(config)
@@ -467,9 +477,9 @@ def rewrite_tvfs(source, output, replacements, prebuilt=None):
         return ekey_for(encoded, new_chunk, new_archive, offset), len(content), len(encoded)
 
     est_off, est_size = struct.unpack(">II", vfs_content[38:46])
-    especs = bytes(vfs_content[est_off:est_off + est_size]).split(b"\0")
+    espec_table = bytes(vfs_content[est_off:est_off + est_size])
     for pos, content in updates:
-        espec = especs[vfs_content[pos + 20]].decode()   # 规格序号 1 字节（规格表 13 字节） | Spec index is 1 byte (spec table is 13 bytes)
+        espec = encoding_spec(espec_table, vfs_content[pos + 20])
         ekey, decoded_size, encoded_size = append(content, espec)
         vfs_content[pos:pos + 9] = ekey[:9]
         vfs_content[pos + 9:pos + 16] = ekey[9:]
@@ -479,12 +489,12 @@ def rewrite_tvfs(source, output, replacements, prebuilt=None):
         set_cft_sizes(vfs_content, pos, encoded_size, decoded_size)
 
     if adds:
-        espec_index = next((i for i, e in enumerate(especs) if e == b"z"), 0)   # 新文件用裸 zlib（与原版小文件同） | New files use raw zlib (same as small files in the original game)
+        espec_index = next((i for i in range(len(espec_table)) if espec_table[i:i + 2] == b"z\0" and (i == 0 or espec_table[i - 1] == 0)), 0)
         encoded_adds = {}
         for logical, replacement in adds.items():
             if logical in manifest:
                 die("新增路径已存在（应作替换）: " + logical)
-            ekey, decoded_size, encoded_size = append(replacement.read_bytes(), especs[espec_index].decode())
+            ekey, decoded_size, encoded_size = append(replacement.read_bytes(), encoding_spec(espec_table, espec_index))
             encoded_adds[logical] = (ekey, encoded_size, espec_index, decoded_size)
         vfs_content = add_paths(vfs_content, encoded_adds)
     new_vfs_ekey, new_vfs_decoded, new_vfs_encoded = append(bytes(vfs_content))
@@ -515,9 +525,10 @@ def rewrite_tvfs(source, output, replacements, prebuilt=None):
             new_config = replace_config(new_config, key, root_value)
             new_config = replace_config(new_config, key + "-size", f"{new_root_decoded} {new_root_encoded}")
     (output / "data" / ".build.config").write_text("".join(new_config), encoding="utf-8")
-    for entry in data_dir.iterdir():
-        if entry.name not in {".build.config", data_name}:
-            (output / "data" / entry.name).symlink_to(entry.resolve())
+    if link_unchanged:
+        for entry in data_dir.iterdir():
+            if entry.name not in {".build.config", data_name}:
+                (output / "data" / entry.name).symlink_to(entry.resolve())
     print(f"overlay: {len(updates)} replacement(s), {len(adds)} addition(s), {len(prebuilt_pos)} prebuilt, TVFS rewritten, data={data_name}")
 
 

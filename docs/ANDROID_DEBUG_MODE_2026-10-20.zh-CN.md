@@ -1,5 +1,7 @@
 # Android D2R 调试模式（第一版）
 
+后续已增加系统菜单的地图一键全开和 MOD 选择入口，见 [MOD 与地图说明](ANDROID_MODS_2026-10-20.zh-CN.md)。启用 MOD 时 Debug 存档进一步隔离到 `mods/<id>/debug-save`；回执会显示实际模式对应的目录。
+
 用于没有测试存档时准备道具、切换地图、恢复角色状态。实现位于 `dm/android/d2r_debug_mode.c`，命令工具位于 `tools/android/debug_console.py`。当前是代码移植及离线验证版，未执行原版游戏、未连接设备、未打包或安装 APK。
 
 ## 构建和启用

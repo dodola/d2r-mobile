@@ -7,6 +7,10 @@
 #include "render_scale.h"
 #include "touch_controls_android.h"
 #include "d2r_host_modules.h"
+#include "d2r_mod_loader.h"
+#ifdef DM_ANDROID_D2R_UI
+#include "d2r_map_reveal.h"
+#endif
 #ifdef DM_ANDROID_DEBUG_CONSOLE
 #include "d2r_debug_mode.h"
 #endif
@@ -529,20 +533,23 @@ static void *game_thread(void *unused) {
 #ifdef DM_ANDROID_DEBUG_CONSOLE
     if (dm_android_d2r_debug_configure(port_root,save,sizeof save)) die("Android debug configuration failed");
 #endif
-    if (dm_android_fs_ensure_directory(save) || dm_android_fs_ensure_directory(temp) || dm_android_fs_ensure_directory(profile)) die("Android private directories");
-    setenv("DM_ROMFS",rom,1); setenv("DM_SAVE",save,1); setenv("DM_TEMP",temp,1);
+    setenv("DM_ROMFS",rom,1); setenv("DM_TEMP",temp,1);
     if (locale_tag[0]) setenv("DM_LANG", locale_tag, 1);
     /* Keep the portable Custom settings store beside the app's save tree,
      * matching iOS's Documents-level placement and making it available
      * before the guest mounts its save. */
     dm_custom_init(port_root);
     const char *custom_locale=NULL;
+    char overlay[4096]="";
 #ifdef DM_ANDROID_D2R_UI
-    char overlay[PATH_MAX];
-    if(dm_android_custom_overlay(port_root,overlay,sizeof overlay))setenv("DM_ROMFS_OVERLAY",overlay,1);
-    else unsetenv("DM_ROMFS_OVERLAY");
+    dm_android_custom_overlay(port_root,overlay,sizeof overlay);
     custom_locale=dm_android_custom_startup_locale();
 #endif
+    error=dm_android_mod_configure(port_root,overlay,sizeof overlay,save,sizeof save);
+    if(error)die("Android MOD package invalid or base overlay differs, error=%d; clear mods/active.txt to recover",error);
+    if(overlay[0])setenv("DM_ROMFS_OVERLAY",overlay,1);else unsetenv("DM_ROMFS_OVERLAY");
+    if (dm_android_fs_ensure_directory(save) || dm_android_fs_ensure_directory(temp) || dm_android_fs_ensure_directory(profile)) die("Android private directories");
+    setenv("DM_SAVE",save,1);
     const char *startup_locale=custom_locale?custom_locale:locale_tag;
     if(custom_locale) {setenv("DM_LANG",custom_locale,1);LOG("ANDROID_CUSTOM_LANGUAGE startup_locale=%s source=sw_custom.txt",custom_locale);}
     char private_vulkan[PATH_MAX];path(private_vulkan,sizeof private_vulkan,port_root,"diagnostics/private-vulkan");
@@ -1000,6 +1007,24 @@ JNIEXPORT jstring JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeStatus(JNI
     (void)cls;char text[8192];
     status_text(text,sizeof text);
     persist_status();return (*env)->NewStringUTF(env,text);
+}
+JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeMapReveal(JNIEnv *env,jclass cls) {
+    (void)env;(void)cls;
+#ifdef DM_ANDROID_D2R_UI
+    return dm_android_map_request(NULL);
+#else
+    return ENOTSUP;
+#endif
+}
+JNIEXPORT jlongArray JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeMapStatus(JNIEnv *env,jclass cls) {
+    (void)cls;jlong values[8]={0};
+#ifdef DM_ANDROID_D2R_UI
+    dm_android_map_status s;dm_android_map_status_get(&s);
+    values[0]=s.sequence;values[1]=s.state;values[2]=s.area;values[3]=s.total;
+    values[4]=s.done;values[5]=s.ready;values[6]=s.error;
+#endif
+    jlongArray out=(*env)->NewLongArray(env,8);
+    if(out)(*env)->SetLongArrayRegion(env,out,0,8,values);return out;
 }
 JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeRenderScale(JNIEnv *env,jclass cls,jfloat scale) {
     (void)env;(void)cls;

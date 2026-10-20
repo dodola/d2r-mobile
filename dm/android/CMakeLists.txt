@@ -213,7 +213,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
   if(DM_ANDROID_DEBUG_CONSOLE AND NOT DM_ANDROID_D2R_HOST_MODULES)
     message(FATAL_ERROR "The QA console requires DM_ANDROID_D2R_HOST_MODULES")
   endif()
-  add_library(d2r_mobile_android SHARED app_jni.c ${DM_RESOURCE_PROBE_SOURCE})
+  add_library(d2r_mobile_android SHARED app_jni.c d2r_mod_loader.c ${DM_RESOURCE_PROBE_SOURCE})
   if(DM_ANDROID_DEBUG_CONSOLE)
     target_sources(d2r_mobile_android PRIVATE d2r_debug_mode.c)
     target_compile_definitions(d2r_mobile_android PRIVATE DM_ANDROID_DEBUG_CONSOLE=1)
@@ -237,7 +237,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
       message(FATAL_ERROR "DM_ANDROID_VAULT_TABLE does not exist: ${DM_ANDROID_VAULT_TABLE}")
     endif()
     configure_file("${DM_ANDROID_VAULT_TABLE}" "${CMAKE_BINARY_DIR}/generated/dm_vault_tab.h" COPYONLY)
-    target_sources(d2r_mobile_android PRIVATE d2r_ui_adapter.c d2r_hud_android.c d2r_custom_android.c d2r_world_overlay_android.c
+    target_sources(d2r_mobile_android PRIVATE d2r_ui_adapter.c d2r_hud_android.c d2r_custom_android.c d2r_world_overlay_android.c d2r_map_reveal.c
       ${DM_HOST}/dm_update.c
       ${DM_HOST}/dm_cursor.c ${DM_HOST}/dm_actions.c ${DM_HOST}/dm_world.c
       ${DM_HOST}/dm_cursor_item.c ${DM_HOST}/dm_uiscreen.c ${DM_HOST}/dm_prof.c

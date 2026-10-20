@@ -12,6 +12,7 @@ import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.Button;
 import java.io.IOException;
 
 /** Native system-menu surface; the platform owns focus, Back and switch semantics. */
@@ -25,7 +26,10 @@ final class RendererSettingsDialog {
     private final TextView qualityStatus;
     private final Switch clear,writeback;
     private final TextView status;
+    private final TextView mapStatus,modStatus;
+    private final Button reveal;
     private final AlertDialog dialog;
+    private AlertDialog modPicker;
     private RendererOptions desired;
     private boolean binding,readFailed;
     private String error;
@@ -50,6 +54,14 @@ final class RendererSettingsDialog {
         writeback=option(body,"省略无用写回","确认内容在读取前会被完整覆盖时，省掉这次显存保存。需要保留的内容仍正常保存。");
         text(body,"运行中生效并自动保存，可在同一场景往返对比。收益随场景变化，不保证提高帧率；若画面异常，可关闭对应项。",14);
         status=text(body,"正在读取设置…",14);status.setMinHeight(dp(48));status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        boolean chinese=activity.getResources().getConfiguration().getLocales().get(0).getLanguage().equals("zh");
+        text(body,chinese?"地图":"Map",18);
+        reveal=new Button(activity);reveal.setText(chinese?"当前地图一键全开":"Reveal current map");body.addView(reveal);
+        mapStatus=text(body,"",14);
+        reveal.setOnClickListener(v->requestReveal(chinese));
+        text(body,"MOD",18);modStatus=text(body,"",14);
+        Button mods=new Button(activity);mods.setText(chinese?"选择 MOD（下次启动生效）":"Select MOD (next launch)");body.addView(mods);
+        mods.setOnClickListener(v->chooseMod(chinese));refreshMod(chinese);refreshMap(chinese);
         ScrollView scroll=new ScrollView(activity);scroll.setFillViewport(false);scroll.addView(body);
         dialog=new AlertDialog.Builder(activity).setTitle("系统菜单").setView(scroll).setPositiveButton("返回游戏",null).create();
         dialog.setOnDismissListener(d->{closed.run();if(!activity.isFinishing())trigger.requestFocus();});
@@ -120,6 +132,7 @@ final class RendererSettingsDialog {
         catch(IOException e){error="保存失败，设置未改变。请重新切换重试。";bind();}
     }
     void updateApplied(int flags,float scale){
+        refreshMap(activity.getResources().getConfiguration().getLocales().get(0).getLanguage().equals("zh"));
         applied=flags;
         appliedScale=scale;qualityFeedback();
         if(!readFailed)try{RendererOptions latest=store.read();if(desired==null||latest.sequence!=desired.sequence){desired=latest;error=null;bind();}}
@@ -130,5 +143,41 @@ final class RendererSettingsDialog {
         String value=error!=null?error:applied==desired.flags?"已生效："+RendererOptions.description(applied):"正在应用…\n当前生效："+RendererOptions.description(applied);
         if(!value.contentEquals(status.getText()))status.setText(value);
     }
-    void dismiss(){dialog.dismiss();}
+    void dismiss(){if(modPicker!=null)modPicker.dismiss();dialog.dismiss();}
+    private void requestReveal(boolean chinese){
+        int rc=GameActivity.nativeMapReveal();
+        if(rc==0){dialog.dismiss();android.widget.Toast.makeText(activity,chinese?"已请求展开当前地图":"Map reveal requested",android.widget.Toast.LENGTH_SHORT).show();}
+        else mapStatus.setText(chinese?"当前无法展开地图，请返回游戏后重试。":"Map unavailable. Return to the game and try again.");
+    }
+    private void refreshMap(boolean chinese){
+        long[] s=GameActivity.nativeMapStatus();reveal.setEnabled(s!=null&&s.length>=7&&s[5]!=0);
+        mapStatus.setText(mapFeedback(s,chinese));
+    }
+    static String mapFeedback(long[] s,boolean zh){
+        if(s==null||s.length<7||s[1]==0)return zh?"地图功能不可用":"Map feature unavailable";
+        if(s[1]==2||s[1]==3)return (zh?"正在展开地图：":"Revealing map: ")+s[4]+" / "+s[3];
+        if(s[1]==4)return (zh?"地图已展开，房间数：":"Map revealed. Rooms: ")+s[4];
+        if(s[1]==5)return zh?"地图展开已取消，请在当前区域重试。":"Reveal cancelled. Try again in the current area.";
+        if(s[1]==6)return zh?"地图未全部展开，请在区域加载完成后重试。":"Map partially revealed. Try again after loading completes.";
+        return zh?"展开当前区域的地图迷雾，不解锁传送点或任务。":"Reveals the current area; waypoints and quests stay unchanged.";
+    }
+    private void refreshMod(boolean zh){
+        try{String id=new ModSelectionStore(activity.getFilesDir()).selected();
+            modStatus.setText((zh?"下次启动：":"Next launch: ")+(id.isEmpty()?(zh?"不加载 MOD":"No MOD"):id));
+        }catch(IOException e){modStatus.setText(zh?"无法读取 MOD 选择":"Cannot read MOD selection");}
+    }
+    private void chooseMod(boolean zh){
+        if(modPicker!=null)return;
+        try{
+            ModSelectionStore store=new ModSelectionStore(activity.getFilesDir());java.util.ArrayList<String> ids=store.installed();ids.add(0,"");
+            String[] labels=ids.toArray(new String[0]);labels[0]=zh?"不加载 MOD":"No MOD";
+            AlertDialog picker=new AlertDialog.Builder(activity).setTitle(zh?"选择已安装的 MOD":"Installed MODs")
+                .setSingleChoiceItems(labels,ids.indexOf(store.selected()),(d,index)->{
+                    try{store.select(ids.get(index));refreshMod(zh);d.dismiss();}
+                    catch(IOException e){modStatus.setText(zh?"保存 MOD 选择失败":"Could not save MOD selection");}
+                }).setNegativeButton(zh?"返回":"Back",null).create();
+            modPicker=picker;picker.setOnDismissListener(d->modPicker=null);
+            GameActivity.installDialogBack(picker);picker.show();
+        }catch(IOException e){modStatus.setText(zh?"无法读取 MOD 列表":"Cannot read MOD list");}
+    }
 }

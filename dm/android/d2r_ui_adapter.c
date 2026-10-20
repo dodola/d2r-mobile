@@ -4,6 +4,7 @@
 #include "d2r_hud_android.h"
 #include "d2r_world_overlay_android.h"
 #include "d2r_custom_android.h"
+#include "d2r_map_reveal.h"
 #include "d2r_touch_flow_android.h"
 #include "d2r_touch_shell_android.h"
 #include "input_backend.h"
@@ -52,6 +53,7 @@ int dm_android_d2r_ui_attach(module_t *main) {
         die("Android UI bridge does not include desktop teleport/screenshot diagnostics");
     if(!dm_android_custom_attach(main))return 0;
     main_base=main->base;attached=1;
+    dm_android_map_attach(main);
     dm_android_touch_bind_flow(title_touch_flow,NULL);
     LOG("ANDROID_D2R_UI_BRIDGE attached=1 source=shared-ios widget_tree=1 events=1 input_filter=1");
     return 1;
@@ -108,6 +110,7 @@ void dm_android_d2r_ui_pump(dm_android_touch_game_state *state) {
     { void dm_padmode_request(int);dm_padmode_request(dm_android_input_controller_mode()); }
     if(dm_android_d2r_touch_shell_pump)dm_android_d2r_touch_shell_pump();
     dm_world_pump();
+    dm_android_map_pump();
     dm_ui_mouse_pump();
     dm_android_d2r_touch_flow_pump();
     float x=0,y=0;

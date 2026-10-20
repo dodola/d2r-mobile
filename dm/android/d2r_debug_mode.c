@@ -67,13 +67,16 @@ static void result(const char *state,const char *detail) {
 /* Strings written here are internal constants or validated ASCII request IDs. */
 static int receipt(void) {
     char temp[PATH_MAX];
+    char save_label[128]="debug/save";const char *mod=getenv("DM_ACTIVE_MOD");
+    if(mod && *mod && strlen(mod)<=48 && strspn(mod,"abcdefghijklmnopqrstuvwxyz0123456789_-")==strlen(mod))
+        snprintf(save_label,sizeof save_label,"mods/%s/debug-save",mod);
     if (!dbg.status[0] || !path_join(temp,sizeof temp,dbg.directory,"status.tmp")) return 0;
     FILE *f=fopen(temp,"w");if(!f)return 0;
     int ok=fprintf(f,"{\"enabled\":true,\"attached\":%s,\"ready\":%s,\"run\":\"%llx\","
         "\"tick\":%u,\"area\":%u,\"request\":\"%s\",\"state\":\"%s\",\"detail\":\"%s\","
-        "\"made\":%u,\"picked\":%u,\"target\":%u,\"save\":\"debug/save\"}\n",
+        "\"made\":%u,\"picked\":%u,\"target\":%u,\"save\":\"%s\"}\n",
         dbg.attached?"true":"false",dbg.ready?"true":"false",(unsigned long long)dbg.token,
-        dbg.tick,dbg.area,dbg.request,dbg.outcome,dbg.detail,dbg.made,dbg.picked,dbg.target)>0;
+        dbg.tick,dbg.area,dbg.request,dbg.outcome,dbg.detail,dbg.made,dbg.picked,dbg.target,save_label)>0;
     if (fflush(f) || fsync(fileno(f))) ok=0;
     if (fclose(f)) ok=0;
     return ok && !rename(temp,dbg.status);
