@@ -12,7 +12,7 @@ add_library(dm_android_gfx OBJECT
   ../gfx/hle_vi.c ../gfx/hle_nv.c movie_start.c)
 target_include_directories(dm_android_gfx PRIVATE ../host . ../gfx/nvn ../gfx/nvn/include)
 target_compile_options(dm_android_gfx PRIVATE -Wall -Wextra -Werror -Wno-format -Wno-unused-function -ffixed-x18)
-target_compile_definitions(dm_android_gfx PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0)
+target_compile_definitions(dm_android_gfx PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0 DM_EXPECT_VULKAN_BACKEND=1)
 set_target_properties(dm_android_gfx PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(dm_android_gfx PUBLIC vulkan android log dl z m)
 set(DM_HOST ../host)

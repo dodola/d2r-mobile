@@ -4,12 +4,14 @@
  * The initial queue is deliberately synchronous. Guest-visible writes/events
  * are published only after a real fence has completed.
  */
+#ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vulkan.h>
 #include <android/native_window.h>
 #include "nvn_obj.h"
 #include "nvn_vk_attachment_plan.h"
 #include "nvn_vk_pipeline_store.h"
+#include "nvn_vk_upload.h"
 #include "nvn_translation_sync.h"
 #include "../../android/nvn_platform_clock.h"
 #include "nvn_mtl.h"
@@ -32,6 +34,7 @@
 #include "../../android/nvn_platform_backend.h"
 
 void dm_guest_write_prepare(void *address,size_t length);
+static int g_bc_passthrough,g_texture_upload_batch;
 
 #define LIMIT_POOLS 512
 #define LIMIT_OBJECTS 4096
@@ -143,6 +146,7 @@ typedef struct { uint64_t serial,incarnation; tex_t source; VkImage image; VkDev
      * the old allocation alive until texture finalization drains both slots. */
     VkImage before_storage;VkDeviceMemory before_storage_memory;VkImageView before_storage_view;
     uint8_t *cpu_snapshot;
+    uint8_t bc_block; /* 0 = decoded texels; 8/16 = native BC block bytes. */
     uint64_t allocation_size,before_storage_allocation_size,sample_allocation_size,shadow_allocation_size,cpu_snapshot_size;
     VkImage sample_copy;VkDeviceMemory sample_memory;VkImageView sample_view;VkImageLayout sample_layout;
     VkImage shadow;VkDeviceMemory shadow_memory;VkImageView shadow_view;VkFormat shadow_format;VkImageLayout shadow_layout;uint64_t shadow_version;uint64_t other_version,sample_other;uint32_t dirty_levels,sc_valid,sc_level,sc_levels,sc_layer,sc_layers;
@@ -649,6 +653,15 @@ static void backend_init(void) {
     enabled.depthBiasClamp=available.depthBiasClamp;
     fprintf(stderr,"[nvn-vulkan] DEPTH_BIAS_CAPS clamp_supported=%u clamp_enabled=%u\n",available.depthBiasClamp,enabled.depthBiasClamp);
     if(!available.independentBlend)die("NVN independent attachment blending unavailable",0);
+    /* Experimental until device validation. Never enable a feature solely on
+     * the GPU name: use the feature bit and per-format/image queries. */
+    const char *native_bc=getenv("DM_BC_PASSTHROUGH");
+    enabled.textureCompressionBC=available.textureCompressionBC&&native_bc&&!strcmp(native_bc,"1");
+    g_bc_passthrough=enabled.textureCompressionBC;
+    const char *batch=getenv("DM_TEXTURE_UPLOAD_BATCH");
+    g_texture_upload_batch=!batch||strcmp(batch,"0");
+    fprintf(stderr,"[nvn-vulkan] TEXTURE_UPLOAD batch=%d bc_requested=%d bc_enabled=%d\n",
+        g_texture_upload_batch,native_bc&&!strcmp(native_bc,"1"),g_bc_passthrough);
     enabled.independentBlend=VK_TRUE;
     enabled.fragmentStoresAndAtomics=available.fragmentStoresAndAtomics;
     G.fragment_stores=enabled.fragmentStoresAndAtomics;
@@ -671,7 +684,7 @@ static void backend_init(void) {
         enabled.independentBlend,enabled.fragmentStoresAndAtomics,enabled.vertexPipelineStoresAndAtomics,
         enabled.shaderClipDistance,enabled.shaderCullDistance,draw_parameters.shaderDrawParameters,G.feedback_layout,
         enabled.pipelineStatisticsQuery,enabled.fullDrawIndexUint32,enabled.depthBiasClamp,enabled.depthClamp,
-        G.null_descriptors,G.portable_draw_parameters,G.depth_order,G.depth_input_calibrated_ties};
+        G.null_descriptors,G.portable_draw_parameters,G.depth_order,G.depth_input_calibrated_ties,enabled.textureCompressionBC};
     for(unsigned i=0;i<sizeof cache_features/sizeof cache_features[0];i++)
         if(cache_features[i])G.pipeline_cache_key.enabled_features|=1u<<i;
     G.precise_occlusion=enabled.occlusionQueryPrecise;
@@ -1636,42 +1649,8 @@ static void texture_transition_levels(VTexture *t,uint32_t base,uint32_t count,V
     uint32_t k=1;while(k<n&&t->lvl[k]==t->lvl[0])k++;
     if(k==n){t->mixed=0;t->layout=t->lvl[0];}
 }
-/* GPU transfers and CPU streaming can update different compression blocks of
- * one NVN allocation. Compare actual block bytes to the last CPU snapshot so
- * page-level dirtiness never overwrites unrelated GPU-owned contents. */
-static void refresh_compressed_cpu(VTexture *t,const tex_t *source) {
-    uint64_t started=dm_android_nvn_clock_ns(),stamp=nvn_dirty_now();nvn_dirty_protect(source->mem,source->L.size);
-    uint8_t *snapshot=malloc(source->L.size);if(!snapshot)die("streamed BC snapshot allocation",source->L.size);
-    memcpy(snapshot,source->mem,source->L.size);
-    unsigned changed_regions=0;
-    for(unsigned layer=0;layer<source->L.layers;layer++)for(unsigned level=0;level<source->d.levels;level++){
-        unsigned width=t->width>>level,height=t->height>>level,depth=t->depth>>level;if(!width)width=1;if(!height)height=1;if(!depth)depth=1;
-        int bw,bh;int block=nvn_fmt_bpb(source->d.format,&bw,&bh);unsigned columns=(width+bw-1)/bw,rows=(height+bh-1)/bh;
-        uint64_t row=(uint64_t)columns*block,linear_bytes=row*rows*depth;
-        uint8_t *old=malloc(linear_bytes),*next=malloc(linear_bytes);if(!old||!next)die("streamed BC block comparison allocation",linear_bytes);
-        if(nvn_deswizzle(&source->d,level,layer,t->cpu_snapshot,old,row)||nvn_deswizzle(&source->d,level,layer,snapshot,next,row))die("streamed BC block layout",source->serial);
-        if(!memcmp(old,next,linear_bytes)){free(old);free(next);continue;}
-        uint64_t plane=((uint64_t)width*height*t->bpp+3)&~3ULL;
-        VBuffer *staging=temporary(plane*depth,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-        for(unsigned z=0;z<depth;z++)if(nvn_bc_decode(source->d.format,next+z*row*rows,row,width,height,staging->map+z*plane,(size_t)width*t->bpp))die("streamed BC block decode",source->d.format);
-        VkBufferImageCopy *regions=NULL;unsigned count=0,capacity=0;
-        for(unsigned z=0;z<depth;z++)for(unsigned y=0;y<rows;y++){
-            unsigned x=0;while(x<columns){uint64_t offset=((uint64_t)z*rows+y)*row+(uint64_t)x*block;
-                if(!memcmp(old+offset,next+offset,block)){x++;continue;}
-                unsigned first=x++;while(x<columns&&memcmp(old+((uint64_t)z*rows+y)*row+(uint64_t)x*block,next+((uint64_t)z*rows+y)*row+(uint64_t)x*block,block))x++;
-                if(count==capacity){capacity=capacity?capacity*2:64;VkBufferImageCopy *larger=realloc(regions,(size_t)capacity*sizeof(*regions));if(!larger)die("streamed BC copy regions",capacity);regions=larger;}
-                unsigned px=first*bw,py=y*bh,w=(x-first)*bw,h=bh;if(w>width-px)w=width-px;if(h>height-py)h=height-py;
-                regions[count++]=(VkBufferImageCopy){.bufferOffset=z*plane+((uint64_t)py*width+px)*t->bpp,.bufferRowLength=width,.bufferImageHeight=height,
-                    .imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level,layer,1},.imageOffset={px,py,z},.imageExtent={w,h,1}};
-            }
-        }
-        all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);vkCmdCopyBufferToImage(S.command,staging->b,t->image,t->layout,count,regions);changed_regions+=count;
-        free(regions);free(old);free(next);
-    }
-    texture_snapshot_set(t,snapshot,source->L.size);t->upload_stamp=stamp;
-    if(changed_regions){tex_dirty(t);G.uploads++;fprintf(stderr,"[nvn-vulkan] BC_STREAM_REFRESH serial=%llu changed_regions=%u gpu_blocks_preserved=1\n",(unsigned long long)t->serial,changed_regions);}
-    G.profile_decode_ns+=dm_android_nvn_clock_ns()-started;
-}
+#include "nvn_vk_texture_upload.inc"
+#include "nvn_vk_texture_refresh.inc"
 /* Resident slots never move. Both the descriptor registry and shader plans
  * retain slot+incarnation references; deleting/reusing a slot cannot inherit
  * an old image. The serial table is used only to acquire a new reference. */
@@ -1697,6 +1676,7 @@ static VTexture *texture_reference_get(TextureRef ref) {
 #include "nvn_vk_image_usage.inc"
 static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) {
     if(!source || !source->serial) die("texture serial",0);
+    if(source->d.levels<1||source->d.levels>16)die("texture mip count",source->d.levels);
     VTexture *t=texture_reference_get(ref);int found=0;uint32_t registry_slot=0;
     if(t&&t->serial!=source->serial)die("texture reference serial",source->serial);
     if(!t){registry_slot=texture_table_slot(source->serial,&found);if(found)t=&G.textures[G.texture_table[registry_slot]-1];}
@@ -1723,7 +1703,9 @@ static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) 
     t->width=source->d.width; t->height=one?1:source->d.height;t->depth=volume?source->d.depth:1;t->layout=VK_IMAGE_LAYOUT_UNDEFINED;
     uint32_t metal_format=0; int decompressed_bpp=0;
     int bc=nvn_bc_unpacked(source->d.format,&metal_format,&decompressed_bpp);
-    if(bc) {
+    if(bc&&texture_native_bc(source,&t->format,&t->bc_block))t->bpp=decompressed_bpp;
+    else if(bc) {
+        t->bc_block=0;
         switch(metal_format) { case 10:t->format=VK_FORMAT_R8_UNORM;break;case 12:t->format=VK_FORMAT_R8_SNORM;break;
           case 30:t->format=VK_FORMAT_R8G8_UNORM;break;case 32:t->format=VK_FORMAT_R8G8_SNORM;break;
           case 70:t->format=VK_FORMAT_R8G8B8A8_UNORM;break;case 71:t->format=VK_FORMAT_R8G8B8A8_SRGB;break;
@@ -1757,36 +1739,7 @@ upload_existing:
             memcpy(snapshot,source->mem,source->L.size);texture_snapshot_set(t,snapshot,source->L.size);upload_memory=snapshot;}
         all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         uint64_t decode_start=dm_android_nvn_clock_ns();
-        for(unsigned layer=0;layer<source->L.layers;layer++)for(unsigned level=0;level<source->d.levels;level++) {
-            uint32_t w=t->width>>level,h=t->height>>level,z=t->depth>>level;if(!w)w=1;if(!h)h=1;if(!z)z=1;
-            int bw=1,bh=1; int bb=nvn_fmt_bpb(source->d.format,&bw,&bh); if(!bb)die("texture block size",source->d.format);
-            uint64_t row=(uint64_t)((w+bw-1)/bw)*bb,rows=(h+bh-1)/bh;
-            uint8_t *linear=malloc(row*rows*z); if(!linear)die("texture decode allocation",row*rows*z);
-            if(source->d.flags&NVN_TEXTURE_FLAGS_LINEAR) { free(linear); die("linear texture upload layout",source->d.flags); }
-            if(nvn_deswizzle(&source->d,level,layer,upload_memory,linear,row))die("Tegra texture deswizzle",level);
-            VkImageAspectFlags upload_aspect=aspect(t->format);
-            if(upload_aspect&VK_IMAGE_ASPECT_STENCIL_BIT){
-                uint64_t pixels=(uint64_t)w*h*z;
-                if((t->format!=VK_FORMAT_D24_UNORM_S8_UINT||bb!=4)&&(t->format!=VK_FORMAT_D32_SFLOAT_S8_UINT||bb!=8))die("packaged depth/stencil upload format",source->d.format);
-                VBuffer *split=temporary(pixels*5,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-                for(uint64_t i=0;i<pixels;i++){
-                    uint32_t depth;memcpy(&depth,linear+i*bb,4);
-                    if(bb==4){split->map[pixels*4+i]=(uint8_t)(depth>>24);depth&=0xffffff;}
-                    else split->map[pixels*4+i]=linear[i*bb+4];
-                    memcpy(split->map+i*4,&depth,4);
-                }
-                free(linear);
-                VkBufferImageCopy copies[2]={
-                    {.imageSubresource={VK_IMAGE_ASPECT_DEPTH_BIT,level,layer,1},.imageExtent={w,h,z}},
-                    {.bufferOffset=pixels*4,.imageSubresource={VK_IMAGE_ASPECT_STENCIL_BIT,level,layer,1},.imageExtent={w,h,z}}};
-                vkCmdCopyBufferToImage(S.command,split->b,t->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,2,copies);continue;
-            }
-            VBuffer *staging=temporary((uint64_t)w*h*z*t->bpp,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-            if(upload_bc) {for(unsigned slice=0;slice<z;++slice)if(nvn_bc_decode(source->d.format,linear+slice*row*rows,row,w,h,staging->map+(size_t)slice*w*h*t->bpp,(size_t)w*t->bpp))die("BC decode",source->d.format); }
-            else memcpy(staging->map,linear,(size_t)w*h*z*t->bpp); free(linear);
-            VkBufferImageCopy copy={.imageSubresource={upload_aspect,level,layer,1},.imageExtent={w,h,z}};
-            vkCmdCopyBufferToImage(S.command,staging->b,t->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
-        }
+        texture_upload(t,source,upload_memory,upload_bc);
         G.profile_decode_ns+=dm_android_nvn_clock_ns()-decode_start;
         t->cpu_owned=1;t->upload_stamp=stamp;tex_dirty(t); G.uploads++;
     }
@@ -2532,6 +2485,7 @@ static void prepare_comparison_images(VShader *s) {
     }
 }
 static void trace_texture(VTexture *t,const VShader *s,const RBinding *binding) {
+    if(t->bc_block)return; /* This optional capture serializes decoded texels. */
     const char *trace_shader=G.trace_ui?"9a650561e5c40791":G.trace_shader[0]?G.trace_shader:"5c1ca4e7c3e4657c";
     if(!G.trace_frame||s->h.stage!=1||strcmp(s->key,trace_shader)||G.ntrace_textures==24||t->depth!=1)return;
     for(unsigned i=0;i<G.ntrace_textures;i++)if(G.trace_texture_serials[i]==t->serial)return;
@@ -2753,7 +2707,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
     S.null_bindings[s->h.stage]=0;
     VkDescriptorSet planned=binding_plan_try(s);if(planned)return planned;
     VkWriteDescriptorSet w[LIMIT_BINDINGS];VkDescriptorBufferInfo bi[LIMIT_BINDINGS];VkDescriptorImageInfo ii[LIMIT_BINDINGS];
-    BindingResource plan_resources[LIMIT_BINDINGS];memset(plan_resources,0,sizeof(plan_resources));
+    BindingResource plan_resources[LIMIT_BINDINGS];memset(plan_resources,0,(size_t)s->h.nb*sizeof(*plan_resources));
     int plan_safe=s->plan&&s->plan->eligible&&!G.disable_binding_plans&&!G.disable_desc_cache&&!G.trace_frame;
     memset(w,0,s->h.nb*sizeof(*w));memset(bi,0,s->h.nb*sizeof(*bi));memset(ii,0,s->h.nb*sizeof(*ii));
     int cacheable=!G.disable_desc_cache&&!G.trace_frame;VkDescriptorSet set=VK_NULL_HANDLE;
@@ -3682,9 +3636,15 @@ static void copy_b2t(const p_copy_b2t *p) {
         /* No queued GPU write overlaps this range (checked above), so the
          * compressed source bytes are authoritative in guest CPU memory. */
         const uint8_t *compressed=(const void *)(uintptr_t)p->src;
-        uint64_t image_bytes=(uint64_t)p->r.width*p->r.height*t->bpp;
+        if(t->bc_block&&!nvn_vk_bc_region(width,height,p->r.xoffset,p->r.yoffset,p->r.width,p->r.height))
+            die("native BC buffer-to-texture block alignment",p->tex->serial);
+        uint64_t block_row=((uint64_t)p->r.width+bw-1)/bw*block,block_rows=((uint64_t)p->r.height+bh-1)/bh;
+        uint64_t image_bytes=t->bc_block?block_row*block_rows:(uint64_t)p->r.width*p->r.height*t->bpp;
         VBuffer *staging=temporary(image_bytes*p->r.depth,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-        for(int z=0;z<p->r.depth;++z)if(nvn_bc_decode(p->tex->d.format,compressed+(size_t)z*image,row,p->r.width,p->r.height,staging->map+z*image_bytes,(size_t)p->r.width*t->bpp))
+        if(t->bc_block){
+            for(int z=0;z<p->r.depth;z++)for(uint64_t y=0;y<block_rows;y++)
+                memcpy(staging->map+z*image_bytes+y*block_row,compressed+(size_t)z*image+y*row,(size_t)block_row);
+        }else for(int z=0;z<p->r.depth;++z)if(nvn_bc_decode(p->tex->d.format,compressed+(size_t)z*image,row,p->r.width,p->r.height,staging->map+z*image_bytes,(size_t)p->r.width*t->bpp))
             die("buffer-to-texture BC decode",p->tex->d.format);
         all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkBufferImageCopy c={.imageSubresource={aspect(t->format),level,volume?0:layer,volume?1:p->r.depth},
@@ -3853,8 +3813,7 @@ static VkImageSubresourceLayers copy_layers(const tex_t *t,VkFormat gpu_format,c
     unsigned z=volume?t->d.depth>>level:t->L.layers;if(!w)w=1;if(!h)h=1;if(!z)z=1;
     if((uint64_t)r->xoffset+r->width>w || (uint64_t)r->yoffset+r->height>h || (uint64_t)(volume?0:base)+r->zoffset+r->depth>z)
         die("texture copy extent",t->serial);
-    /* BC images have already been expanded into the resident GPU format.
-     * Their guest format is not a Vulkan image format in this backend. */
+    /* Use the resident representation: BC can be native or CPU-decoded. */
     return (VkImageSubresourceLayers){aspect(gpu_format),level,volume?0:base+r->zoffset,volume?1:r->depth};
 }
 #include "nvn_vk_depth_copy.h"
@@ -3879,6 +3838,15 @@ static void copy_t2t(const p_copy_t2t *p) {
     if(s==d || sv!=dv)die("texture copy alias/dimension",p->dst->serial);
     VkImageSubresourceLayers sl=copy_layers(p->src,s->format,p->has_sv?&p->sv:NULL,&p->sr),dl=copy_layers(p->dst,d->format,p->has_dv?&p->dv:NULL,&p->dr);
     if(sl.aspectMask!=dl.aspectMask)die("texture copy aspect mismatch",p->dst->serial);
+    if(s->bc_block||d->bc_block){
+        unsigned sw=s->width>>sl.mipLevel,sh=s->height>>sl.mipLevel,dw=d->width>>dl.mipLevel,dh=d->height>>dl.mipLevel;
+        if(!sw)sw=1;if(!sh)sh=1;if(!dw)dw=1;if(!dh)dh=1;
+        if(!s->bc_block||!d->bc_block||!same_format||
+           p->sr.width!=p->dr.width||p->sr.height!=p->dr.height||p->sr.depth!=p->dr.depth||
+           !nvn_vk_bc_region(sw,sh,p->sr.xoffset,p->sr.yoffset,p->sr.width,p->sr.height)||
+           !nvn_vk_bc_region(dw,dh,p->dr.xoffset,p->dr.yoffset,p->dr.width,p->dr.height))
+            die("native BC copy requires matching block-aligned regions; disable BC passthrough",p->dst->serial);
+    }
     /* Copies are normal per-frame work. Keep their resource details for startup
      * and requested frame traces without growing the on-device log per copy. */
     if(G.present_count<2 || G.trace_frame)fprintf(stderr,"[nvn-vulkan] COPY_T2T src=%llu dst=%llu region=%d,%d,%d -> %d,%d,%d flags=%#x src_level=%u dst_level=%u src_layer=%u dst_layer=%u\n",(unsigned long long)p->src->serial,(unsigned long long)p->dst->serial,p->sr.width,p->sr.height,p->sr.depth,p->dr.width,p->dr.height,p->dr.depth,p->flags,sl.mipLevel,dl.mipLevel,sl.baseArrayLayer,dl.baseArrayLayer);
@@ -4594,11 +4562,15 @@ void dm_vk_copy_test_read(const tex_t *source,unsigned level,unsigned layer,uint
     if(G.active || level>=source->d.levels || layer>=source->L.layers)die("copy probe subresource",level);
     mtl_sub_begin();S.submission_cpu_readback=1;VTexture *t=texture_get(source,1);
     unsigned w=t->width>>level,h=t->height>>level;if(!w)w=1;if(!h)h=1;
-    VBuffer readback=buffer_create_kind((uint64_t)w*h*t->bpp,VK_BUFFER_USAGE_TRANSFER_DST_BIT,1,DM_VK_MEMORY_READBACK);
+    uint64_t row=t->bc_block?((uint64_t)w+3)/4*t->bc_block:(uint64_t)w*t->bpp;
+    uint64_t bytes=t->bc_block?row*((h+3)/4):row*h;
+    VBuffer readback=buffer_create_kind(bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT,1,DM_VK_MEMORY_READBACK);
     texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy c={.imageSubresource={aspect(t->format),level,layer,1},.imageExtent={w,h,1}};
     vkCmdCopyImageToBuffer(S.command,t->image,t->layout,readback.b,1,&c);mtl_sub_commit();
-    memcpy(dst,readback.map,(size_t)w*h*t->bpp);buffer_free(&readback);
+    if(t->bc_block){if(nvn_bc_decode(source->d.format,readback.map,row,w,h,dst,(size_t)w*t->bpp))die("native BC probe decode",source->d.format);}
+    else memcpy(dst,readback.map,(size_t)w*h*t->bpp);
+    buffer_free(&readback);
 }
 #endif
 #include "nvn_vk_memory.inc"
@@ -4611,4 +4583,18 @@ int mtl_link_active(void) { return 0; } /* No Android frame-link service has bee
 int mtl_link_wait_tick(uint64_t timeout) { (void)timeout;return 0; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; } /* No cross-frame store-elision ledger exists. */
 void mtl_ub_present(double ms) { (void)ms; } /* Disabled diagnostic experiment. */
-uint64_t mtl_upload_bytes(void) { uint64_t n=0;for(uint32_t i=0;i<G.texture_used;i++)if(G.textures[i].serial&&G.textures[i].cpu_owned)n+=(uint64_t)G.textures[i].width*G.textures[i].height*G.textures[i].bpp;return n; }
+uint64_t mtl_upload_bytes(void) {
+    uint64_t n=0;
+    for(uint32_t i=0;i<G.texture_used;i++){
+        VTexture *t=&G.textures[i];if(!t->serial||!t->cpu_owned)continue;
+        n+=t->bc_block?((uint64_t)t->width+3)/4*((t->height+3)/4)*t->bc_block:(uint64_t)t->width*t->height*t->bpp;
+    }
+    return n;
+}
+
+#else
+#ifdef DM_EXPECT_VULKAN_BACKEND
+#error "Android Vulkan target requires the NDK __ANDROID__ platform macro"
+#endif
+typedef int nvn_vk_is_android_only;
+#endif

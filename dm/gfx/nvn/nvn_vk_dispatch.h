@@ -162,6 +162,8 @@ static PFN_vkGetImageMemoryRequirements dm_vkGetImageMemoryRequirements;
 #define vkGetImageMemoryRequirements dm_vkGetImageMemoryRequirements
 static PFN_vkGetPhysicalDeviceFeatures dm_vkGetPhysicalDeviceFeatures;
 #define vkGetPhysicalDeviceFeatures dm_vkGetPhysicalDeviceFeatures
+static PFN_vkGetPhysicalDeviceImageFormatProperties dm_vkGetPhysicalDeviceImageFormatProperties;
+#define vkGetPhysicalDeviceImageFormatProperties dm_vkGetPhysicalDeviceImageFormatProperties
 static PFN_vkGetPhysicalDeviceFormatProperties dm_vkGetPhysicalDeviceFormatProperties;
 #define vkGetPhysicalDeviceFormatProperties dm_vkGetPhysicalDeviceFormatProperties
 static PFN_vkGetPhysicalDeviceMemoryProperties dm_vkGetPhysicalDeviceMemoryProperties;
@@ -298,6 +300,7 @@ static void dm_vk_resolve(VkInstance instance) {
     dm_vkGetDeviceQueue=(PFN_vkGetDeviceQueue)dm_vk_get(instance,"vkGetDeviceQueue");if(!dm_vkGetDeviceQueue)die("Vulkan dispatch vkGetDeviceQueue",0);
     dm_vkGetImageMemoryRequirements=(PFN_vkGetImageMemoryRequirements)dm_vk_get(instance,"vkGetImageMemoryRequirements");if(!dm_vkGetImageMemoryRequirements)die("Vulkan dispatch vkGetImageMemoryRequirements",0);
     dm_vkGetPhysicalDeviceFeatures=(PFN_vkGetPhysicalDeviceFeatures)dm_vk_get(instance,"vkGetPhysicalDeviceFeatures");if(!dm_vkGetPhysicalDeviceFeatures)die("Vulkan dispatch vkGetPhysicalDeviceFeatures",0);
+    dm_vkGetPhysicalDeviceImageFormatProperties=(PFN_vkGetPhysicalDeviceImageFormatProperties)dm_vk_get(instance,"vkGetPhysicalDeviceImageFormatProperties");if(!dm_vkGetPhysicalDeviceImageFormatProperties)die("Vulkan dispatch vkGetPhysicalDeviceImageFormatProperties",0);
     dm_vkGetPhysicalDeviceFormatProperties=(PFN_vkGetPhysicalDeviceFormatProperties)dm_vk_get(instance,"vkGetPhysicalDeviceFormatProperties");if(!dm_vkGetPhysicalDeviceFormatProperties)die("Vulkan dispatch vkGetPhysicalDeviceFormatProperties",0);
     dm_vkGetPhysicalDeviceMemoryProperties=(PFN_vkGetPhysicalDeviceMemoryProperties)dm_vk_get(instance,"vkGetPhysicalDeviceMemoryProperties");if(!dm_vkGetPhysicalDeviceMemoryProperties)die("Vulkan dispatch vkGetPhysicalDeviceMemoryProperties",0);
     dm_vkGetPhysicalDeviceProperties=(PFN_vkGetPhysicalDeviceProperties)dm_vk_get(instance,"vkGetPhysicalDeviceProperties");if(!dm_vkGetPhysicalDeviceProperties)die("Vulkan dispatch vkGetPhysicalDeviceProperties",0);
