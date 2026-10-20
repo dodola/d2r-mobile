@@ -59,6 +59,8 @@ void dm_android_d2r_rift_tick(uint64_t game, uint64_t player, uint8_t *main_base
 int dm_android_d2r_players_get(uint8_t *main_base) __attribute__((weak));
 void dm_android_d2r_ui_tick(uint64_t game,uint64_t player,uint8_t *main_base)
     __attribute__((weak));
+void dm_android_d2r_debug_tick(uint64_t game,uint64_t player,uint8_t *main_base,uint64_t runs)
+    __attribute__((weak));
 
 static int read_memory(uint64_t address, void *out, size_t bytes) {
     if (!address || !out || !bytes || address > UINT64_MAX - bytes) return 0;
@@ -520,6 +522,10 @@ static void tick_callback(const uint64_t *registers) {
     }
     if (!stopped && dm_android_d2r_ui_tick)
         dm_android_d2r_ui_tick(valid?game:0,valid?player:0,main_base);
+    /* A debug warp may invalidate guest objects. It must be the final host
+     * consumer, outside the save mutex; never pass a frozen world's player. */
+    if (dm_android_d2r_debug_tick)
+        dm_android_d2r_debug_tick(valid?game:0,player,main_base,valid?runs:0);
 }
 int dm_android_d2r_save_attach(module_t *main) {
     if (!main || strcmp(main->name, "main") || !main->base ||

@@ -7,6 +7,9 @@
 #include "render_scale.h"
 #include "touch_controls_android.h"
 #include "d2r_host_modules.h"
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+#include "d2r_debug_mode.h"
+#endif
 #include "d2r_custom_android.h"
 #include "lifecycle_android.h"
 #include "scale3d_android.h"
@@ -407,8 +410,8 @@ static void *lifecycle_worker(void *unused) {
                     (unsigned long long)commits,froze,(unsigned long long)epoch);
             } else LOG("Android lifecycle: background outside run, save wait skipped");
             if (background_current(epoch)) {
-                char save[PATH_MAX]; path(save,sizeof save,port_root,"save");
-                if (dm_android_fs_sync_tree(save)) LOG("Android lifecycle: save tree sync failed errno=%d",errno);
+                const char *save=getenv("DM_SAVE");
+                if (save && dm_android_fs_sync_tree(save)) LOG("Android lifecycle: save tree sync failed errno=%d",errno);
             }
         }
         pthread_mutex_lock(&state_lock);
@@ -523,6 +526,9 @@ static void *game_thread(void *unused) {
     phase_set("正在读取游戏资源");
     int error = romfs_image_setup_checked(image,rom,expected_image_bytes);
     if (error) die("RomFS image setup errno=%d",errno);
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+    if (dm_android_d2r_debug_configure(port_root,save,sizeof save)) die("Android debug configuration failed");
+#endif
     if (dm_android_fs_ensure_directory(save) || dm_android_fs_ensure_directory(temp) || dm_android_fs_ensure_directory(profile)) die("Android private directories");
     setenv("DM_ROMFS",rom,1); setenv("DM_SAVE",save,1); setenv("DM_TEMP",temp,1);
     if (locale_tag[0]) setenv("DM_LANG", locale_tag, 1);

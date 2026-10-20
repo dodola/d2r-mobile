@@ -1,5 +1,6 @@
 #include "d2r_host_modules.h"
 #include "d2r_save_adapter.h"
+#include "d2r_debug_mode.h"
 #include "../host/dm.h"
 #include "../host/hle.h"
 #include "../host/dm_hud.h"
@@ -336,6 +337,9 @@ int dm_android_d2r_host_attach(void) {
     { void dm_textbox_install(uint8_t *); dm_textbox_install(main->base); }
     { void dm_turnsmooth_install(uint8_t *); dm_turnsmooth_install(main->base); }
     dm_android_d2r_save_attach(main);
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+    dm_android_d2r_debug_attach(main);
+#endif
     g_d2r_main = main;
     message_names_build(main);
     g_attached = 1;
