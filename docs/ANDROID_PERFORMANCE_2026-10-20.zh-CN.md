@@ -102,6 +102,8 @@ Eden 的着色器路径同样没有快速数学开关，最终优化交给驱动
 
 ## 驱动策略：Turnip 自动选择机制（现已停用，白名单为空）
 
+> 更新（2026-10-20 晚）：自动模式已改为“高通设备默认 Turnip（sysmem）”，依据与实测见 [ANDROID_PERFORMANCE_2026-10-20_SHADER_LOOKUP.zh-CN.md](ANDROID_PERFORMANCE_2026-10-20_SHADER_LOOKUP.zh-CN.md)。下面保留当时的白名单版本记录。
+
 由于系统驱动在 Adreno 642L 上存在渲染错误，`GraphicsDriverPolicy` 的自动模式改为：`SM7325`（API 31 及以上）使用内置 Turnip，其他 SoC 仍用系统驱动；显式选择始终优先，ADB 的 `private-vulkan*` 标记优先级更高。
 
 自动选择 Turnip 之前先写 `files/d2r-mobile/driver-auto-pending`；首帧呈现或 Activity 正常销毁时删除。若下次启动时它仍在，说明上次没有走到首帧（崩溃或被划掉），记一次失败；**连续两次**才回退到系统驱动并持久化（`auto_turnip_failed`）。用户重新保存驱动选择会清除该状态。日志 `D2RDriver` 输出 `selection=… resolved=…`，回退时附带 `auto_fallback=1`。

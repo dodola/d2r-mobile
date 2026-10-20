@@ -121,3 +121,9 @@ python tools/d2r-mobile-port/verify_offline_installer.py        # host installer
 cache against its recorded `cache-checksums.sha256`. `GameActivity` no longer has a size-only RomFS fallback and skips
 re-hashing the image when the installer receipt covers it. The 91738 offline chain still exists in the repository until
 it is retired separately; its resource package must never be mixed with 94012 modules.
+
+Default graphics driver of the offline release: `GraphicsDriverPolicy` resolves `auto` to the bundled Turnip driver
+(`TU_DEBUG=sysmem`) on Qualcomm devices (Android 12+, `Build.SOC_MANUFACTURER == "QTI"`) and to the system driver
+everywhere else. Two consecutive automatic starts that never present a frame fall back to the system driver; choosing a
+driver again in the installer clears that. Measured on SM7325 and SM8750; see
+`docs/ANDROID_PERFORMANCE_2026-10-20_SHADER_LOOKUP.zh-CN.md` for the table of fixed parameters.

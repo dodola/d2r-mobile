@@ -12,7 +12,7 @@
 | 修复 | `ShaderLookup` 查找缓存（提交 `b621728`），命中后仍做同样的两次 `memcmp`，语义不变 |
 | 效果 | Turnip sysmem、100% 画质：**12.4 → 17.1 FPS（+37%）**，帧时间约 80 → 58 ms；命中率 99.5% |
 | Turnip 驱动选项 | `gmem`、`nolrz`、`noubwc`、`forcebin` 均无收益，默认 `sysmem` 最优 |
-| 驱动选择 | TNA：Turnip 比系统驱动快约 10%；PPG-AN00：Turnip 约 20 FPS，系统驱动 10–13 FPS（见下） |
+| 驱动选择 | TNA：Turnip 比系统驱动快约 10%（修复后：17.2 对 15.8）；PPG-AN00：Turnip 约 20 FPS，系统驱动 10–13 FPS（见下）。**离线包自动模式已改为高通默认 Turnip** |
 | 下一个瓶颈 | 修复后 58 ms 里 GPU 等待约 32 ms，GPU pass 成为更大的一块；CPU 热点已很平 |
 
 ## 根因细节
@@ -104,3 +104,34 @@ simpleperf（`nvn-translate` 线程）：修复前 `shader_entry` 50.8%、`memmo
 2. 查 `memmove`（11.6%）的调用来源。
 3. 修复后 GPU 等待约 32 ms/帧，下一步需要看 GPU pass（此前记录的每帧约 386 次模板 draw）。
 4. 在世界内验证（战斗、区域切换、存档），再用此优化重新构建发布包。
+
+## 最终固定参数（默认值，发布包生效）
+
+| 项目 | 取值 | 位置 / 说明 |
+| --- | --- | --- |
+| 图形驱动（自动） | **内置 Turnip（Mesa 26.2.3，driver id 18）**，Android 12+ 且 `Build.SOC_MANUFACTURER=="QTI"`；其余设备系统驱动 | `GraphicsDriverPolicy.useBundledTurnip`；日志 `D2RDriver selection=auto resolved=turnip` |
+| 驱动回退 | 自动选 Turnip 前写 `driver-auto-pending`，首帧后清除；连续 2 次启动没出画面 → 回退系统驱动并持久化 | `GraphicsDriverSettings.configure`；用户在入口重新保存选择会清除回退 |
+| 已实测的 SoC | SM7325（Adreno 642L）、SM8750（Adreno 830） | `GraphicsDriverPolicy.VERIFIED_TURNIP_SOCS`；其他高通型号同样默认 Turnip，靠回退兜底 |
+| Turnip 内存路径 | `TU_DEBUG=sysmem` | `GraphicsDriverSettings.configure`；`gmem`/`nolrz`/`noubwc`/`forcebin` 均无收益 |
+| 着色器查找缓存 | `SHADER_LOOKUP=2048` 项直接映射 | `nvn_vk.c` `ShaderLookup`；命中仍重做 control（0x880）与代码 `memcmp` |
+| 渲染比例 | 自动，94012 基准 0.75，掉帧时按 0.70/0.65/0.60 下调，下限 0.60 | 未改动；`render-scale.txt` 可手动指定 |
+| 清屏合并 / 省略写回 | 默认开（`attachment-mode.txt` 缺省 = 3） | `RendererOptions.DEFAULT_FLAGS`；A/B 无稳定差异 |
+| 渲染槽 | 1 | 多槽是数据竞争，不可用（见 ANDROID_PERFORMANCE_2026-10-20） |
+| 管线缓存种子 | 不随包提供（设备/驱动相关）；首次启动自行生成 | 重复启动不改变帧率 |
+| 诊断标记 | 全部不存在（`NOPROF`） | 性能对比前必须清除，`run-mobile.sh` 会自动清除 |
+
+## 最终对照（TNA-AN00，选角画面，稳定窗口，同一构建，两次运行）
+
+| 配置 | 修复前 | 修复后 |
+| --- | ---: | ---: |
+| **默认：自动驱动（Turnip）+ 自动比例（0.75 基准）** | 14.3（同配置修复前实测） | **21.6 / 21.7 / 21.9 / 22.1** |
+| Turnip，100% | 12.4 | 17.05 / 17.20 / 17.08 / 17.29 |
+| Turnip，75% | 14.3 | 21.67 / 21.38 / 21.68 / 21.92 |
+| 系统驱动，100%（对照） | 11.6 | 15.90 / 15.82 / 15.82 / 15.74 |
+
+系统驱动同样提速约 37%（11.6 → 15.8），因为查找缓存修复与驱动无关。构建：`org.d2r.mobile` 1.0.0-94012 可调试版，
+原生库 SHA-256 `3f65467c516ffd0cda70d7b0d71ad0cc5764913d6a1e52908545e970135a73b3`；每个配置两次运行、每次取最后两个 60 帧窗口。
+
+复现：`analysis/perf-runs/run-mobile.sh <标签> [render-scale.txt=1.0|0.75]`（`NOPROF=1 NWIN=4`）；自动比例需先
+`run-as org.d2r.mobile rm files/d2r-mobile/diagnostics/render-scale.txt`；系统驱动对照需把
+`shared_prefs/graphics-driver.xml` 的 `selection` 改为 `system`，测完改回 `auto`。
