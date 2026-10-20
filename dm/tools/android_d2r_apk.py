@@ -358,7 +358,7 @@ def read_signing_properties(path):
     return store, values["alias"], values["storePassword"], values["keyPassword"]
 
 
-def release_manifest(repo, destination, package, version_code, version_name, update_url):
+def release_manifest(repo, destination, package, version_code, version_name, update_url, debuggable=False):
     """The repository manifest (installer launcher, icons) with release identity; never debuggable."""
     android = "{http://schemas.android.com/apk/res/android}"
     ET.register_namespace("android", "http://schemas.android.com/apk/res/android")
@@ -370,7 +370,7 @@ def release_manifest(repo, destination, package, version_code, version_name, upd
     application = root.find("application")
     if application is None:
         raise ValueError("Android manifest has no application")
-    application.set(android + "debuggable", "false")
+    application.set(android + "debuggable", "true" if debuggable else "false")
     application.set(android + "appCategory", "game")
     for child in application.findall("meta-data"):
         if child.get(android + "name") == "org.d2r.binaryprobe.UPDATE_URL":
@@ -419,6 +419,9 @@ def main(argv=None):
     parser.add_argument("--overlay-base", type=Path, help="Touch-UI overlay directory (romfs_overlay)")
     parser.add_argument("--overlay-item-notes", type=Path, help="Touch-UI item-notes overlay variant directory")
     parser.add_argument("--driver-libs", type=Path, help="Directory with the verified bundled private driver libraries")
+    parser.add_argument("--debuggable", action="store_true",
+                        help="Diagnostics only: same identity and signature as the release but debuggable, so run-as can read "
+                             "app logs; installs over the release with adb install -r")
     parser.add_argument("--version-code", type=int, default=1, help="Offline release versionCode")
     parser.add_argument("--version-name", default="1.0.0-94012", help="Offline release versionName")
     parser.add_argument("--validate-only", action="store_true", help="Check prepared inputs without creating output or invoking SDK tools")
@@ -438,7 +441,7 @@ def main(argv=None):
             parser.error("--offline-manifest requires --overlay-base, --overlay-item-notes and --driver-libs")
         if args.version_code < 1:
             parser.error("--version-code must be positive")
-    elif any((args.overlay_base, args.overlay_item_notes, args.driver_libs)):
+    elif args.debuggable or any((args.overlay_base, args.overlay_item_notes, args.driver_libs)):
         parser.error("--overlay-*/--driver-libs are only valid with --offline-manifest")
     native, images, assets = args.native.resolve(), args.images.resolve(), args.hud_assets.resolve()
     extra_inputs = [p.resolve() for p in (args.offline_manifest, args.overlay_base, args.overlay_item_notes, args.driver_libs) if p]
@@ -518,7 +521,7 @@ def main(argv=None):
                                                        for n, d in sorted(overlay.items())]}, indent=2) + "\n").encode("utf-8")
     manifest = out / "AndroidManifest.xml"
     if release:
-        release_manifest(repo, manifest, args.package, args.version_code, args.version_name, update_url)
+        release_manifest(repo, manifest, args.package, args.version_code, args.version_name, update_url, args.debuggable)
     else:
         manifest.write_text(f'''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{escape(args.package)}" android:versionCode="{APP_VERSION_CODE}" android:versionName="{APP_VERSION_NAME}">
@@ -564,7 +567,7 @@ def main(argv=None):
             for name, data in overlay.items():
                 archive.writestr("assets/overlay/" + name, data, compress_type=ZIP_DEFLATED)
     run(tool("zipalign"), "-f", "-P", "16", "4", out / "base.apk", out / "aligned.apk")
-    apk = out / ("D2R-Mobile.apk" if release else "d2r-94012-test.apk")
+    apk = out / (("D2R-Mobile-debuggable.apk" if args.debuggable else "D2R-Mobile.apk") if release else "d2r-94012-test.apk")
     if signing:
         sign = ["--ks", signing[0], "--ks-key-alias", signing[1], "--ks-pass", "env:D2R_KS_PASS", "--key-pass", "env:D2R_KEY_PASS"]
     else:
@@ -581,8 +584,8 @@ def main(argv=None):
     permissions = sorted(set(re.findall(r"uses-permission:\s+name='([^']+)'", badging)))
     if permissions != ["android.permission.INTERNET", "android.permission.VIBRATE"]:
         raise ValueError(f"Unexpected permissions: {permissions!r}")
-    if release and ("application-debuggable" in badging or f"package: name='{args.package}'" not in badging):
-        raise ValueError("Release APK is debuggable or has the wrong package")
+    if release and (("application-debuggable" in badging) != args.debuggable or f"package: name='{args.package}'" not in badging):
+        raise ValueError("Release APK debuggable flag or package is wrong")
     with ZipFile(apk) as archive:
         names = archive.namelist()
         if len(names) != len(set(names)):
@@ -603,7 +606,7 @@ def main(argv=None):
                 raise ValueError(f"Final APK payload mismatch: {name}")
     report.update({"apk": str(apk), "apk_sha256": sha(apk.read_bytes()), "final_payloads_verified": len(expected),
                    "sdk": str(sdk), "java": str(java), "build_tools": args.build_tools, "android_platform": args.android_platform,
-                   "debug_signed": signing is None, "release": release, "signer_certificate_sha256": certificate.group(1),
+                   "debug_signed": signing is None, "release": release, "debuggable": args.debuggable, "signer_certificate_sha256": certificate.group(1),
                    "version_code": args.version_code if release else APP_VERSION_CODE,
                    "version_name": args.version_name if release else APP_VERSION_NAME})
     (out / "build-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
