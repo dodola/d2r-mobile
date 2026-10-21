@@ -2919,20 +2919,23 @@ static void desc_miss_report(void) {
 /* Hand out a descriptor set for this layout. Sets are kept by layout and reused once the slot's previous work has
  * completed (descriptor_sets_rewind only rewinds the counters), so the driver allocates a layout's sets once, not every
  * frame. DM_DISABLE_SET_RECYCLE restores one vkAllocateDescriptorSets per draw. */
-static VkDescriptorSet descriptor_set_acquire(VShader *s) {
+static VkDescriptorSet descriptor_set_acquire(VShader *s,int fresh) {
     VkDescriptorSet set=VK_NULL_HANDLE;
     VkDescriptorSetAllocateInfo a={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,.descriptorPool=S.descriptors,
       .descriptorSetCount=1,.pSetLayouts=&s->layout};
     if(G.disable_set_recycle){CHECK(vkAllocateDescriptorSets(G.device,&a,&set));return set;}
     struct DescSetBucket *b=NULL;
-    for(uint32_t i=0;i<S.nset_buckets;i++)if(S.set_buckets[i].layout==s->layout){b=&S.set_buckets[i];break;}
-    if(!b){
+    /* fresh：这次有绑定被跳过（驱动没有 nullDescriptor），回收的集合会留着上次的描述符，所以新分配、不进回收桶。
+     * fresh: a binding was skipped this time (the driver has no nullDescriptor); a recycled set would keep the previous user's
+     * descriptor there, so allocate a new one and keep it out of the buckets. */
+    for(uint32_t i=0;!fresh&&i<S.nset_buckets;i++)if(S.set_buckets[i].layout==s->layout){b=&S.set_buckets[i];break;}
+    if(!b&&!fresh){
         if(S.nset_buckets==S.set_buckets_cap){uint32_t cap=S.set_buckets_cap?S.set_buckets_cap*2:64;
             struct DescSetBucket *grown=realloc(S.set_buckets,cap*sizeof *grown);if(!grown)die("descriptor set bucket allocation",cap);
             S.set_buckets=grown;S.set_buckets_cap=cap;}
         b=&S.set_buckets[S.nset_buckets++];*b=(struct DescSetBucket){.layout=s->layout};
     }
-    if(b->used<b->count)return b->sets[b->used++];
+    if(b&&b->used<b->count)return b->sets[b->used++];
     /* 从最近一个还有空位的池分配；耗尽就换下一个额外池，下次回收时整体重建。
      * Allocate from the latest pool that still had room; when it runs dry move on to the next extra pool, and the next
      * slot reuse rebuilds everything. */
@@ -2944,9 +2947,11 @@ static VkDescriptorSet descriptor_set_acquire(VShader *s) {
         a.descriptorPool=S.extra_pools[S.alloc_pool++];r=vkAllocateDescriptorSets(G.device,&a,&set);
     }
     CHECK(r);
+    S.sets_total++;                       /* 计入池预算，保证到阈值时整体重建 | counts against the pool budget so the rebuild threshold still triggers */
+    if(!b)return set;
     if(b->count==b->cap){uint32_t cap=b->cap?b->cap*2:16;VkDescriptorSet *grown=realloc(b->sets,cap*sizeof *grown);
         if(!grown)die("descriptor set list allocation",cap);b->sets=grown;b->cap=cap;}
-    b->sets[b->count++]=set;b->used=b->count;S.sets_total++;
+    b->sets[b->count++]=set;b->used=b->count;
     return set;
 }
 static VkDescriptorSet bind_shader(VShader *s) {
@@ -3234,7 +3239,8 @@ static VkDescriptorSet bind_shader(VShader *s) {
         G.profile_desc_misses++;
         if(G.desc_diag)desc_miss_note(s,bi,ii,nb);
     }
-    uint64_t alloc_started=prof_now();set=descriptor_set_acquire(s);G.profile_desc_alloc_ns+=prof_now()-alloc_started;
+    int skipped_binding=0;for(uint32_t i=0;i<nb;i++)if(!w[i].descriptorCount){skipped_binding=1;break;}
+    uint64_t alloc_started=prof_now();set=descriptor_set_acquire(s,skipped_binding);G.profile_desc_alloc_ns+=prof_now()-alloc_started;
     uint32_t writes=0;for(uint32_t i=0;i<nb;i++)if(w[i].descriptorCount){w[writes]=w[i];w[writes++].dstSet=set;}
     uint64_t update_started=prof_now();vkUpdateDescriptorSets(G.device,writes,w,0,NULL);G.profile_desc_update_ns+=prof_now()-update_started;
     if(cacheable&&S.ndesc<DESC_ENTRIES&&S.desc_arena_used+2*half<=DESC_ARENA&&S.ndesc*2<DESC_TABLE){
