@@ -93,6 +93,17 @@ static uint64_t live_runs(void) {
     }
     return count ? (hash ? hash : 1) : 0;
 }
+extern uint64_t dm_nvn_frame_count(void) __attribute__((weak));
+/* The freeze hooks run for every hooked game call, many times per frame, and each live_runs() is a process_vm_readv of
+ * 8 KB plus a 1024-slot hash. The run table only changes when a run starts or ends, so one read per presented frame is
+ * enough (a change is noticed at most one frame later). DM_DISABLE_RUNS_CACHE restores a read per call. */
+static uint64_t live_runs_frame_cached(void) {
+    static uint64_t cached_frame=UINT64_MAX,cached_value;static int off=-1;
+    if(off<0)off=getenv("DM_DISABLE_RUNS_CACHE")!=NULL;
+    uint64_t frame=(!off&&dm_nvn_frame_count)?dm_nvn_frame_count():UINT64_MAX;
+    if(frame!=UINT64_MAX&&frame==cached_frame)return cached_value;
+    uint64_t value=live_runs();cached_frame=frame;cached_value=value;return value;
+}
 static void clear_freeze(void) {
     background_active=restore_pending=0;
     background_game=background_runs=0;
@@ -128,7 +139,7 @@ static void restore_pause_locked(void) {
     LOG("ANDROID_D2R_PAUSED_SAVE restored_pause=1 thawed=1");
 }
 static int frozen_now_locked(void) {
-    uint64_t runs=live_runs();
+    uint64_t runs=live_runs_frame_cached();
     if (background_active && (last_game!=background_game || runs!=background_runs)) clear_freeze();
     if (atomic_load(&frozen)) return 1;
     if (paused_game) {
@@ -146,7 +157,7 @@ static void freeze_world(const uint64_t *registers) {
     pthread_mutex_lock(&lock);
     if (restore_pending) restore_pause_locked();
     if (frozen_now_locked() || (registers[0]==frozen_tick_game && frozen_tick_game &&
-        live_runs()==frozen_tick_runs)) {
+        live_runs_frame_cached()==frozen_tick_runs)) {
         game[0x170/8]=0;
         game[0x188/8]=(uintptr_t)queue;
         ((uint64_t *)registers)[0]=(uintptr_t)game;
