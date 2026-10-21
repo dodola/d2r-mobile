@@ -26,7 +26,8 @@ final class GraphicsDriverSettings {
         if(prefs.getInt(AUTO_STRIKES,0)!=0)prefs.edit().putInt(AUTO_STRIKES,0).apply();
     }
     static boolean recommendedTurnip() {
-        return GraphicsDriverPolicy.useBundledTurnip(Build.VERSION.SDK_INT,Build.VERSION.SDK_INT>=31?Build.SOC_MANUFACTURER:"");
+        return GraphicsDriverPolicy.useBundledTurnip(GraphicsDriverPolicy.AUTO,Build.VERSION.SDK_INT,Build.VERSION.SDK_INT>=31?Build.SOC_MANUFACTURER:"",
+            Build.VERSION.SDK_INT>=31?Build.SOC_MODEL:null);
     }
     static void configure(Context context)throws Exception {
         String mode=read(context);
@@ -41,7 +42,8 @@ final class GraphicsDriverSettings {
                 if(marker.exists()&&!marker.delete())throw new IOException("无法应用驱动选择，请重新启动应用后重试");
             }
         }
-        boolean turnip=GraphicsDriverPolicy.useBundledTurnip(mode,Build.VERSION.SDK_INT,Build.VERSION.SDK_INT>=31?Build.SOC_MANUFACTURER:"");
+        boolean turnip=GraphicsDriverPolicy.useBundledTurnip(mode,Build.VERSION.SDK_INT,Build.VERSION.SDK_INT>=31?Build.SOC_MANUFACTURER:"",
+            Build.VERSION.SDK_INT>=31?Build.SOC_MODEL:null);
         String reason="";
         if(auto&&turnip) {
             // The recommended driver must never trap the user: a previous automatic start that never reached a frame

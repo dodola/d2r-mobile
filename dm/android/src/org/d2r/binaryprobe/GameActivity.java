@@ -103,8 +103,23 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static final long BTN_L1=64L, BTN_R1=128L, BTN_L2=256L, BTN_R2=512L;
     private static final long BTN_START=1024L, BTN_SELECT=2048L;
     private static final long BTN_LEFT=4096L, BTN_UP=8192L, BTN_RIGHT=16384L, BTN_DOWN=32768L;
+    /* Debuggable builds only: lets adb drive the same orientation changes a physical flip causes.
+     *   adb shell am broadcast -a org.d2r.mobile.DEBUG_ORIENTATION --es mode reverse|landscape|sensor|portrait */
+    private android.content.BroadcastReceiver debugOrientation;
+    private void registerDebugOrientation(){
+        if((getApplicationInfo().flags&android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE)==0)return;
+        debugOrientation=new android.content.BroadcastReceiver(){@Override public void onReceive(android.content.Context c,android.content.Intent i){
+            String m=i.getStringExtra("mode");int o=android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+            if("reverse".equals(m))o=android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE;
+            else if("landscape".equals(m))o=android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE;
+            else if("portrait".equals(m))o=android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+            android.util.Log.i("D2R","DEBUG_ORIENTATION mode="+m);setRequestedOrientation(o);}};
+        android.content.IntentFilter f=new android.content.IntentFilter("org.d2r.mobile.DEBUG_ORIENTATION");
+        if(android.os.Build.VERSION.SDK_INT>=33)registerReceiver(debugOrientation,f,RECEIVER_EXPORTED);else registerReceiver(debugOrientation,f);
+    }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        registerDebugOrientation();
         strings=new GameUiStrings(getResources().getConfiguration().getLocales().get(0));
         new GameHaptics(this);
         inputManager=(android.hardware.input.InputManager)getSystemService(INPUT_SERVICE);
@@ -567,5 +582,5 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}
-    @Override public void onDestroy(){GraphicsDriverSettings.confirmStarted(this);if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
+    @Override public void onDestroy(){GraphicsDriverSettings.confirmStarted(this);if(debugOrientation!=null){try{unregisterReceiver(debugOrientation);}catch(RuntimeException ignored){}debugOrientation=null;}if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
 }

@@ -27,6 +27,19 @@ public final class GraphicsDriverPolicyTest {
         if(!GraphicsDriverPolicy.verifiedSoc("SM7325")||!GraphicsDriverPolicy.verifiedSoc("SM8750")||
            GraphicsDriverPolicy.verifiedSoc("SM8150")||GraphicsDriverPolicy.verifiedSoc(null)||GraphicsDriverPolicy.verifiedSoc("sm7325"))
             throw new AssertionError("Verified SoC list");
-        System.out.println("ANDROID_GRAPHICS_DRIVER qualcomm_default=1 explicit_choices=1 api_guard=1 verified_list=1 passed=1");
+        // SM8750 presents transposed frames through the bundled Turnip swapchain: automatic keeps the system driver,
+        // other Qualcomm models and explicit choices are unchanged.
+        if(GraphicsDriverPolicy.useBundledTurnip(GraphicsDriverPolicy.AUTO,34,"QTI","SM8750")||
+           GraphicsDriverPolicy.useBundledTurnip("invalid",37,"QTI","SM8750"))
+            throw new AssertionError("Auto must keep the system driver on SM8750");
+        if(!GraphicsDriverPolicy.useBundledTurnip(GraphicsDriverPolicy.TURNIP,37,"QTI","SM8750"))
+            throw new AssertionError("Explicit Turnip must still win on SM8750");
+        if(!GraphicsDriverPolicy.useBundledTurnip(GraphicsDriverPolicy.AUTO,34,"QTI","SM7325")||
+           !GraphicsDriverPolicy.useBundledTurnip(GraphicsDriverPolicy.AUTO,34,"QTI",null)||
+           GraphicsDriverPolicy.useBundledTurnip(GraphicsDriverPolicy.AUTO,34,"MediaTek","SM8750"))
+            throw new AssertionError("Other models keep the old automatic choice");
+        if(!GraphicsDriverPolicy.turnipPresentBug("SM8750")||GraphicsDriverPolicy.turnipPresentBug("SM7325")||GraphicsDriverPolicy.turnipPresentBug(null))
+            throw new AssertionError("Present-bug list");
+        System.out.println("ANDROID_GRAPHICS_DRIVER qualcomm_default=1 explicit_choices=1 api_guard=1 verified_list=1 present_bug_soc=1 passed=1");
     }
 }
