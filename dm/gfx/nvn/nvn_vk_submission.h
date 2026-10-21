@@ -7,6 +7,13 @@
 #ifndef NVN_VK_SUBMISSION_H
 #define NVN_VK_SUBMISSION_H
 
+/* One GPU timestamp entry of the per-draw timing diagnostic. kind 0 = pass start, 1 = draw. */
+#define DT_CAP 4096
+typedef struct {
+    char vs[13],ps[13];uint8_t kind,n,depth,blend,dt,dw;uint16_t pass;
+    uint32_t w,h,count,instances,vpw,vph;
+} DrawTime;
+
 typedef enum {
     SUBMISSION_UNUSED, SUBMISSION_RECORDING, SUBMISSION_INFLIGHT,
     SUBMISSION_GPU_DONE, SUBMISSION_PUBLISHED, SUBMISSION_RETIRED
@@ -103,6 +110,9 @@ typedef struct {
     uint32_t npt,pt_open;
     uint64_t pt_draws0;
     struct {uint32_t q0,q1,w,h,n;uint64_t key,draws;} pt[512];
+    /* Per-draw GPU timing (DM_DRAW_TIMING, diagnostic only): one timestamp per draw plus one per pass start. */
+    VkQueryPool draw_ts;uint32_t ndt,dt_pass;
+    DrawTime *dt;
     TraceCapture trace_captures[512];
     unsigned ntrace_captures;
     /* Exactly one readback per probed pass, before any following pass writes. */
