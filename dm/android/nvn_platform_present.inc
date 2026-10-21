@@ -4,6 +4,7 @@
 #include "nvn_platform_clock.h"
 #include "nvn_platform_backend.h"
 #include "nvn_present_policy.h"
+#include <sys/resource.h>
 #include "nvn_translation_queue.h"
 #include "nvn_translation_sync.h"
 #include "scale3d_android.h"
@@ -25,6 +26,7 @@ typedef struct {
 } android_xjob;
 static dm_nvn_translation_queue android_xqueue;
 static pthread_once_t android_xonce=PTHREAD_ONCE_INIT;
+static void gw_translate_tick(void);
 static void android_xrun(void *payload) {
     android_xjob *j=payload;
     dm_android_nvn_schedule_thread("translate");
@@ -42,6 +44,7 @@ static void android_xrun(void *payload) {
         dm_android_nvn_work_check_thread();
         mtl_present(j->texture,j->period,j->crop);
         if(j->fence_out)*j->fence_out=mtl_last_fence();
+        gw_translate_tick();
         /* The dynamic resolution controller treats this as the frame time to hit. A 16.7 ms present period would make
          * every device that cannot reach 60 FPS look like it drops every frame and walk down to the lowest scale, so it
          * keeps the 30 FPS target (never shorter than 33.3 ms). */
@@ -62,11 +65,22 @@ static void android_xrun(void *payload) {
 /* DM_GUEST_WAIT_DIAG: where the guest (game) thread blocks, summed over each 60 presents. */
 static struct {_Atomic uint64_t sync_calls,sync_translate_ns,sync_gpu_ns,pace_ns,ticket_ns,push_ns,drain_ns;int enabled;} gw;
 static uint64_t gw_now(void){return gw.enabled?now_ns():0;}
+/* Per-thread resource usage over each 60 presents (page faults and context switches are not available to simpleperf here). */
+static void gw_rusage(const char *who) {
+    static _Thread_local struct rusage last;static _Thread_local int have;struct rusage u;
+    if(getrusage(RUSAGE_THREAD,&u))return;
+    if(have)fprintf(stderr,"[nvn-android] THREAD_RUSAGE who=%s minflt=%ld majflt=%ld vol_csw=%ld invol_csw=%ld user_ms=%.1f sys_ms=%.1f\n",who,u.ru_minflt-last.ru_minflt,u.ru_majflt-last.ru_majflt,
+        u.ru_nvcsw-last.ru_nvcsw,u.ru_nivcsw-last.ru_nivcsw,
+        ((u.ru_utime.tv_sec-last.ru_utime.tv_sec)*1e3+(u.ru_utime.tv_usec-last.ru_utime.tv_usec)/1e3),
+        ((u.ru_stime.tv_sec-last.ru_stime.tv_sec)*1e3+(u.ru_stime.tv_usec-last.ru_stime.tv_usec)/1e3));
+    last=u;have=1;
+}
 /* DM_GUEST_WAIT_DIAG=trace: timeline of the guest thread's NVN calls for a few frames. */
 static int gw_trace_on(void){static int on=-1;if(on<0){const char *e=getenv("DM_GUEST_WAIT_DIAG");on=e&&!strcmp(e,"trace");}return on;}
 static _Atomic unsigned long long gw_trace_frame;
 #define GW_TRACE(...) do{if(gw.enabled&&gw_trace_on()){unsigned long long f=atomic_load(&gw_trace_frame);if(f>=700&&f<706){fprintf(stderr,"[nvn-android] SYNC_TRACE t=%.3f f=%llu ",now_ns()/1e6,f);fprintf(stderr,__VA_ARGS__);}}}while(0)
 #define GW_ADD(field,t0) do{if(gw.enabled)atomic_fetch_add(&gw.field,now_ns()-(t0));}while(0)
+static void gw_translate_tick(void) {static unsigned n;if(gw.enabled&&++n%60==0)gw_rusage("translate");}
 static void android_xidle(int waiting) {
     static _Thread_local uint64_t token;
     if(waiting)token=dm_android_nvn_work_wait_begin(DM_NVN_WAIT_TRANSLATION_QUEUE);
@@ -307,6 +321,7 @@ NVN(nvnQueuePresentTexture,void,NVNqueue *q,NVNwindow *window,int index) {
             atomic_exchange(&gw.sync_gpu_ns,0)/1e6,atomic_exchange(&gw.pace_ns,0)/1e6,atomic_exchange(&gw.ticket_ns,0)/1e6,
             atomic_exchange(&gw.push_ns,0)/1e6,atomic_exchange(&gw.drain_ns,0)/1e6,"\n");
         fprintf(stderr,"[nvn-android] FINALIZE_HANDLE hit=%llu miss=%llu""\n",(unsigned long long)atomic_exchange(&gw_ht_hit,0),(unsigned long long)atomic_exchange(&gw_ht_miss,0));
+        gw_rusage("guest");
         for(int top=0;top<4;top++){int best=-1;uint64_t bn=0;
             for(int l=0;l<4096;l++){uint64_t n=atomic_load(&gw_line_ns[l]);if(n>bn){bn=n;best=l;}}
             if(best<0)break;
