@@ -10,7 +10,7 @@ static void resource_cache_clear(VkSubmission *ctx) {
     /* Framebuffers own references to the cached views. */
     for(int i=0;i<ctx->npass;i++){
         vkDestroyFramebuffer(G.device,ctx->framebuffers[i],NULL);
-        vkDestroyRenderPass(G.device,ctx->passes[i],NULL);
+        if(ctx->pass_owned[i])vkDestroyRenderPass(G.device,ctx->passes[i],NULL);
     }
     for(int i=0;i<ctx->nview;i++)vkDestroyImageView(G.device,ctx->temporary_views[i],NULL);
     ctx->npass=ctx->nview=0;ctx->retained_passes=ctx->retained_views=0;memset(ctx->view_table,0,sizeof ctx->view_table);

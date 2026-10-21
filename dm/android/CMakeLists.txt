@@ -184,6 +184,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_probe.c")
   target_link_libraries(dm_android_vulkan_probe PRIVATE vulkan android log m)
   target_link_options(dm_android_vulkan_probe PRIVATE -Wl,-z,max-page-size=16384)
 endif()
+# Device positive controls for format-aware sentinels, mip/layer isolation,
+# one readback per pass, and the resolution/world budgets.
+add_executable(dm_android_vk_coverage_probe EXCLUDE_FROM_ALL tests/t_vk_coverage_device.c)
+target_include_directories(dm_android_vk_coverage_probe PRIVATE ../host . ../gfx/nvn ../gfx/nvn/include)
+target_compile_options(dm_android_vk_coverage_probe PRIVATE -Wall -Wextra -Werror -Wno-unused-function -ffixed-x18)
+target_compile_definitions(dm_android_vk_coverage_probe PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0)
+target_link_libraries(dm_android_vk_coverage_probe PRIVATE vulkan log m)
+target_link_options(dm_android_vk_coverage_probe PRIVATE -Wl,-z,max-page-size=16384)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
   target_sources(dm_android_core PRIVATE romfs_image.c)
   # romfs_samples.h is generated from a locally supplied game image. Keep the

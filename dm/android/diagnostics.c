@@ -7,6 +7,8 @@
 #include <sys/syscall.h>
 #include <errno.h>
 #include <sys/uio.h>
+#include "services_platform.h"
+#include "render_budget.h"
 
 static pthread_once_t signals_once = PTHREAD_ONCE_INIT;
 static pthread_once_t alt_key_once = PTHREAD_ONCE_INIT;
@@ -236,5 +238,13 @@ void dm_backtrace(uint64_t fp) {
         uintptr_t next=(uintptr_t)pair[0]&0x00ffffffffffffffULL;if(next<=frame)break;frame=next;
     }
 }
-uint64_t front_game_res(int docked) { return ((uint64_t)(docked ? 900 : 720) << 32) | (docked ? 1600 : 1280); }
+uint64_t front_game_res(int docked) {
+    const char *e=getenv("DM_RESOLUTION_TIER");
+    if(e&&e[0]>='0'&&e[0]<='2'&&!e[1]){
+        dm_android_window_state window;dm_android_platform_get_window(&window);
+        uint64_t size=dm_android_tier_resolution(window.width,window.height,e[0]-'0');
+        if(size)return size;
+    }
+    return ((uint64_t)(docked ? 900 : 720) << 32) | (docked ? 1600 : 1280);
+}
 __attribute__((weak)) uint64_t dm_game_res(int docked) { return front_game_res(docked); }

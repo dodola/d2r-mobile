@@ -18,6 +18,7 @@ typedef struct {
     TextureRef texture;
     uint32_t descriptor_id;
     VkImageLayout layout;
+    VkSampler sampler;
 } BindingImage;
 typedef union { BindingBuffer buffer; BindingImage image; } BindingResource;
 

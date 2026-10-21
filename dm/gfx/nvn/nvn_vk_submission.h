@@ -67,6 +67,8 @@ typedef struct {
     ImageUse image_uses[2*LIMIT_BINDINGS];
     unsigned nimage_uses;
     uint32_t storage_bias[6][LIMIT_BINDINGS];
+    uint32_t dyn_offset[6][LIMIT_BINDINGS];
+    uint32_t dyn_count[6];
     Range direct_reads[LIMIT_WRITES];
     int direct_read_write_count[LIMIT_WRITES],ndirect_reads;
 
@@ -84,6 +86,7 @@ typedef struct {
     int npipeline;
     PassKey pass_key;
     VkRenderPass passes[LIMIT_WRITES+RETAINED_PASS_LIMIT];
+    uint8_t pass_owned[LIMIT_WRITES+RETAINED_PASS_LIMIT];
     VkFramebuffer framebuffers[LIMIT_WRITES+RETAINED_PASS_LIMIT];
     int npass;
     FramebufferKey framebuffer_keys[LIMIT_WRITES+RETAINED_PASS_LIMIT];
@@ -102,6 +105,15 @@ typedef struct {
     struct {uint32_t q0,q1,w,h,n;uint64_t key,draws;} pt[512];
     TraceCapture trace_captures[512];
     unsigned ntrace_captures;
+    /* Exactly one readback per probed pass, before any following pass writes. */
+    struct {
+        VTexture *texture;VBuffer *buffer;
+        uint64_t key,pass,serial;
+        uint32_t w,h,format,slot,mip,layer,sentinel;
+        VkImageLayout layout;
+    } coverage[16];
+    unsigned ncoverage;
+    uint64_t coverage_bytes;
 } VkSubmission;
 
 #endif

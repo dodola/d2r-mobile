@@ -1,6 +1,7 @@
 /* Included by hle_oe.c after the shared Apple/Android scale3d controller. */
 #include "scale3d_android.h"
 #include "render_scale.h"
+#include "render_budget.h"
 #include "d2r_scale3d_91738_profile.h"
 #include "d2r_scale3d_profile.h"
 #include <sys/uio.h>
@@ -175,6 +176,9 @@ static void android_scale3d_tick_94012(void *return_address) {
     android_s3.quality=atomic_load(&g_3d_quality_mode);
     int level=atomic_load(&g_scale3d_level);
     float want=android_s3_manual?android_s3_requested:android_s3.configured;
+    const char *tier=getenv("DM_RESOLUTION_TIER");
+    if(!android_s3_manual&&!getenv("DM_3D_SCALE")&&tier&&tier[0]>='0'&&tier[0]<='2'&&!tier[1])
+        want=dm_android_world_scale(sizes[4],sizes[5],tier[0]-'0');
     if(!android_s3_manual && !android_s3.quality && level>0 && g_s3_levels[(level>S3_NLV?S3_NLV:level)-1]<want)
         want=g_s3_levels[(level>S3_NLV?S3_NLV:level)-1];
     if(dm_nvn_ruler_truth && dm_nvn_ruler_truth())want=1.f;

@@ -29,6 +29,7 @@ JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeFrontendT
 #ifdef DM_ANDROID_D2R_UI
     return dm_android_d2r_frontend_touch(phase,x,y)!=0;
 #else
+    (void)phase;(void)x;(void)y;
     return JNI_FALSE;
 #endif
 }
@@ -840,6 +841,35 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_PRESENT_FILTER");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/present-filter.txt");
     {FILE *pf=fopen(driver_option,"r");if(pf){char pv[16]={0};size_t pn=fread(pv,1,15,pf);fclose(pf);while(pn&&(pv[pn-1]=='\n'||pv[pn-1]=='\r'||pv[pn-1]==' '))pv[--pn]=0;if(pn)setenv("DM_PRESENT_FILTER",pv,1);}}
+    /* Attachment experiments are explicit. Never import the upstream defaults
+     * or old coverage seed as evidence for this renderer/driver. */
+    unsetenv("DM_ATT_LOAD_TABLE");unsetenv("DM_PASS_SENTINEL");unsetenv("DM_PASS_SENTINEL_SELFTEST");
+    unsetenv("DM_ATT_STORE_SKIP");unsetenv("DM_RENDER_TRAFFIC");unsetenv("DM_COV_TABLE_CONTROL");
+    unsetenv("DM_DISABLE_DYNAMIC_UBO");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-dynamic-ubo");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_DYNAMIC_UBO","1",1);
+    unsetenv("DM_DIAG_COPY_VIEW");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-copy-view");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_COPY_VIEW","1",1);
+    unsetenv("DM_DISABLE_GLOBAL_PASS_CACHE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-global-pass-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_GLOBAL_PASS_CACHE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-att-load-table");
+    if(access(driver_option,F_OK)==0)setenv("DM_ATT_LOAD_TABLE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-sentinel");
+    if(access(driver_option,F_OK)==0)setenv("DM_PASS_SENTINEL","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-sentinel-selftest");
+    if(access(driver_option,F_OK)==0){setenv("DM_PASS_SENTINEL","1",1);setenv("DM_PASS_SENTINEL_SELFTEST","1",1);}
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-att-store-skip");
+    if(access(driver_option,F_OK)==0)setenv("DM_ATT_STORE_SKIP","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/render-traffic");
+    if(access(driver_option,F_OK)==0)setenv("DM_RENDER_TRAFFIC","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/cov-table.txt");
+    setenv("DM_COV_TABLE_CONTROL",driver_option,1);
+    unsetenv("DM_RESOLUTION_TIER");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/resolution-tier.txt");
+    {FILE *f=fopen(driver_option,"r");if(f){int v=fgetc(f),tail=fgetc(f);fclose(f);
+        if(v>='0'&&v<='2'&&(tail==EOF||tail=='\n')){char value[2]={(char)v,0};setenv("DM_RESOLUTION_TIER",value,1);}}}
     unsetenv("DM_DIAG_DUMP_FRAME");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/dump-frame.txt");
     {FILE *df=fopen(driver_option,"r");if(df){char dv[24]={0};size_t dn=fread(dv,1,23,df);fclose(df);if(dn)setenv("DM_DIAG_DUMP_FRAME",dv,1);}}
