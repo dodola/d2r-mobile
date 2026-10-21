@@ -80,6 +80,30 @@ int main(void) {
         snprintf(name, sizeof name, "保护后紧接的写入不漏：窗口内第 %d 页", i);
         EXPECT(name, 1, nvn_dirty_since(mem + i * pg, (size_t)pg, s));
     }
+    /* Pages the GPU writes stay exact: fault-around neither claims them as neighbours nor expands when one of them
+     * faults, so GPU-produced data is never re-uploaded from stale guest memory because a neighbour was written. */
+    nvn_dirty_mark_gpu_written(mem + 34 * pg, (size_t)pg);
+    nvn_dirty_protect(mem + 36 * pg, (size_t)pg);                  /* protects the whole window 32..39 */
+    uint64_t s4 = nvn_dirty_now();
+    nvn_dirty_stats(&f0, &p0);
+    mem[32 * pg] = 6;
+    nvn_dirty_stats(&f1, &p1);
+    EXPECT("GPU 写过的页：窗口内前面的页触发一次缺页", 1, f1 - f0);
+    EXPECT("GPU 写过的页没有被顺带标脏", 0, nvn_dirty_since(mem + 34 * pg, (size_t)pg, s4));
+    nvn_dirty_stats(&f0, &p0);
+    mem[33 * pg] = 6;                                              /* claimed together with page 32 */
+    nvn_dirty_stats(&f1, &p1);
+    EXPECT("认领到 GPU 页之前的邻页不再缺页", 0, f1 - f0);
+    nvn_dirty_stats(&f0, &p0);
+    mem[35 * pg] = 6;                                              /* beyond the GPU page: still protected */
+    nvn_dirty_stats(&f1, &p1);
+    EXPECT("GPU 页之后的页仍受保护，写入触发真实缺页", 1, f1 - f0);
+    EXPECT("GPU 页之后被写的页判脏", 1, nvn_dirty_since(mem + 35 * pg, (size_t)pg, s4));
+    nvn_dirty_stats(&f0, &p0);
+    mem[34 * pg] = 6;                                              /* a real write to the GPU page is still seen */
+    nvn_dirty_stats(&f1, &p1);
+    EXPECT("真正写 GPU 页本身仍然缺页", 1, f1 - f0);
+    EXPECT("真正写 GPU 页本身判脏", 1, nvn_dirty_since(mem + 34 * pg, (size_t)pg, s4));
     /* Ranges near the end of a pool must not run past it. */
     nvn_dirty_protect(mem + (PAGES - 1) * pg, (size_t)pg);
     uint64_t s3 = nvn_dirty_now();

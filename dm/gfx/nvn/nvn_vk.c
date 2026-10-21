@@ -1015,6 +1015,7 @@ static VPool *pool_read(uint64_t addr,uint64_t len,uint64_t *off) {
 }
 static void mark_write(uint64_t addr,uint64_t len) {
     uint64_t woff=0;VPool *wp=pool_find(addr,len,&woff);if(!wp) die("unmapped write range",addr);pool_use_alloc(wp);pool_use_mark(wp,woff,len,1);
+    nvn_dirty_mark_gpu_written((const void *)(uintptr_t)addr,(size_t)len);
     if(S.nwrites==LIMIT_WRITES) die("write range limit",S.nwrites);
     S.write_cpu[S.nwrites]=NULL;S.writes[S.nwrites++]=(Range){addr,len};
 }

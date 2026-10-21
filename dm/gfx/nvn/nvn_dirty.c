@@ -40,7 +40,7 @@ enum { BUSY_WAIT_MS = 2000 };
 // 跟踪区间 = 各内存池（MemoryPoolInitialize 登记）。池销毁后复用 live=0 的槽，信号处理里无锁扫描。
 // Tracked ranges = the memory pools (registered by MemoryPoolInitialize). After a pool is destroyed its live=0 slot is reused; the signal handler scans without locks.
 #define MAX_RANGE 4096   // 原为 256：内存池多于它时超出的池不跟踪，里面的贴图每次取用都当成脏的重传（D2R 实测峰值见内存读数行的「内存池」）。扫描只到已用的槽数，容量大不增加开销 | was 256: with more memory pools than that the excess pools are untracked and their textures are treated as dirty and re-uploaded on every use (see "memory pools" in the memory readout line for D2R's measured peak). The scan only covers slots in use, so a larger capacity costs nothing
-typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; NvnDirtySummary summary; } range_t;
+typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; _Atomic uint8_t *gpuw; size_t cap; _Atomic int live; NvnDirtySummary summary; } range_t;
 static range_t g_r[MAX_RANGE];
 static _Atomic int g_nr;
 static uintptr_t g_pg, g_shift;
@@ -152,8 +152,13 @@ static int on_fault(void *addr, int is_write, void *uc) {
             uintptr_t npages = (r->end - r->base) >> g_shift, win = g_fault_around;
             uintptr_t lo = p & ~(win - 1), hi = lo + win, first = p, after = p + 1;
             if (hi > npages) hi = npages;
-            while (after < hi) { uint8_t s = PG_PROT; if (!atomic_compare_exchange_strong(&r->state[after], &s, PG_BUSY)) break; after++; }
-            while (first > lo) { uint8_t s = PG_PROT; if (!atomic_compare_exchange_strong(&r->state[first - 1], &s, PG_BUSY)) break; first--; }
+            /* 被 GPU 写过的页（nvn_dirty_mark_gpu_written）保持逐页精确：既不当作邻页被顺带标脏，它自己出缺页时也不扩展。
+             * Pages the GPU has written (nvn_dirty_mark_gpu_written) stay exact: they are never claimed as a neighbour, and when
+             * one of them faults itself nothing is expanded, so GPU-produced data is not re-uploaded from stale guest memory. */
+            if (!atomic_load_explicit(&r->gpuw[p], memory_order_relaxed)) {
+                while (after < hi && !atomic_load_explicit(&r->gpuw[after], memory_order_relaxed)) { uint8_t s = PG_PROT; if (!atomic_compare_exchange_strong(&r->state[after], &s, PG_BUSY)) break; after++; }
+                while (first > lo && !atomic_load_explicit(&r->gpuw[first - 1], memory_order_relaxed)) { uint8_t s = PG_PROT; if (!atomic_compare_exchange_strong(&r->state[first - 1], &s, PG_BUSY)) break; first--; }
+            }
             mp(r->base + (first << g_shift), (after - first) << g_shift, PROT_READ | PROT_WRITE);
             for (uintptr_t k = first; k < after; k++) { store_generation(r, k); atomic_store(&r->state[k], PG_NONE); }
         } else unprotect_page(r, p);
@@ -240,16 +245,17 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     size_t np = (end - base) >> g_shift;
     _Atomic uint8_t *state = r->state;
     _Atomic uint64_t *gen = r->gen;
+    _Atomic uint8_t *gpuw = r->gpuw;
     if (r->cap < np) {
-        state = calloc(np, 1); gen = calloc(np, sizeof *gen);
-        if (!state || !gen) die("脏页表分配失败（%zu 页）", np);
+        state = calloc(np, 1); gen = calloc(np, sizeof *gen); gpuw = calloc(np, 1);
+        if (!state || !gen || !gpuw) die("脏页表分配失败（%zu 页）", np);
         // 旧数组不 free：信号处理里可能仍有极短暂的陈旧读者，泄漏量 = 每页 9 字节。
         // The old array is not freed: the signal handler may still have a very brief stale reader; leak = 9 bytes per page.
         r->cap = np;
     } else {
-        memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen);
+        memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen); memset((void *)gpuw, 0, np);
     }
-    r->base = base; r->end = end; r->state = state; r->gen = gen;
+    r->base = base; r->end = end; r->state = state; r->gen = gen; r->gpuw = gpuw;
     if(g_summary_enabled){
         size_t blocks=(np+NVN_DIRTY_BLOCK_PAGES-1)>>NVN_DIRTY_BLOCK_SHIFT;
         if(r->summary.capacity<blocks){
@@ -302,6 +308,17 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     }
 }
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
+/* 这段内存会被 GPU 写入（存储缓冲、拷贝目标、计数器等）：把覆盖的页标为"GPU 写过"，缺页合并不再碰它们。
+ * This memory is written by the GPU (storage buffers, copy destinations, counters, ...): flag the covered pages so fault-around
+ * leaves them exact. Cheap when already flagged (a byte read per page). */
+void nvn_dirty_mark_gpu_written(const void *addr, size_t len) {
+    if (!len || !nvn_dirty_tracked(addr, len)) return;
+    range_t *r = find(address_of(addr));
+    if (!r) return;
+    uintptr_t a = address_of(addr), p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
+    for (uintptr_t i = p; i <= q; i++)
+        if (!atomic_load_explicit(&r->gpuw[i], memory_order_relaxed)) atomic_store_explicit(&r->gpuw[i], 1, memory_order_relaxed);
+}
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) {
     if (!len) return 0;
     int recording=atomic_load(&g_query_recording);
