@@ -838,6 +838,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_EVENT_TRACE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-timing");
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_TIMING","1",1);
+    unsetenv("DM_DISABLE_SHADER_STAMP");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-shader-stamp");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SHADER_STAMP","1",1);
     unsetenv("DM_ACQUIRE_SYNC");
     {path(driver_option,sizeof driver_option,port_root,"diagnostics/acquire-sync.txt");FILE *f=fopen(driver_option,"r");
      if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;if(n)setenv("DM_ACQUIRE_SYNC",v,1);}}

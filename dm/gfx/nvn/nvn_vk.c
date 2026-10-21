@@ -175,7 +175,10 @@ typedef struct { uint64_t serial; unsigned roles; } ImageUse;
 typedef struct { const uint8_t *entry;uint64_t hash; } ShaderEntry;
 /* Per-draw shader identity memo (full-code identity, index v2). The key is the guest object, not its content: a hit
  * still re-verifies the control block and the code bytes against the indexed entry, so a rewritten shader misses. */
-typedef struct { const void *control;uint64_t address;const uint8_t *entry;uint32_t stage,code_size; } ShaderLookup;
+/* stamp: dirty-tracker generation taken (with the code pages write-protected) just before the code bytes were last
+ * compared with the indexed copy; 0 = never verified under protection. pool_serial keeps a recreated pool at the same
+ * address from inheriting the stamp. */
+typedef struct { const void *control;uint64_t address;const uint8_t *entry;uint32_t stage,code_size;uint64_t pool_serial,stamp; } ShaderLookup;
 #define SHADER_LOOKUP 2048
 typedef struct { uint64_t hash;VShader *shader;VkDescriptorSet set;uint32_t nb,off; } DescEntry;
 /* Vulkan returns selected statistics in ascending flag-bit order: input
@@ -307,7 +310,7 @@ static struct {
     int pool_range_stats,pool_owned_bypass;
     uint64_t profile_owned_reads,profile_owned_bytes;
     struct {uint64_t reads,hits,protects,read_bytes,protect_bytes,uniforms;} pool_ranges[9];
-    int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing,pass_stats,draw_timing,wsi_diag;
+    int disable_shader_stamp;uint64_t profile_shader_stamp_hits;int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing,pass_stats,draw_timing,wsi_diag;
     uint64_t pass_stats_total[4],pass_stats_passes,pass_stats_omitted,pass_stats_window_omitted;
     int attachment_defaults,attachment_flags;
     NvnAttachmentStats attachment_stats;
@@ -788,7 +791,7 @@ static void backend_init(void) {
     {const char *force=getenv("DM_VK_VERTEX_SPLIT");G.force_vertex_split=force&&!strcmp(force,"1");}
     G.disable_query_batch=getenv("DM_DISABLE_QUERY_BATCH")!=NULL;G.diag_no_occlusion=getenv("DM_DIAG_NO_OCCLUSION")!=NULL;G.barrier_pass_elide=getenv("DM_BARRIER_PASS_ELIDE")!=NULL;G.diag_no_pass_deps=getenv("DM_DIAG_NO_PASS_DEPS")!=NULL;G.precise_sync=getenv("DM_DISABLE_PRECISE_SYNC")==NULL;{const char *hd=getenv("DM_HZ_DIAG");G.hz_diag=hd?atoi(hd):0;}{const char *cd=getenv("DM_CHUNK_DRAWS");G.chunk_draws=cd?atoi(cd):48;G.chunk_log=getenv("DM_RESOURCE_STATS")!=NULL;G.profile_detail=getenv("DM_PROFILE_DETAIL")!=NULL;G.diag_skip_draws=getenv("DM_DIAG_SKIP_DRAWS")!=NULL;{const char *sh=getenv("DM_DIAG_SHAPE");G.diag_shape=sh?atoi(sh):0;}G.disable_setrt_skip=getenv("DM_DISABLE_SETRT_SKIP")!=NULL;G.disable_subres=getenv("DM_DISABLE_SUBRES")!=NULL;G.enable_narrow_access=getenv("DM_NARROW_ACCESS")!=NULL;G.diag_fixed_desc=getenv("DM_DIAG_FIXED_DESC")!=NULL;G.disable_wait_elision=getenv("DM_DISABLE_WAIT_ELISION")!=NULL;G.async_enabled=getenv("DM_DISABLE_ASYNC_COMMIT")==NULL;G.async_drain_after_submit=getenv("DM_ASYNC_DRAIN")!=NULL;{const char *sc=getenv("DM_DIAG_SKIP_CLASS");G.diag_skip_class=sc?atoi(sc):0;}G.wb_stage_enabled=getenv("DM_DISABLE_WB_STAGE")==NULL;G.disable_pass_reuse=getenv("DM_DISABLE_PASS_REUSE")!=NULL;G.disable_cpu_uniform_snapshot=getenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT")!=NULL;{const char *sx=getenv("DM_DIAG_SKIP_XFER");G.diag_skip_xfer=sx?atoi(sx):0;}}fprintf(stderr,"[nvn-vulkan] PRECISE_SYNC=%d hz_diag=%d\n",G.precise_sync,G.hz_diag);{const char *iu=getenv("DM_DIAG_IMG_USAGE");G.diag_img_usage=iu?atoi(iu):0;}
     {const char *range=getenv("DM_QUERY_RESET_RANGE");G.enable_query_reset_range=range&&atoi(range)!=0;}
-    G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL||G.pass_stats;G.draw_timing=getenv("DM_DRAW_TIMING")!=NULL;G.wsi_diag=getenv("DM_WSI_DIAG")!=NULL;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
+    G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL||G.pass_stats;G.draw_timing=getenv("DM_DRAW_TIMING")!=NULL;G.disable_shader_stamp=getenv("DM_DISABLE_SHADER_STAMP")!=NULL;G.wsi_diag=getenv("DM_WSI_DIAG")!=NULL;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
     G.disable_resource_cache=getenv("DM_DISABLE_RESOURCE_CACHE")!=NULL;
     G.disable_global_pass_cache=getenv("DM_DISABLE_GLOBAL_PASS_CACHE")!=NULL;
     {const char *v=getenv("DM_ATT_LOAD_TABLE");g_cov_table=v&&atoi(v)!=0;
@@ -2064,7 +2067,7 @@ static const uint8_t *shader_entry(const void *control,uint32_t stage,uint64_t a
         if(cursor!=G.index_bytes)die("shader index trailing data",cursor);
         fprintf(stderr,"[nvn-vulkan] SHADER_CONTROL_INDEX version=%u entries=%u slots=%zu bytes=%zu full_code_verified=%d\n",G.shader_index_version,count,capacity,capacity*sizeof(*G.shader_entries),G.shader_index_version==2);
     }
-    uint32_t code_size=0;const uint8_t *code=NULL;
+    uint32_t code_size=0;const uint8_t *code=NULL;uint64_t code_pool_serial=0;
     ShaderLookup *memo=NULL;
     if(G.shader_index_version==2) {
         uint32_t nvn_stage;memcpy(&nvn_stage,(const uint8_t *)control+0x714,4);
@@ -2072,13 +2075,25 @@ static const uint8_t *shader_entry(const void *control,uint32_t stage,uint64_t a
         memcpy(&code_size,(const uint8_t *)control+0x704,4);uint64_t offset=0;
         VPool *pool=pool_find(address,code_size,&offset);
         if(!pool || !code_size || code_size>16*1024*1024)die("shader identity GPU code range",address);
-        code=pool->guest+offset;
+        code=pool->guest+offset;code_pool_serial=pool->serial;
         uint64_t mix=(((uint64_t)(uintptr_t)control>>4)^(address*0x9e3779b97f4a7c15ULL)^((uint64_t)stage<<56))*0xbf58476d1ce4e5b9ULL;
         memo=&G.shader_lookup[(mix>>40)&(SHADER_LOOKUP-1)];
         if(memo->entry&&memo->control==control&&memo->address==address&&memo->stage==stage&&memo->code_size==code_size) {
             /* Same verification as the hashed lookup below, without hashing ~2 KB of control and the whole code. */
             const uint8_t *ctrl=indexed_control(memo->entry);
-            if(!memcmp(ctrl,control,0x880)&&!memcmp(ctrl+0x880,code,code_size)){G.profile_control_hits++;return memo->entry;}
+            /* The shader code is static game data that sits in a tracked memory pool. When none of its pages was written
+             * since the last full comparison, the comparison would give the same answer. DM_DISABLE_SHADER_STAMP
+             * restores the byte comparison on every draw. */
+            int code_same;
+            if(memo->stamp&&memo->pool_serial==pool->serial&&!G.disable_shader_stamp&&!nvn_dirty_since(code,code_size,memo->stamp)){
+                code_same=1;G.profile_shader_stamp_hits++;
+            }else{
+                uint64_t stamp=0;
+                if(!G.disable_shader_stamp&&nvn_dirty_tracked(code,code_size)){stamp=nvn_dirty_now();nvn_dirty_protect(code,code_size);}
+                code_same=!memcmp(ctrl+0x880,code,code_size);
+                memo->stamp=code_same?stamp:0;memo->pool_serial=pool->serial;
+            }
+            if(code_same&&!memcmp(ctrl,control,0x880)){G.profile_control_hits++;return memo->entry;}
         }
         G.profile_control_misses++;
     }
@@ -2090,7 +2105,7 @@ static const uint8_t *shader_entry(const void *control,uint32_t stage,uint64_t a
         if(candidate->hash==hash&&st==stage&&!memcmp(ctrl,control,0x880)) {
             uint32_t stored=0;if(G.shader_index_version==2)memcpy(&stored,candidate->entry+20,4);
             if(G.shader_index_version==1 || (stored==code_size && !memcmp(ctrl+0x880,code,code_size))) {
-                if(memo)*memo=(ShaderLookup){control,address,candidate->entry,stage,code_size};
+                if(memo)*memo=(ShaderLookup){control,address,candidate->entry,stage,code_size,code_pool_serial,0};
                 return candidate->entry;
             }
         }
@@ -4576,6 +4591,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         G.profile_replay_calls=G.profile_begin_calls=G.profile_commit_calls=G.profile_writeback_calls=G.profile_present_calls=0;
         G.profile_writeback_global_faults=G.profile_writeback_global_preps=G.profile_writeback_global_mp_calls=G.profile_writeback_global_mp_pages=0;
         fprintf(stderr,"[nvn-vulkan] CONTROL_CACHE_REASON evict=%llu changed=%llu""\n",(unsigned long long)G.profile_control_evict,(unsigned long long)G.profile_control_changed);G.profile_control_evict=G.profile_control_changed=0;
+        fprintf(stderr,"[nvn-vulkan] SHADER_STAMP_PROFILE frame=%llu stamp_hits=%llu disabled=%d\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_shader_stamp_hits,G.disable_shader_stamp);G.profile_shader_stamp_hits=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_CACHE_PROFILE frame=%llu desc_hits=%llu desc_misses=%llu control_hits=%llu control_misses=%llu barriers_skipped=%llu sample_copy_hits=%llu sample_copy_misses=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_desc_hits,(unsigned long long)G.profile_desc_misses,(unsigned long long)G.profile_control_hits,(unsigned long long)G.profile_control_misses,(unsigned long long)G.profile_barriers_skipped,(unsigned long long)G.profile_sample_copy_hits,(unsigned long long)G.profile_sample_copy_misses);
         G.profile_desc_hits=G.profile_desc_misses=G.profile_control_hits=G.profile_control_misses=G.profile_barriers_skipped=G.profile_sample_copy_hits=G.profile_sample_copy_misses=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_BINDING_PLAN_PROFILE frame=%llu hits=%llu misses=%llu fallbacks=%llu prepared_buffers=%llu prepared_images=%llu enabled=%u\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_plan_hits,(unsigned long long)G.profile_plan_misses,(unsigned long long)G.profile_plan_fallbacks,(unsigned long long)G.profile_plan_buffers,(unsigned long long)G.profile_plan_images,!G.disable_binding_plans);
