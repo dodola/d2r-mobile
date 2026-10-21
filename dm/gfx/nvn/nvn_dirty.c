@@ -112,13 +112,16 @@ static int busy_wait(range_t *r, uintptr_t p) {
  * Direct-mapped find() cache (from android-integration f09e07f): g_r is a fixed array with stable slot
  * pointers; only the slot pointer is cached and a hit is validated against the slot's current live and
  * base/end, so a reused slot never returns a stale range. Thread-local, usable in signal handlers. */
-static _Thread_local range_t *g_find_cache[16];
+/* Process-wide, not thread-local: thread-local access in a dlopen'ed library goes through the linker's dynamic TLS
+ * resolver, which cost more than the scan it replaced. Slots hold a pointer into g_r only; a racing store just
+ * leaves another valid pointer, and every hit is validated against the slot's own live/base/end. */
+static _Atomic(range_t *) g_find_cache[16];
 static range_t *find(uintptr_t a) {
     unsigned h = (unsigned)(((a >> 20) ^ (a >> 28)) & 15);
-    range_t *c = g_find_cache[h];
+    range_t *c = atomic_load_explicit(&g_find_cache[h], memory_order_relaxed);
     if (c && atomic_load_explicit(&c->live, memory_order_acquire) && a >= c->base && a < c->end) return c;
     int n = atomic_load(&g_nr);
-    for (int i = 0; i < n; i++) if (atomic_load_explicit(&g_r[i].live, memory_order_acquire) && a >= g_r[i].base && a < g_r[i].end) { g_find_cache[h] = &g_r[i]; return &g_r[i]; }
+    for (int i = 0; i < n; i++) if (atomic_load_explicit(&g_r[i].live, memory_order_acquire) && a >= g_r[i].base && a < g_r[i].end) { atomic_store_explicit(&g_find_cache[h], &g_r[i], memory_order_relaxed); return &g_r[i]; }
     return NULL;
 }
 static void store_generation(range_t *r,uintptr_t page) {
