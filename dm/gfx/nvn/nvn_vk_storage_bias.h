@@ -47,7 +47,12 @@ static uint8_t *dm_storage_bias_apply(uint8_t *bytes,size_t *size,const SBResour
         for(size_t o=5;o<*size/4&&valid;o+=w[o]>>16){unsigned n=w[o]>>16,op=w[o]&65535;
             /* Types cannot use a variable/access-chain result as a type ID;
              * scalar constants carry literal bits, including widths/IDs. */
-            if(op==5||op==6||op==15||op==71||op==72||(op>=19&&op<=39)||op==43||op==50||(op==59&&n>=3&&w[o+2]==var))continue;
+            /* Instructions whose operands are all literals (OpSource 3, OpSourceExtension 4, OpExtension 10, OpExtInstImport 11,
+             * OpMemoryModel 14, OpExecutionMode 16, OpCapability 17) can equal the variable's ID by coincidence: the
+             * capability added by the distance repair (ClipDistance 32 / CullDistance 33) made large vertex shaders look
+             * like they used their SSBO in an unsupported way. */
+            if(op==5||op==6||op==15||op==71||op==72||(op>=19&&op<=39)||op==43||op==50||(op==59&&n>=3&&w[o+2]==var)||
+               (op>=3&&op<=4)||op==10||op==11||op==14||op==16||op==17)continue;
             /* OpExtInst's instruction number is a literal, not an ID.
              * The game's Log2 instruction (30) equals an SSBO variable ID. */
             int used=0;for(unsigned j=1;j<n;j++)if(op!=12||j!=4)used|=w[o+j]==var;if(!used)continue;
@@ -60,7 +65,8 @@ static uint8_t *dm_storage_bias_apply(uint8_t *bytes,size_t *size,const SBResour
             for(size_t d=5;d<*size/4&&valid;d+=w[d]>>16){unsigned dn=w[d]>>16,dop=w[d]&65535;
                 /* Decorations contain literal enum values (NonWritable=24),
                  * which must not be mistaken for a derived pointer ID. */
-                if(d==o||dop==5||dop==6||dop==71||dop==72||(dop>=19&&dop<=39)||dop==43||dop==50)continue;
+                if(d==o||dop==5||dop==6||dop==71||dop==72||(dop>=19&&dop<=39)||dop==43||dop==50||
+                   (dop>=3&&dop<=4)||dop==10||dop==11||dop==14||dop==16||dop==17)continue;
                 int pointer_used=0;for(unsigned j=1;j<dn;j++)if(dop!=12||j!=4)pointer_used|=w[d+j]==pointer;
                 if(pointer_used&&(dop!=61||dn<4||w[d+3]!=pointer))valid=0;
             }
