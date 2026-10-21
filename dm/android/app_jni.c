@@ -838,6 +838,14 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_EVENT_TRACE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-timing");
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_TIMING","1",1);
+    unsetenv("DM_PROTECT_AROUND");
+    {path(driver_option,sizeof driver_option,port_root,"diagnostics/protect-around.txt");FILE *f=fopen(driver_option,"r");
+     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;if(n)setenv("DM_PROTECT_AROUND",v,1);}}
+    unsetenv("DM_FAULT_AROUND");
+    {path(driver_option,sizeof driver_option,port_root,"diagnostics/fault-around.txt");FILE *f=fopen(driver_option,"r");
+     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;if(n)setenv("DM_FAULT_AROUND",v,1);}}
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-fault-around");
+    if(access(driver_option,F_OK)==0){setenv("DM_FAULT_AROUND","1",1);setenv("DM_PROTECT_AROUND","1",1);}
     unsetenv("DM_ENABLE_DYNAMIC_UBO");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-dynamic-ubo");
     if(access(driver_option,F_OK)==0)setenv("DM_ENABLE_DYNAMIC_UBO","1",1);

@@ -44,6 +44,8 @@ typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *
 static range_t g_r[MAX_RANGE];
 static _Atomic int g_nr;
 static uintptr_t g_pg, g_shift;
+static unsigned g_fault_around = 1;   /* pages (power of two) claimed around a faulting page; 1 = off */
+static unsigned g_protect_around = 1; /* alignment (pages) of the ranges nvn_dirty_protect protects; 1 = exact */
 static _Atomic uint64_t g_now = 1;
 static _Atomic uint64_t g_faults, g_preps;
 static _Atomic uint64_t g_adds_total;
@@ -141,7 +143,21 @@ static int on_fault(void *addr, int is_write, void *uc) {
     if (!r) return 0;
     uintptr_t p = (address - r->base) >> g_shift;
     uint8_t st = PG_PROT;
-    if (atomic_compare_exchange_strong(&r->state[p], &st, PG_BUSY)) { unprotect_page(r, p); atomic_fetch_add(&g_faults, 1); return 1; }
+    if (atomic_compare_exchange_strong(&r->state[p], &st, PG_BUSY)) {
+        if (g_fault_around > 1) {
+            /* Fault-around: the game writes whole runs of pool memory, so a write fault also unprotects the PROT pages
+             * next to it inside an aligned window with ONE mprotect (instead of one fault + one mprotect per page, and
+             * one re-protect call per page afterwards). Neighbours are only marked dirty, which is the conservative
+             * direction: they are re-uploaded when next read, then protected again. Only atomics and mprotect here. */
+            uintptr_t npages = (r->end - r->base) >> g_shift, win = g_fault_around;
+            uintptr_t lo = p & ~(win - 1), hi = lo + win, first = p, after = p + 1;
+            if (hi > npages) hi = npages;
+            while (after < hi) { uint8_t s = PG_PROT; if (!atomic_compare_exchange_strong(&r->state[after], &s, PG_BUSY)) break; after++; }
+            while (first > lo) { uint8_t s = PG_PROT; if (!atomic_compare_exchange_strong(&r->state[first - 1], &s, PG_BUSY)) break; first--; }
+            mp(r->base + (first << g_shift), (after - first) << g_shift, PROT_READ | PROT_WRITE);
+            for (uintptr_t k = first; k < after; k++) { store_generation(r, k); atomic_store(&r->state[k], PG_NONE); }
+        } else unprotect_page(r, p);
+        atomic_fetch_add(&g_faults, 1); return 1; }
     if (st == PG_BUSY) return busy_wait(r, p);   // 别的线程正在改这页的保护：等它改完重执行（改成了只读就再缺页一次、走上面那一支） | Another thread is changing this page's protection: wait for it to finish and re-execute (if it became read-only, it faults once more and takes the branch above)
     return atomic_load(&r->gen[p]) != 0;   // 刚被别的线程解掉（本次缺页发生在解之前）：重执行；从未保护过的页不是我们的 | Just unprotected by another thread (this fault happened before the unprotect): re-execute; pages that were never protected are not ours
 }
@@ -192,7 +208,14 @@ static void dirty_initialize(void) {
 #endif
     const char *summary=getenv("DM_DIRTY_SUMMARY"),*stats=getenv("DM_DIRTY_QUERY_STATS");
     g_summary_enabled=summary&&atoi(summary)!=0;g_query_recording=stats&&atoi(stats)!=0;
-    g_pg=(uintptr_t)getpagesize();g_shift=__builtin_ctzl(g_pg);dm_fault_hook_register(on_fault);dm_guest_write_prep_register(prep_write);
+    g_pg=(uintptr_t)getpagesize();g_shift=__builtin_ctzl(g_pg);
+    /* Default window 64 KB (4 pages of 16 KB, 16 pages of 4 KB). On PPG-AN00 this cut the write faults from 420 to 180 and
+     * the mprotect time from 9 to 3 ms per frame (+18..21% FPS); 128 KB and larger windows lose it again to over-marking.
+     * DM_FAULT_AROUND / DM_PROTECT_AROUND (pages, power of two, 1 = off) override it. */
+    {unsigned def=(unsigned)(65536/g_pg);if(def<1)def=1;g_fault_around=g_protect_around=def;}
+    {const char *pa=getenv("DM_PROTECT_AROUND");if(pa){int v=atoi(pa);if(v>=1&&v<=64&&(v&(v-1))==0)g_protect_around=(unsigned)v;}}
+    {const char *fa=getenv("DM_FAULT_AROUND");if(fa){int v=atoi(fa);if(v>=1&&v<=64&&(v&(v-1))==0)g_fault_around=(unsigned)v;}}
+    dm_fault_hook_register(on_fault);dm_guest_write_prep_register(prep_write);
 }
 void nvn_dirty_add_range(const void *mem, size_t size) {
     static pthread_once_t once=PTHREAD_ONCE_INIT;if(pthread_once(&once,dirty_initialize))die("dirty tracker initialization failed");
@@ -257,6 +280,13 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     if (!len || !nvn_dirty_tracked(addr, len)) return;
     range_t *r = find(address_of(addr));
     uintptr_t a = address_of(addr), p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
+    if (g_protect_around > 1) {
+        /* Protecting more than was read is safe: protection only decides which writes are noticed, never whether one is
+         * missed. Aligning to the same groups the fault handler releases merges neighbouring small ranges into fewer
+         * mprotect calls. */
+        uintptr_t npages = (r->end - r->base) >> g_shift, win = g_protect_around;
+        p &= ~(win - 1); q |= win - 1; if (q >= npages) q = npages - 1;
+    }
     // 连续置成 PROT 的页合成一次 mprotect（逐页调用在首传大贴图时一帧上千次；选角页启动帧 5：4888 次）。
     // 已是 PROT / BUSY 的页断开连续段：不重复保护，也不碰别的线程正在改的页
     // Consecutive pages set to PROT are merged into one mprotect (per-page calls ran to over a thousand per frame when large textures were first uploaded; character select, startup frame 5: 4888 calls).

@@ -322,6 +322,11 @@ NVN(nvnQueuePresentTexture,void,NVNqueue *q,NVNwindow *window,int index) {
             atomic_exchange(&gw.push_ns,0)/1e6,atomic_exchange(&gw.drain_ns,0)/1e6,"\n");
         fprintf(stderr,"[nvn-android] FINALIZE_HANDLE hit=%llu miss=%llu""\n",(unsigned long long)atomic_exchange(&gw_ht_hit,0),(unsigned long long)atomic_exchange(&gw_ht_miss,0));
         gw_rusage("guest");
+        {static uint64_t pf,pp,pc,pg,pn;uint64_t faults,preps,calls,pages,ns;
+         nvn_dirty_stats(&faults,&preps);nvn_dirty_mp_stats(&calls,&pages,&ns);
+         fprintf(stderr,"[nvn-android] DIRTY_COST faults=%llu host_preps=%llu mprotect_calls=%llu mprotect_pages=%llu mprotect_ms=%.1f\n",
+            (unsigned long long)(faults-pf),(unsigned long long)(preps-pp),(unsigned long long)(calls-pc),(unsigned long long)(pages-pg),(ns-pn)/1e6);
+         pf=faults;pp=preps;pc=calls;pg=pages;pn=ns;}
         {static uint64_t prev[NVN_NFUNC];uint64_t delta[NVN_NFUNC];
          for(unsigned i=0;i<NVN_NFUNC;i++){uint64_t c=atomic_load(&nvn_slot[i].cnt);delta[i]=c-prev[i];prev[i]=c;}
          for(int top=0;top<80;top++){unsigned best=0;for(unsigned i=1;i<NVN_NFUNC;i++)if(delta[i]>delta[best])best=i;

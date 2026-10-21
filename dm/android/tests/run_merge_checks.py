@@ -6,6 +6,7 @@ Uses real pthread/mmap/mprotect; it does not contact a phone or run a GPU.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -28,6 +29,7 @@ def main():
         ('present', ['dm/android/tests/t_present_policy.c'], [], [[]]),
         ('dirty-race', ['dm/gfx/tests/t_dirty_race.c', hooks], ['-D__ANDROID__'], [[]]),
         ('dirty-slots', ['dm/gfx/tests/t_dirty_slots.c', core, hooks], ['-D__ANDROID__'], [[]]),
+        ('dirty-around', ['dm/gfx/tests/t_dirty_around.c', core, hooks], ['-D__ANDROID__'], [[]]),
         ('dirty-summary', ['dm/gfx/tests/t_dirty_summary.c', core, hooks], ['-D__ANDROID__'],
          [['tracker', '0'], ['tracker', '1'], ['properties', '1']]),
         ('touch', ['dm/ios/tests/t_touch_controls.c', 'dm/ios/Sources/dm_touch_controls.c'],
@@ -44,7 +46,8 @@ def main():
     report = out / 'result.json'
     report.write_text(json.dumps({'passed': False, 'status': 'running', 'device_contacted': False}) + '\n')
     def run(command, log):
-        process = subprocess.run(command, cwd=repo, capture_output=True, text=True, timeout=90)
+        env = dict(os.environ, DM_FAULT_AROUND='1', DM_PROTECT_AROUND='1')   # the exact-semantics tests; dirty-around sets its own
+        process = subprocess.run(command, cwd=repo, capture_output=True, text=True, timeout=90, env=env)
         (out / log).write_text(process.stdout + process.stderr, encoding='utf-8')
         process.check_returncode()
         return process.stdout
