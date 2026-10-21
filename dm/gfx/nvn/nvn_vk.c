@@ -310,7 +310,7 @@ static struct {
     int pool_range_stats,pool_owned_bypass;
     uint64_t profile_owned_reads,profile_owned_bytes;
     struct {uint64_t reads,hits,protects,read_bytes,protect_bytes,uniforms;} pool_ranges[9];
-    int disable_shader_stamp,disable_set_recycle;uint64_t profile_shader_stamp_hits;int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing,pass_stats,draw_timing,wsi_diag;
+    int disable_shader_stamp,disable_set_recycle,desc_diag;uint64_t profile_shader_stamp_hits;int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing,pass_stats,draw_timing,wsi_diag;
     uint64_t pass_stats_total[4],pass_stats_passes,pass_stats_omitted,pass_stats_window_omitted;
     int attachment_defaults,attachment_flags;
     NvnAttachmentStats attachment_stats;
@@ -791,7 +791,7 @@ static void backend_init(void) {
     {const char *force=getenv("DM_VK_VERTEX_SPLIT");G.force_vertex_split=force&&!strcmp(force,"1");}
     G.disable_query_batch=getenv("DM_DISABLE_QUERY_BATCH")!=NULL;G.diag_no_occlusion=getenv("DM_DIAG_NO_OCCLUSION")!=NULL;G.barrier_pass_elide=getenv("DM_BARRIER_PASS_ELIDE")!=NULL;G.diag_no_pass_deps=getenv("DM_DIAG_NO_PASS_DEPS")!=NULL;G.precise_sync=getenv("DM_DISABLE_PRECISE_SYNC")==NULL;{const char *hd=getenv("DM_HZ_DIAG");G.hz_diag=hd?atoi(hd):0;}{const char *cd=getenv("DM_CHUNK_DRAWS");G.chunk_draws=cd?atoi(cd):48;G.chunk_log=getenv("DM_RESOURCE_STATS")!=NULL;G.profile_detail=getenv("DM_PROFILE_DETAIL")!=NULL;G.diag_skip_draws=getenv("DM_DIAG_SKIP_DRAWS")!=NULL;{const char *sh=getenv("DM_DIAG_SHAPE");G.diag_shape=sh?atoi(sh):0;}G.disable_setrt_skip=getenv("DM_DISABLE_SETRT_SKIP")!=NULL;G.disable_subres=getenv("DM_DISABLE_SUBRES")!=NULL;G.enable_narrow_access=getenv("DM_NARROW_ACCESS")!=NULL;G.diag_fixed_desc=getenv("DM_DIAG_FIXED_DESC")!=NULL;G.disable_wait_elision=getenv("DM_DISABLE_WAIT_ELISION")!=NULL;G.async_enabled=getenv("DM_DISABLE_ASYNC_COMMIT")==NULL;G.async_drain_after_submit=getenv("DM_ASYNC_DRAIN")!=NULL;{const char *sc=getenv("DM_DIAG_SKIP_CLASS");G.diag_skip_class=sc?atoi(sc):0;}G.wb_stage_enabled=getenv("DM_DISABLE_WB_STAGE")==NULL;G.disable_pass_reuse=getenv("DM_DISABLE_PASS_REUSE")!=NULL;G.disable_cpu_uniform_snapshot=getenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT")!=NULL;{const char *sx=getenv("DM_DIAG_SKIP_XFER");G.diag_skip_xfer=sx?atoi(sx):0;}}fprintf(stderr,"[nvn-vulkan] PRECISE_SYNC=%d hz_diag=%d\n",G.precise_sync,G.hz_diag);{const char *iu=getenv("DM_DIAG_IMG_USAGE");G.diag_img_usage=iu?atoi(iu):0;}
     {const char *range=getenv("DM_QUERY_RESET_RANGE");G.enable_query_reset_range=range&&atoi(range)!=0;}
-    G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL||G.pass_stats;G.draw_timing=getenv("DM_DRAW_TIMING")!=NULL;G.disable_shader_stamp=getenv("DM_DISABLE_SHADER_STAMP")!=NULL;G.disable_set_recycle=getenv("DM_DISABLE_SET_RECYCLE")!=NULL;G.wsi_diag=getenv("DM_WSI_DIAG")!=NULL;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
+    G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL||G.pass_stats;G.draw_timing=getenv("DM_DRAW_TIMING")!=NULL;G.disable_shader_stamp=getenv("DM_DISABLE_SHADER_STAMP")!=NULL;G.disable_set_recycle=getenv("DM_DISABLE_SET_RECYCLE")!=NULL;G.desc_diag=getenv("DM_DESC_DIAG")!=NULL;G.wsi_diag=getenv("DM_WSI_DIAG")!=NULL;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
     G.disable_resource_cache=getenv("DM_DISABLE_RESOURCE_CACHE")!=NULL;
     G.disable_global_pass_cache=getenv("DM_DISABLE_GLOBAL_PASS_CACHE")!=NULL;
     {const char *v=getenv("DM_ATT_LOAD_TABLE");g_cov_table=v&&atoi(v)!=0;
@@ -2891,6 +2891,30 @@ static void depth_input_guard_prepare(void) {
     vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,1,&barrier,0,NULL,0,NULL);
     S.depth_input_guard_active=1;S.submission_cpu_readback=1;
 }
+/* DM_DESC_DIAG: why do descriptor-cache lookups miss? Per shader and set of changed bindings, relative to the previous
+ * entry of the same shader in this submission. */
+static struct {VShader *shader;uint64_t changed_mask;uint64_t count;int none;uint8_t fields[64];} desc_diag[256];
+static unsigned desc_diag_n;
+static void desc_miss_note(VShader *s,const VkDescriptorBufferInfo *bi,const VkDescriptorImageInfo *ii,uint32_t nb) {
+    uint64_t mask=0;int found=0;uint8_t fields[64]={0};
+    for(int e=S.ndesc-1;e>=0;e--){const DescEntry *d=&S.desc_entries[e];if(d->shader!=s)continue;found=1;
+        const VkDescriptorBufferInfo *ob=(const VkDescriptorBufferInfo *)(S.desc_arena+d->off);
+        const VkDescriptorImageInfo *oi=(const VkDescriptorImageInfo *)(S.desc_arena+d->off+nb*sizeof(VkDescriptorBufferInfo));
+        for(uint32_t i=0;i<nb&&i<64;i++)if(memcmp(&ob[i],&bi[i],sizeof bi[i])||memcmp(&oi[i],&ii[i],sizeof ii[i])){mask|=1ull<<i;
+            fields[i]=(uint8_t)((ob[i].buffer!=bi[i].buffer?1:0)|(ob[i].offset!=bi[i].offset?2:0)|(ob[i].range!=bi[i].range?4:0)|(memcmp(&oi[i],&ii[i],sizeof ii[i])?8:0));}
+        break;}
+    unsigned k=0;while(k<desc_diag_n&&!(desc_diag[k].shader==s&&desc_diag[k].changed_mask==mask&&desc_diag[k].none==!found))k++;
+    if(k==desc_diag_n){if(k==256)return;memset(&desc_diag[k],0,sizeof desc_diag[k]);desc_diag[k].shader=s;desc_diag[k].changed_mask=mask;desc_diag[k].none=!found;desc_diag_n++;}
+    desc_diag[k].count++;memcpy(desc_diag[k].fields,fields,sizeof fields);
+}
+static void desc_miss_report(void) {
+    for(unsigned a=0;a<desc_diag_n;a++)for(unsigned b=a+1;b<desc_diag_n;b++)if(desc_diag[b].count>desc_diag[a].count){typeof(desc_diag[0]) t=desc_diag[a];desc_diag[a]=desc_diag[b];desc_diag[b]=t;}
+    for(unsigned a=0;a<desc_diag_n&&a<14;a++){const VShader *s=desc_diag[a].shader;
+        char kinds[160]={0};size_t n=0;
+        for(uint32_t i=0;i<s->h.nb&&i<64&&n<70;i++)if((desc_diag[a].changed_mask>>i)&1)n+=snprintf(kinds+n,sizeof kinds-n,"b%u(kind%d,slot%d,dyn%d,f%u) ",s->b[i].binding,s->b[i].kind,s->b[i].slot,(int)((s->dyn_bindings>>i)&1),desc_diag[a].fields[i]);
+        fprintf(stderr,"[nvn-vulkan] DESC_MISS rank=%u shader=%s stage=%u misses=%llu first_of_shader=%d changed=%s\n",a,s->key,s->h.stage,(unsigned long long)desc_diag[a].count,desc_diag[a].none,kinds);}
+    desc_diag_n=0;
+}
 /* Hand out a descriptor set for this layout. Sets are kept by layout and reused once the slot's previous work has
  * completed (descriptor_sets_rewind only rewinds the counters), so the driver allocates a layout's sets once, not every
  * frame. DM_DISABLE_SET_RECYCLE restores one vkAllocateDescriptorSets per draw. */
@@ -3204,6 +3228,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
                 G.profile_desc_hits++;binding_plan_remember(s,e->set,plan_resources,plan_safe);return e->set;}
         }
         G.profile_desc_misses++;
+        if(G.desc_diag)desc_miss_note(s,bi,ii,nb);
     }
     uint64_t alloc_started=prof_now();set=descriptor_set_acquire(s);G.profile_desc_alloc_ns+=prof_now()-alloc_started;
     uint32_t writes=0;for(uint32_t i=0;i<nb;i++)if(w[i].descriptorCount){w[writes]=w[i];w[writes++].dstSet=set;}
@@ -4680,7 +4705,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
             for(uint32_t a=0;a<G.nhot;a++)for(uint32_t b=a+1;b<G.nhot;b++)if(G.hot[b].draws>G.hot[a].draws){char tk[17];uint32_t td=G.hot[a].draws;memcpy(tk,G.hot[a].key,17);memcpy(G.hot[a].key,G.hot[b].key,17);G.hot[a].draws=G.hot[b].draws;memcpy(G.hot[b].key,tk,17);G.hot[b].draws=td;}
             for(uint32_t a=0;a<G.nhot&&a<12;a++)fprintf(stderr,"[nvn-vulkan] HOT_PS rank=%u key=%s draws=%u\n",a,G.hot[a].key,G.hot[a].draws);
             G.nhot=0;G.npacc=0;}
-        draw_timing_report(G.present_count+1,G.profile_frames);
+        draw_timing_report(G.present_count+1,G.profile_frames);if(G.desc_diag)desc_miss_report();
         fprintf(stderr,"[nvn-vulkan] RENDER_RESOURCE_PROFILE frame=%llu driver_tables=%llu driver_table_reuses=%llu buffer_allocs=%llu buffer_bytes=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_driver_tables,(unsigned long long)G.profile_driver_table_reuses,(unsigned long long)G.profile_buffer_allocs,(unsigned long long)G.profile_buffer_bytes);
         G.profile_driver_tables=G.profile_driver_table_reuses=G.profile_buffer_allocs=G.profile_buffer_bytes=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_TEMP_PROFILE frame=%llu reuses=%llu cached=%u cached_bytes=%llu clear_ms=%.3f allocate_ms=%.3f aligned_bytes=%llu comparison_bytes=%llu driver_bytes=%llu other_bytes=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_temp_reuses,G.nretired,(unsigned long long)G.retired_bytes,G.profile_temp_clear_ns/1e6,G.profile_buffer_allocate_ns/1e6,(unsigned long long)G.profile_temp_bytes[TEMP_ALIGNED],(unsigned long long)G.profile_temp_bytes[TEMP_COMPARISON],(unsigned long long)G.profile_temp_bytes[TEMP_DRIVER],(unsigned long long)G.profile_temp_bytes[TEMP_OTHER]);
