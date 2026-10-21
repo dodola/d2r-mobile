@@ -240,6 +240,20 @@ static void path(char *out, size_t cap, const char *base, const char *leaf) {
 }
 /* Shared with the quality-mode menu. An absent file enables automatic
  * dynamic scaling; reject truncated values, NaN/Inf, and extra tokens. */
+/* 把 diagnostics 下标记文件的内容（去掉首尾空白，至多 15 字节）放进环境变量；文件为空时用 fallback（NULL = 不设置）。
+ * Put the content of a diagnostics marker file (whitespace trimmed, at most 15 bytes) into an environment variable; an empty
+ * file uses fallback (NULL = leave unset). */
+static void marker_to_env(const char *leaf, const char *name, const char *fallback) {
+    char file[PATH_MAX], v[16] = {0};
+    path(file, sizeof file, port_root, leaf);
+    FILE *f = fopen(file, "r");
+    if (!f) return;
+    size_t n = fread(v, 1, 15, f);
+    fclose(f);
+    while (n && (v[n - 1] == 10 || v[n - 1] == 13 || v[n - 1] == 32)) v[--n] = 0;
+    if (n) setenv(name, v, 1);
+    else if (fallback) setenv(name, fallback, 1);
+}
 static int configure_render_scale(void) {
     char marker[PATH_MAX], text[64], value[32];
     path(marker,sizeof marker,port_root,"diagnostics/render-scale.txt");
@@ -839,11 +853,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-timing");
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_TIMING","1",1);
     unsetenv("DM_PROTECT_AROUND");
-    {path(driver_option,sizeof driver_option,port_root,"diagnostics/protect-around.txt");FILE *f=fopen(driver_option,"r");
-     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;if(n)setenv("DM_PROTECT_AROUND",v,1);}}
+    marker_to_env("diagnostics/protect-around.txt","DM_PROTECT_AROUND",NULL);
     unsetenv("DM_FAULT_AROUND");
-    {path(driver_option,sizeof driver_option,port_root,"diagnostics/fault-around.txt");FILE *f=fopen(driver_option,"r");
-     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;if(n)setenv("DM_FAULT_AROUND",v,1);}}
+    marker_to_env("diagnostics/fault-around.txt","DM_FAULT_AROUND",NULL);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-fault-around");
     if(access(driver_option,F_OK)==0){setenv("DM_FAULT_AROUND","1",1);setenv("DM_PROTECT_AROUND","1",1);}
     unsetenv("DM_ENABLE_DYNAMIC_UBO");
@@ -865,15 +877,11 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-shader-stamp");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SHADER_STAMP","1",1);
     unsetenv("DM_ACQUIRE_SYNC");
-    {path(driver_option,sizeof driver_option,port_root,"diagnostics/acquire-sync.txt");FILE *f=fopen(driver_option,"r");
-     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;if(n)setenv("DM_ACQUIRE_SYNC",v,1);}}
+    marker_to_env("diagnostics/acquire-sync.txt","DM_ACQUIRE_SYNC",NULL);
     unsetenv("DM_FINALIZE_WAIT");
-    {path(driver_option,sizeof driver_option,port_root,"diagnostics/finalize-wait.txt");FILE *f=fopen(driver_option,"r");
-     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;if(n)setenv("DM_FINALIZE_WAIT",v,1);}}
+    marker_to_env("diagnostics/finalize-wait.txt","DM_FINALIZE_WAIT",NULL);
     unsetenv("DM_GUEST_WAIT_DIAG");
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/guest-wait-diag");
-    {FILE *f=fopen(driver_option,"r");
-     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;setenv("DM_GUEST_WAIT_DIAG",n?v:"1",1);}}
+    marker_to_env("diagnostics/guest-wait-diag","DM_GUEST_WAIT_DIAG","1");
     unsetenv("DM_WSI_DIAG");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/wsi-diag");
     if(access(driver_option,F_OK)==0)setenv("DM_WSI_DIAG","1",1);
@@ -933,9 +941,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     {FILE *lf=fopen(driver_option,"r");if(lf){char lv[16]={0};size_t ln=fread(lv,1,15,lf);fclose(lf);if(ln)setenv("DM_DIAG_LOD_BIAS",lv,1);}}
     /* Hint sessions are an explicit A/B experiment, off when the marker is absent. */
     unsetenv("DM_HINT_TARGET_NS");unsetenv("DM_TRANSLATE_AFFINITY");unsetenv("DM_ACQUIRE_AFFINITY");
-    {const char *leaves[][2]={{"diagnostics/hint-target-ns.txt","DM_HINT_TARGET_NS"},{"diagnostics/translate-affinity.txt","DM_TRANSLATE_AFFINITY"},{"diagnostics/acquire-affinity.txt","DM_ACQUIRE_AFFINITY"}};
-     for(int i=0;i<3;i++){path(driver_option,sizeof driver_option,port_root,leaves[i][0]);FILE *f=fopen(driver_option,"r");
-         if(f){char v[24]={0};size_t n=fread(v,1,23,f);fclose(f);while(n&&(v[n-1]=='\n'||v[n-1]=='\r'||v[n-1]==' '))v[--n]=0;if(n)setenv(leaves[i][1],v,1);}}}
+    marker_to_env("diagnostics/hint-target-ns.txt","DM_HINT_TARGET_NS",NULL);
+    marker_to_env("diagnostics/translate-affinity.txt","DM_TRANSLATE_AFFINITY",NULL);
+    marker_to_env("diagnostics/acquire-affinity.txt","DM_ACQUIRE_AFFINITY",NULL);
     unsetenv("DM_PERFORMANCE_HINTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/performance-hints");
     if(access(driver_option,F_OK)==0)setenv("DM_PERFORMANCE_HINTS","1",1);

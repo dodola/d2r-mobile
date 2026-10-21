@@ -1307,7 +1307,7 @@ static VkDescriptorPool descriptor_pool_create(void) {
 static void descriptor_sets_rewind(VkSubmission *sub) {
     if(G.disable_set_recycle||sub->nextra_pools||sub->sets_total>4096){
         for(uint32_t i=0;i<sub->nextra_pools;i++){CHECK(vkResetDescriptorPool(G.device,sub->extra_pools[i],0));vkDestroyDescriptorPool(G.device,sub->extra_pools[i],NULL);}
-        sub->nextra_pools=0;
+        sub->nextra_pools=0;sub->alloc_pool=0;
         CHECK(vkResetDescriptorPool(G.device,sub->descriptors,0));
         for(uint32_t i=0;i<sub->nset_buckets;i++){free(sub->set_buckets[i].sets);sub->set_buckets[i].sets=NULL;}
         sub->nset_buckets=0;sub->sets_total=0;return;
@@ -2932,12 +2932,15 @@ static VkDescriptorSet descriptor_set_acquire(VShader *s) {
         b=&S.set_buckets[S.nset_buckets++];*b=(struct DescSetBucket){.layout=s->layout};
     }
     if(b->used<b->count)return b->sets[b->used++];
+    /* 从最近一个还有空位的池分配；耗尽就换下一个额外池，下次回收时整体重建。
+     * Allocate from the latest pool that still had room; when it runs dry move on to the next extra pool, and the next
+     * slot reuse rebuilds everything. */
+    a.descriptorPool=S.alloc_pool?S.extra_pools[S.alloc_pool-1]:S.descriptors;
     VkResult r=vkAllocateDescriptorSets(G.device,&a,&set);
-    for(uint32_t k=0;r!=VK_SUCCESS&&(r==VK_ERROR_OUT_OF_POOL_MEMORY||r==VK_ERROR_FRAGMENTED_POOL);k++){
-        /* The recycled sets of other layouts filled the pool: continue in an extra pool; the next begin rebuilds. */
-        if(k>=4)die("descriptor pool exhausted",r);
-        if(k>=S.nextra_pools){S.extra_pools[S.nextra_pools++]=descriptor_pool_create();}
-        a.descriptorPool=S.extra_pools[k];r=vkAllocateDescriptorSets(G.device,&a,&set);
+    while(r==VK_ERROR_OUT_OF_POOL_MEMORY||r==VK_ERROR_FRAGMENTED_POOL){
+        if(S.alloc_pool>=4)die("descriptor pool exhausted",r);
+        if(S.alloc_pool>=S.nextra_pools)S.extra_pools[S.nextra_pools++]=descriptor_pool_create();
+        a.descriptorPool=S.extra_pools[S.alloc_pool++];r=vkAllocateDescriptorSets(G.device,&a,&set);
     }
     CHECK(r);
     if(b->count==b->cap){uint32_t cap=b->cap?b->cap*2:16;VkDescriptorSet *grown=realloc(b->sets,cap*sizeof *grown);

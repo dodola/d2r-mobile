@@ -98,11 +98,16 @@ extern uint64_t dm_nvn_frame_count(void) __attribute__((weak));
  * 8 KB plus a 1024-slot hash. The run table only changes when a run starts or ends, so one read per presented frame is
  * enough (a change is noticed at most one frame later). DM_DISABLE_RUNS_CACHE restores a read per call. */
 static uint64_t live_runs_frame_cached(void) {
-    static uint64_t cached_frame=UINT64_MAX,cached_value;static int off=-1;
+    static uint64_t cached_frame=UINT64_MAX,cached_value,cached_ms;static int off=-1;
     if(off<0)off=getenv("DM_DISABLE_RUNS_CACHE")!=NULL;
     uint64_t frame=(!off&&dm_nvn_frame_count)?dm_nvn_frame_count():UINT64_MAX;
-    if(frame!=UINT64_MAX&&frame==cached_frame)return cached_value;
-    uint64_t value=live_runs();cached_frame=frame;cached_value=value;return value;
+    /* 帧计数只在出图时前进（加载画面、后台、丢失 Surface 时不动），所以再加一个 50 ms 的时间上限。
+     * The frame count only advances on presents (not during loading screens, in the background or without a Surface), so the
+     * cache is also bounded to 50 ms. */
+    struct timespec ts;clock_gettime(CLOCK_MONOTONIC_COARSE,&ts);
+    uint64_t now_ms=(uint64_t)ts.tv_sec*1000u+(uint64_t)ts.tv_nsec/1000000u;
+    if(frame!=UINT64_MAX&&frame==cached_frame&&now_ms-cached_ms<50)return cached_value;
+    uint64_t value=live_runs();cached_frame=frame;cached_value=value;cached_ms=now_ms;return value;
 }
 static void clear_freeze(void) {
     background_active=restore_pending=0;

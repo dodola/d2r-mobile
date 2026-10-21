@@ -36,7 +36,7 @@ typedef struct {
      * reset and allocated again for every draw. extra_pools holds overflow pools created when the main pool ran dry. */
     struct DescSetBucket {VkDescriptorSetLayout layout;VkDescriptorSet *sets;uint32_t count,used,cap;} *set_buckets;
     uint32_t nset_buckets,set_buckets_cap,sets_total;
-    VkDescriptorPool extra_pools[4];uint32_t nextra_pools;
+    VkDescriptorPool extra_pools[4];uint32_t nextra_pools,alloc_pool; /* alloc_pool: 0 = main pool, i+1 = extra_pools[i] */
     VkFence gpu_fence;
     VkQueryPool occlusion,timestamps,pass_ts,chunk_ts,pass_stats;
     uint32_t nchunk_ts;

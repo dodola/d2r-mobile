@@ -127,6 +127,7 @@ static struct {NVNcommandHandle handle;uint64_t ticket;} android_ht[ANDROID_HT_S
 static pthread_mutex_t android_ht_lock=PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t gw_ht_hit,gw_ht_miss;
 static unsigned android_ht_slot(NVNcommandHandle h){return (unsigned)(((uint64_t)h*0x9E3779B97F4A7C15ull)>>52)&(ANDROID_HT_SIZE-1);}
+static int android_finalize_mode(void);
 static void android_note_submit_handles(const NVNcommandHandle *handles,int n,uint64_t ticket) {
     pthread_mutex_lock(&android_ht_lock);
     for(int i=0;i<n;i++){unsigned s=android_ht_slot(handles[i]);android_ht[s].handle=handles[i];android_ht[s].ticket=ticket;}
@@ -217,7 +218,7 @@ NVN(nvnQueueSubmitCommands,void,NVNqueue *q,int n,const NVNcommandHandle *handle
     ((queue_t *)q)->submits++;
     GW_TRACE("submit n=%d\n",n);
     uint64_t ticket=android_xpush(j);
-    if(n)android_note_submit_handles(handles,n,ticket);
+    if(n&&android_finalize_mode()==1)android_note_submit_handles(handles,n,ticket);
     android_gfx_leave();
 }
 __attribute__((constructor)) static void android_nvn_register(void) {
@@ -273,7 +274,10 @@ static uint64_t android_present_period(const win_t *w) {
     /* The game's power-saving option is 30 FPS when on and 60 FPS when off, and the upstream iOS build presents at the
      * display rate when it is off. Do the same here; diagnostics/disable-present-60fps restores the old behaviour of
      * following the game's own present interval (30 FPS). */
-    if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL||!getenv("DM_DISABLE_PRESENT_60FPS");
+    /* 默认按 16.7 ms 出图；显式的 DM_PRESENT_HZ（含 0 = 不限速的诊断出口）或 disable-present-60fps 恢复游戏自己的出图间隔。
+     * Present every 16.7 ms by default; an explicit DM_PRESENT_HZ (including 0 = the uncapped diagnostic escape) or
+     * disable-present-60fps restores the game's own present interval. */
+    if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL||(!getenv("DM_DISABLE_PRESENT_60FPS")&&!getenv("DM_PRESENT_HZ"));
     uint64_t period=dm_android_present_period_ns(android_present_hz,android_display_intervals,w->interval,android_present_fixed_60);
     /* Read applied settings on every frame. Apply/Discard keep their shared
      * semantics; the explicit fixed60 diagnostic retains precedence. */
@@ -284,7 +288,7 @@ static uint64_t android_present_period(const win_t *w) {
 static void android_present_log(const win_t *w) {
     uint64_t period=android_present_period(w);
     LOG("[nvn-android] PRESENT_POLICY mode=%s base_hz=%d guest_interval=%d apply_guest_interval=%d effective_period_ns=%llu",
-        android_present_fixed_60?"fixed60-experiment":"guest",android_present_hz,w->interval,
+        android_present_fixed_60?"fixed60":"guest",android_present_hz,w->interval,
         android_display_intervals&&!android_present_fixed_60,(unsigned long long)period);
 }
 NVN(nvnWindowAcquireTexture,NVNwindowAcquireTextureResult,NVNwindow *window,NVNsync *sync,int *index) {

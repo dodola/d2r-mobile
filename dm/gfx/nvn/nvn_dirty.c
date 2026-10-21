@@ -108,15 +108,13 @@ static int busy_wait(range_t *r, uintptr_t p) {
     }
     return 1;
 }
-/* find() 直接映射缓存（来自 android-integration f09e07f）：g_r 是定长数组、槽位指针稳定，
- * 只缓存槽位指针，命中时按槽位当前的 live 与 base/end 校验，槽位被复用也不会返回过期区间。
- * 线程私有，信号处理里可用（无锁无分配）。
- * Direct-mapped find() cache (from android-integration f09e07f): g_r is a fixed array with stable slot
- * pointers; only the slot pointer is cached and a hit is validated against the slot's current live and
- * base/end, so a reused slot never returns a stale range. Thread-local, usable in signal handlers. */
-/* Process-wide, not thread-local: thread-local access in a dlopen'ed library goes through the linker's dynamic TLS
- * resolver, which cost more than the scan it replaced. Slots hold a pointer into g_r only; a racing store just
- * leaves another valid pointer, and every hit is validated against the slot's own live/base/end. */
+/* find() 直接映射缓存（来自 android-integration f09e07f）：g_r 是定长数组、槽位指针稳定，只缓存槽位指针，命中时按槽位当前的
+ * live 与 base/end 校验，槽位被复用也不会返回过期区间。进程级、不用线程局部存储：动态加载库里的 TLS 要经链接器的动态解析，
+ * 比它替代的扫描还慢；并发的写入只会留下另一个有效指针。信号处理里可用（无锁无分配）。
+ * Direct-mapped find() cache (from android-integration f09e07f): g_r is a fixed array with stable slot pointers; only the slot
+ * pointer is cached and a hit is validated against the slot's current live and base/end, so a reused slot never returns a stale
+ * range. Process-wide, not thread-local: TLS in a dlopen'ed library goes through the linker's dynamic resolver, which cost more
+ * than the scan it replaced; a racing store just leaves another valid pointer. Usable in signal handlers (no locks, no allocation). */
 static _Atomic(range_t *) g_find_cache[16];
 static range_t *find(uintptr_t a) {
     unsigned h = (unsigned)(((a >> 20) ^ (a >> 28)) & 15);
@@ -145,10 +143,12 @@ static int on_fault(void *addr, int is_write, void *uc) {
     uint8_t st = PG_PROT;
     if (atomic_compare_exchange_strong(&r->state[p], &st, PG_BUSY)) {
         if (g_fault_around > 1) {
-            /* Fault-around: the game writes whole runs of pool memory, so a write fault also unprotects the PROT pages
-             * next to it inside an aligned window with ONE mprotect (instead of one fault + one mprotect per page, and
-             * one re-protect call per page afterwards). Neighbours are only marked dirty, which is the conservative
-             * direction: they are re-uploaded when next read, then protected again. Only atomics and mprotect here. */
+            /* 缺页合并：游戏成片写池内存，所以一次写缺页顺带把同一对齐窗口里相邻的保护页用一次 mprotect 解开（而不是每页一次缺页加一次
+             * mprotect，之后还要每页一次重新保护）。邻页只会被标脏——这是保守方向：下次读取时重新上传再保护。这里只用原子操作和 mprotect。
+             * Fault-around: the game writes whole runs of pool memory, so a write fault also unprotects the PROT pages next to it
+             * inside an aligned window with ONE mprotect (instead of one fault + one mprotect per page, and one re-protect call
+             * per page afterwards). Neighbours are only marked dirty, which is the conservative direction: they are re-uploaded
+             * when next read, then protected again. Only atomics and mprotect here. */
             uintptr_t npages = (r->end - r->base) >> g_shift, win = g_fault_around;
             uintptr_t lo = p & ~(win - 1), hi = lo + win, first = p, after = p + 1;
             if (hi > npages) hi = npages;
@@ -281,9 +281,9 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     range_t *r = find(address_of(addr));
     uintptr_t a = address_of(addr), p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
     if (g_protect_around > 1) {
-        /* Protecting more than was read is safe: protection only decides which writes are noticed, never whether one is
-         * missed. Aligning to the same groups the fault handler releases merges neighbouring small ranges into fewer
-         * mprotect calls. */
+        /* 多保护是安全的：保护只决定哪些写会被察觉，不会让某次写漏掉。对齐到缺页处理函数释放的同样分组，相邻的小范围合并成更少的 mprotect。
+         * Protecting more than was read is safe: protection only decides which writes are noticed, never whether one is missed.
+         * Aligning to the same groups the fault handler releases merges neighbouring small ranges into fewer mprotect calls. */
         uintptr_t npages = (r->end - r->base) >> g_shift, win = g_protect_around;
         p &= ~(win - 1); q |= win - 1; if (q >= npages) q = npages - 1;
     }
