@@ -40,6 +40,12 @@ void dm_android_nvn_schedule_thread(const char *role) {
     if(done)return;done=1;
     pid_t tid=(pid_t)syscall(SYS_gettid);
     int error=0;if(setpriority(PRIO_PROCESS,(id_t)tid,-2))error=errno;
+    /* Experiment: DM_TRANSLATE_AFFINITY=<hex cpu mask> pins the translation thread (e.g. 80 = cpu7). */
+    if(!strcmp(role,"translate")){const char *m=getenv("DM_TRANSLATE_AFFINITY");
+        if(m){unsigned long mask=strtoul(m,NULL,16);cpu_set_t set;CPU_ZERO(&set);
+            for(int c=0;c<(int)(sizeof(mask)*8)&&c<CPU_SETSIZE;c++)if(mask&(1ul<<c))CPU_SET(c,&set);
+            int rc=sched_setaffinity(tid,sizeof set,&set);
+            fprintf(stderr,"[nvn-android] TRANSLATE_AFFINITY mask=%#lx rc=%d errno=%d\n",mask,rc,rc?errno:0);}}
     errno=0;int nice=getpriority(PRIO_PROCESS,(id_t)tid);int nice_error=errno;
     int policy=0;struct sched_param parameter={0};int query=pthread_getschedparam(pthread_self(),&policy,&parameter);
     fprintf(stderr,"[nvn-android] %s tid=%d requested_nice=-2 actual_nice=%d nice_errno=%d set_errno=%d policy=%d priority=%d sched_query=%d; Darwin hardware instruction/cycle statistics unavailable\n",
@@ -67,7 +73,10 @@ static struct {
     void (*close)(HintSession *);
     uint64_t frames,valid,skipped,wall_ns,cpu_ns,waits[DM_NVN_WAIT_KIND_COUNT],success,errors;
 } hint={.lock=PTHREAD_MUTEX_INITIALIZER,.generation=1,.foreground=1};
-static const int64_t hint_target_ns=33333333;
+/* The target tells the scheduler how long a frame may take. Following the 33.3 ms default while the explicit
+ * 60 FPS present period is active would make it keep clocks low, so DM_ANDROID_PRESENT_60FPS selects 16.7 ms;
+ * DM_HINT_TARGET_NS overrides both for experiments. */
+static int64_t hint_target_ns=33333333;
 
 static void hint_close_locked(void) {
     if(hint.session){hint.close(hint.session);hint.session=NULL;}
@@ -82,6 +91,8 @@ static void hint_owner_exited(void *pointer) {
 static void hint_initialize_locked(void) {
     if(hint.initialized)return;hint.initialized=1;
     const char *setting=getenv("DM_PERFORMANCE_HINTS");hint.enabled=setting&&!strcmp(setting,"1");
+    if(getenv("DM_ANDROID_PRESENT_60FPS"))hint_target_ns=16666666;
+    {const char *t=getenv("DM_HINT_TARGET_NS");if(t){long long v=atoll(t);if(v>=1000000&&v<=100000000)hint_target_ns=v;}}
     hint.api=android_get_device_api_level();
     const char *reason="opt_in_off";
     if(hint.enabled){

@@ -53,8 +53,10 @@
 
 #ifdef __ANDROID__
 static void x_drain(void);
+static void x_drain_at(int line);
+static void android_finalize_handle(NVNcommandHandle h);
 /* Direct backend mutations must not overtake previously queued translation. */
-#define ANDROID_DRAIN() x_drain()
+#define ANDROID_DRAIN() x_drain_at(__LINE__)
 #else
 #define ANDROID_DRAIN() ((void)0)
 #endif
@@ -283,7 +285,15 @@ NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) {
 #endif
     LOG("[nvn] 深度模式 %s",m?"近=0（同 D3D / Metal）":"近=-w（GL）");
 }
-NVN(nvnDeviceFinalizeCommandHandle, void, NVNdevice *d, NVNcommandHandle h) { (void)d; (void)h; ANDROID_DRAIN(); }
+NVN(nvnDeviceFinalizeCommandHandle, void, NVNdevice *d, NVNcommandHandle h) {
+    (void)d;
+#ifdef __ANDROID__
+    /* Only the submission that used this handle has to be translated before its command memory may be reused. */
+    android_finalize_handle(h);
+#else
+    (void)h;
+#endif
+}
 
 // ---------- 内存池 ----------
 // ---------- Memory pools ----------
@@ -605,7 +615,7 @@ static void read_texels(const tex_t *o, const view_t *v, const NVNcopyRegion *r,
     if (!row) row = wb;
     if (!img) img = row * hb;
     unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
-    x_drain();   // CPU 读贴图：已入队的提交先翻译完 | CPU texture read: submits already enqueued are translated first
+    x_drain_at(__LINE__);   // CPU 读贴图：已入队的提交先翻译完 | CPU texture read: submits already enqueued are translated first
     mtl_read_texels(o, level, layer0, r, dst, (size_t)row, (size_t)img);
 }
 NVN(nvnTextureReadTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, void *dst) {
@@ -770,7 +780,7 @@ NVN(nvnQueueGetError, NVNqueueGetErrorResult, NVNqueue *q, NVNqueueErrorInfo *in
     (void)q; if (info) memset(info, 0, sizeof *info); return NVN_QUEUE_GET_ERROR_RESULT_GPU_NO_ERROR;
 }
 NVN(nvnQueueFlush, void, NVNqueue *q) { (void)q; }
-NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; x_drain(); mtl_finish(); }
+NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; x_drain_at(__LINE__); mtl_finish(); }
 
 // ---------- 命令缓冲：录进游戏的命令内存，提交时执行 CPU 可见副作用 ----------
 // ---------- Command buffer: record into the game's command memory, perform CPU-visible side effects at submit ----------

@@ -835,6 +835,16 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_EVENT_TRACE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-timing");
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_TIMING","1",1);
+    unsetenv("DM_ACQUIRE_SYNC");
+    {path(driver_option,sizeof driver_option,port_root,"diagnostics/acquire-sync.txt");FILE *f=fopen(driver_option,"r");
+     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;if(n)setenv("DM_ACQUIRE_SYNC",v,1);}}
+    unsetenv("DM_FINALIZE_WAIT");
+    {path(driver_option,sizeof driver_option,port_root,"diagnostics/finalize-wait.txt");FILE *f=fopen(driver_option,"r");
+     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;if(n)setenv("DM_FINALIZE_WAIT",v,1);}}
+    unsetenv("DM_GUEST_WAIT_DIAG");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/guest-wait-diag");
+    {FILE *f=fopen(driver_option,"r");
+     if(f){char v[16]={0};size_t n=fread(v,1,15,f);fclose(f);while(n&&(v[n-1]==10||v[n-1]==13||v[n-1]==32))v[--n]=0;setenv("DM_GUEST_WAIT_DIAG",n?v:"1",1);}}
     unsetenv("DM_WSI_DIAG");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/wsi-diag");
     if(access(driver_option,F_OK)==0)setenv("DM_WSI_DIAG","1",1);
@@ -893,6 +903,10 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     path(driver_option,sizeof driver_option,port_root,"diagnostics/lod-bias.txt");
     {FILE *lf=fopen(driver_option,"r");if(lf){char lv[16]={0};size_t ln=fread(lv,1,15,lf);fclose(lf);if(ln)setenv("DM_DIAG_LOD_BIAS",lv,1);}}
     /* Hint sessions are an explicit A/B experiment, off when the marker is absent. */
+    unsetenv("DM_HINT_TARGET_NS");unsetenv("DM_TRANSLATE_AFFINITY");
+    {const char *leaves[][2]={{"diagnostics/hint-target-ns.txt","DM_HINT_TARGET_NS"},{"diagnostics/translate-affinity.txt","DM_TRANSLATE_AFFINITY"}};
+     for(int i=0;i<2;i++){path(driver_option,sizeof driver_option,port_root,leaves[i][0]);FILE *f=fopen(driver_option,"r");
+         if(f){char v[24]={0};size_t n=fread(v,1,23,f);fclose(f);while(n&&(v[n-1]=='\n'||v[n-1]=='\r'||v[n-1]==' '))v[--n]=0;if(n)setenv(leaves[i][1],v,1);}}}
     unsetenv("DM_PERFORMANCE_HINTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/performance-hints");
     if(access(driver_option,F_OK)==0)setenv("DM_PERFORMANCE_HINTS","1",1);
