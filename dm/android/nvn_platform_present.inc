@@ -42,7 +42,10 @@ static void android_xrun(void *payload) {
         dm_android_nvn_work_check_thread();
         mtl_present(j->texture,j->period,j->crop);
         if(j->fence_out)*j->fence_out=mtl_last_fence();
-        dm_android_scale3d_present(now_ns(),(uint64_t)(j->period*1e9));
+        /* The dynamic resolution controller treats this as the frame time to hit. A 16.7 ms present period would make
+         * every device that cannot reach 60 FPS look like it drops every frame and walk down to the lowest scale, so it
+         * keeps the 30 FPS target (never shorter than 33.3 ms). */
+        {uint64_t target=(uint64_t)(j->period*1e9);if(target<33333332ULL)target=33333332ULL;dm_android_scale3d_present(now_ns(),target);}
         uint64_t frame=atomic_fetch_add(&android_nvn_frame,1)+1;
         mtl_set_frame(frame);dm_android_nvn_presented(frame);
         dm_android_nvn_work_end(frame);break;
@@ -253,11 +256,14 @@ static uint64_t android_present_period(const win_t *w) {
     if(android_present_hz<0) {const char *e=getenv("DM_PRESENT_HZ");
         android_present_hz=e?atoi(e):dm_android_cadence_base_hz(mtl_display_hz(),getenv("DM_DISABLE_PRESENT_CADENCE")!=NULL);
         android_display_intervals=mtl_has_window();}
-    if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL;
+    /* The game's power-saving option is 30 FPS when on and 60 FPS when off, and the upstream iOS build presents at the
+     * display rate when it is off. Do the same here; diagnostics/disable-present-60fps restores the old behaviour of
+     * following the game's own present interval (30 FPS). */
+    if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL||!getenv("DM_DISABLE_PRESENT_60FPS");
     uint64_t period=dm_android_present_period_ns(android_present_hz,android_display_intervals,w->interval,android_present_fixed_60);
     /* Read applied settings on every frame. Apply/Discard keep their shared
      * semantics; the explicit fixed60 diagnostic retains precedence. */
-    if(!android_present_fixed_60 && dm_android_d2r_fps_setting)
+    if(dm_android_d2r_fps_setting)
         period=dm_android_present_power_period_ns(period,dm_android_d2r_fps_setting()==30);
     return period;
 }
