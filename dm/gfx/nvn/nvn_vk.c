@@ -310,7 +310,7 @@ static struct {
     int pool_range_stats,pool_owned_bypass;
     uint64_t profile_owned_reads,profile_owned_bytes;
     struct {uint64_t reads,hits,protects,read_bytes,protect_bytes,uniforms;} pool_ranges[9];
-    int disable_shader_stamp;uint64_t profile_shader_stamp_hits;int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing,pass_stats,draw_timing,wsi_diag;
+    int disable_shader_stamp,disable_set_recycle;uint64_t profile_shader_stamp_hits;int diag_barrier,diag_loadstore,disable_barrier_elision,disable_sample_copy_cache,barrier_stats,pass_timing,pass_stats,draw_timing,wsi_diag;
     uint64_t pass_stats_total[4],pass_stats_passes,pass_stats_omitted,pass_stats_window_omitted;
     int attachment_defaults,attachment_flags;
     NvnAttachmentStats attachment_stats;
@@ -791,7 +791,7 @@ static void backend_init(void) {
     {const char *force=getenv("DM_VK_VERTEX_SPLIT");G.force_vertex_split=force&&!strcmp(force,"1");}
     G.disable_query_batch=getenv("DM_DISABLE_QUERY_BATCH")!=NULL;G.diag_no_occlusion=getenv("DM_DIAG_NO_OCCLUSION")!=NULL;G.barrier_pass_elide=getenv("DM_BARRIER_PASS_ELIDE")!=NULL;G.diag_no_pass_deps=getenv("DM_DIAG_NO_PASS_DEPS")!=NULL;G.precise_sync=getenv("DM_DISABLE_PRECISE_SYNC")==NULL;{const char *hd=getenv("DM_HZ_DIAG");G.hz_diag=hd?atoi(hd):0;}{const char *cd=getenv("DM_CHUNK_DRAWS");G.chunk_draws=cd?atoi(cd):48;G.chunk_log=getenv("DM_RESOURCE_STATS")!=NULL;G.profile_detail=getenv("DM_PROFILE_DETAIL")!=NULL;G.diag_skip_draws=getenv("DM_DIAG_SKIP_DRAWS")!=NULL;{const char *sh=getenv("DM_DIAG_SHAPE");G.diag_shape=sh?atoi(sh):0;}G.disable_setrt_skip=getenv("DM_DISABLE_SETRT_SKIP")!=NULL;G.disable_subres=getenv("DM_DISABLE_SUBRES")!=NULL;G.enable_narrow_access=getenv("DM_NARROW_ACCESS")!=NULL;G.diag_fixed_desc=getenv("DM_DIAG_FIXED_DESC")!=NULL;G.disable_wait_elision=getenv("DM_DISABLE_WAIT_ELISION")!=NULL;G.async_enabled=getenv("DM_DISABLE_ASYNC_COMMIT")==NULL;G.async_drain_after_submit=getenv("DM_ASYNC_DRAIN")!=NULL;{const char *sc=getenv("DM_DIAG_SKIP_CLASS");G.diag_skip_class=sc?atoi(sc):0;}G.wb_stage_enabled=getenv("DM_DISABLE_WB_STAGE")==NULL;G.disable_pass_reuse=getenv("DM_DISABLE_PASS_REUSE")!=NULL;G.disable_cpu_uniform_snapshot=getenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT")!=NULL;{const char *sx=getenv("DM_DIAG_SKIP_XFER");G.diag_skip_xfer=sx?atoi(sx):0;}}fprintf(stderr,"[nvn-vulkan] PRECISE_SYNC=%d hz_diag=%d\n",G.precise_sync,G.hz_diag);{const char *iu=getenv("DM_DIAG_IMG_USAGE");G.diag_img_usage=iu?atoi(iu):0;}
     {const char *range=getenv("DM_QUERY_RESET_RANGE");G.enable_query_reset_range=range&&atoi(range)!=0;}
-    G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL||G.pass_stats;G.draw_timing=getenv("DM_DRAW_TIMING")!=NULL;G.disable_shader_stamp=getenv("DM_DISABLE_SHADER_STAMP")!=NULL;G.wsi_diag=getenv("DM_WSI_DIAG")!=NULL;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
+    G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL||G.pass_stats;G.draw_timing=getenv("DM_DRAW_TIMING")!=NULL;G.disable_shader_stamp=getenv("DM_DISABLE_SHADER_STAMP")!=NULL;G.disable_set_recycle=getenv("DM_DISABLE_SET_RECYCLE")!=NULL;G.wsi_diag=getenv("DM_WSI_DIAG")!=NULL;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
     G.disable_resource_cache=getenv("DM_DISABLE_RESOURCE_CACHE")!=NULL;
     G.disable_global_pass_cache=getenv("DM_DISABLE_GLOBAL_PASS_CACHE")!=NULL;
     {const char *v=getenv("DM_ATT_LOAD_TABLE");g_cov_table=v&&atoi(v)!=0;
@@ -1294,6 +1294,26 @@ static Pso pso_remember(const PsoKey *key,uint64_t hash,Pso pso) {
     }
     return pso;
 }
+static VkDescriptorPool descriptor_pool_create(void) {
+    VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,16384},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,16384},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,8192},
+      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,16384},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,4096},{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,16384},
+      {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,4096},{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,4096},{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,4096}};
+    VkDescriptorPoolCreateInfo d={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=8192,
+        .poolSizeCount=sizeof sizes/sizeof sizes[0],.pPoolSizes=sizes};
+    VkDescriptorPool pool=VK_NULL_HANDLE;CHECK(vkCreateDescriptorPool(G.device,&d,NULL,&pool));return pool;
+}
+/* Slot reuse: the slot's fence and publication completed, so every set it handed out is free again. Rebuild (a real pool
+ * reset that forgets all sets) when an overflow pool was needed or the kept sets grew large. */
+static void descriptor_sets_rewind(VkSubmission *sub) {
+    if(G.disable_set_recycle||sub->nextra_pools||sub->sets_total>4096){
+        for(uint32_t i=0;i<sub->nextra_pools;i++){CHECK(vkResetDescriptorPool(G.device,sub->extra_pools[i],0));vkDestroyDescriptorPool(G.device,sub->extra_pools[i],NULL);}
+        sub->nextra_pools=0;
+        CHECK(vkResetDescriptorPool(G.device,sub->descriptors,0));
+        for(uint32_t i=0;i<sub->nset_buckets;i++){free(sub->set_buckets[i].sets);sub->set_buckets[i].sets=NULL;}
+        sub->nset_buckets=0;sub->sets_total=0;return;
+    }
+    for(uint32_t i=0;i<sub->nset_buckets;i++)sub->set_buckets[i].used=0;
+}
 static void submission_pools_create(VkSubmission *sub) {
     VkCommandBufferAllocateInfo a={.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,.commandPool=sub->command_pool,
         .level=VK_COMMAND_BUFFER_LEVEL_PRIMARY,.commandBufferCount=1};CHECK(vkAllocateCommandBuffers(G.device,&a,&sub->command));sub->command_primary=sub->command;sub->chunk_cb[0]=sub->command;sub->chunk_alloc=1;
@@ -1304,11 +1324,7 @@ static void submission_pools_create(VkSubmission *sub) {
     if(G.draw_timing){q.queryCount=DT_CAP;CHECK(vkCreateQueryPool(G.device,&q,NULL,&sub->draw_ts));sub->dt=calloc(DT_CAP,sizeof(*sub->dt));if(!sub->dt)die("draw timing storage",DT_CAP);}
     if(G.profile_detail){q.queryCount=128;CHECK(vkCreateQueryPool(G.device,&q,NULL,&sub->chunk_ts));}
     if(G.pass_stats){q.queryType=VK_QUERY_TYPE_PIPELINE_STATISTICS;q.queryCount=512;q.pipelineStatistics=PASS_STATS_FLAGS;CHECK(vkCreateQueryPool(G.device,&q,NULL,&sub->pass_stats));}
-    VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,16384},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,16384},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,8192},
-      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,16384},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,4096},{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,16384},
-      {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,4096},{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,4096},{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,4096}};
-    VkDescriptorPoolCreateInfo d={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=8192,
-        .poolSizeCount=sizeof sizes/sizeof sizes[0],.pPoolSizes=sizes};CHECK(vkCreateDescriptorPool(G.device,&d,NULL,&sub->descriptors));
+    sub->descriptors=descriptor_pool_create();
     VkFenceCreateInfo f={.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};CHECK(vkCreateFence(G.device,&f,NULL,&sub->gpu_fence));
     G.profile_submission_creates++;
 }
@@ -1461,7 +1477,7 @@ static void sub_begin_ctx(VkSubmission *ctx) {
         /* Executable buffers release references before descriptor sets are reset.
          * The slot's fence and publication both completed; no in-flight object is reset. */
         CHECK(vkGetFenceStatus(G.device,S.gpu_fence));
-        CHECK(vkResetCommandPool(G.device,S.command_pool,0));CHECK(vkResetDescriptorPool(G.device,S.descriptors,0));
+        CHECK(vkResetCommandPool(G.device,S.command_pool,0));descriptor_sets_rewind(&S);
         CHECK(vkResetFences(G.device,1,&S.gpu_fence));G.profile_submission_reuses++;
     }
     resource_cache_begin(&S);
@@ -2875,6 +2891,36 @@ static void depth_input_guard_prepare(void) {
     vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,1,&barrier,0,NULL,0,NULL);
     S.depth_input_guard_active=1;S.submission_cpu_readback=1;
 }
+/* Hand out a descriptor set for this layout. Sets are kept by layout and reused once the slot's previous work has
+ * completed (descriptor_sets_rewind only rewinds the counters), so the driver allocates a layout's sets once, not every
+ * frame. DM_DISABLE_SET_RECYCLE restores one vkAllocateDescriptorSets per draw. */
+static VkDescriptorSet descriptor_set_acquire(VShader *s) {
+    VkDescriptorSet set=VK_NULL_HANDLE;
+    VkDescriptorSetAllocateInfo a={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,.descriptorPool=S.descriptors,
+      .descriptorSetCount=1,.pSetLayouts=&s->layout};
+    if(G.disable_set_recycle){CHECK(vkAllocateDescriptorSets(G.device,&a,&set));return set;}
+    struct DescSetBucket *b=NULL;
+    for(uint32_t i=0;i<S.nset_buckets;i++)if(S.set_buckets[i].layout==s->layout){b=&S.set_buckets[i];break;}
+    if(!b){
+        if(S.nset_buckets==S.set_buckets_cap){uint32_t cap=S.set_buckets_cap?S.set_buckets_cap*2:64;
+            struct DescSetBucket *grown=realloc(S.set_buckets,cap*sizeof *grown);if(!grown)die("descriptor set bucket allocation",cap);
+            S.set_buckets=grown;S.set_buckets_cap=cap;}
+        b=&S.set_buckets[S.nset_buckets++];*b=(struct DescSetBucket){.layout=s->layout};
+    }
+    if(b->used<b->count)return b->sets[b->used++];
+    VkResult r=vkAllocateDescriptorSets(G.device,&a,&set);
+    for(uint32_t k=0;r!=VK_SUCCESS&&(r==VK_ERROR_OUT_OF_POOL_MEMORY||r==VK_ERROR_FRAGMENTED_POOL);k++){
+        /* The recycled sets of other layouts filled the pool: continue in an extra pool; the next begin rebuilds. */
+        if(k>=4)die("descriptor pool exhausted",r);
+        if(k>=S.nextra_pools){S.extra_pools[S.nextra_pools++]=descriptor_pool_create();}
+        a.descriptorPool=S.extra_pools[k];r=vkAllocateDescriptorSets(G.device,&a,&set);
+    }
+    CHECK(r);
+    if(b->count==b->cap){uint32_t cap=b->cap?b->cap*2:16;VkDescriptorSet *grown=realloc(b->sets,cap*sizeof *grown);
+        if(!grown)die("descriptor set list allocation",cap);b->sets=grown;b->cap=cap;}
+    b->sets[b->count++]=set;b->used=b->count;S.sets_total++;
+    return set;
+}
 static VkDescriptorSet bind_shader(VShader *s) {
     memset(S.storage_bias[s->h.stage],0,sizeof S.storage_bias[s->h.stage]);
     S.null_bindings[s->h.stage]=0;
@@ -3159,8 +3205,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
         }
         G.profile_desc_misses++;
     }
-    VkDescriptorSetAllocateInfo a={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,.descriptorPool=S.descriptors,
-      .descriptorSetCount=1,.pSetLayouts=&s->layout};uint64_t alloc_started=prof_now();CHECK(vkAllocateDescriptorSets(G.device,&a,&set));G.profile_desc_alloc_ns+=prof_now()-alloc_started;
+    uint64_t alloc_started=prof_now();set=descriptor_set_acquire(s);G.profile_desc_alloc_ns+=prof_now()-alloc_started;
     uint32_t writes=0;for(uint32_t i=0;i<nb;i++)if(w[i].descriptorCount){w[writes]=w[i];w[writes++].dstSet=set;}
     uint64_t update_started=prof_now();vkUpdateDescriptorSets(G.device,writes,w,0,NULL);G.profile_desc_update_ns+=prof_now()-update_started;
     if(cacheable&&S.ndesc<DESC_ENTRIES&&S.desc_arena_used+2*half<=DESC_ARENA&&S.ndesc*2<DESC_TABLE){

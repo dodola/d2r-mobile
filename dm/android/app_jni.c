@@ -838,6 +838,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_EVENT_TRACE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-timing");
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_TIMING","1",1);
+    unsetenv("DM_DISABLE_SET_RECYCLE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-set-recycle");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SET_RECYCLE","1",1);
     unsetenv("DM_DISABLE_RUNS_CACHE");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-runs-cache");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_RUNS_CACHE","1",1);

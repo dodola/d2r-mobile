@@ -32,6 +32,11 @@ typedef struct {
     uint64_t chunk_mark;
     unsigned profile_segment; /* Captured at submit, before asynchronous completion. */
     VkDescriptorPool descriptors;
+    /* Descriptor sets are recycled by layout between uses of this submission slot instead of being freed by a pool
+     * reset and allocated again for every draw. extra_pools holds overflow pools created when the main pool ran dry. */
+    struct DescSetBucket {VkDescriptorSetLayout layout;VkDescriptorSet *sets;uint32_t count,used,cap;} *set_buckets;
+    uint32_t nset_buckets,set_buckets_cap,sets_total;
+    VkDescriptorPool extra_pools[4];uint32_t nextra_pools;
     VkFence gpu_fence;
     VkQueryPool occlusion,timestamps,pass_ts,chunk_ts,pass_stats;
     uint32_t nchunk_ts;
