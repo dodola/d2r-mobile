@@ -2347,10 +2347,17 @@ static VkShaderModule vertex_module(VShader *s,const NvnVkVertexAdapt *plan,uint
     fprintf(stderr,"[nvn-vulkan] VERTEX_INPUT_ADAPT shader=%s split=%#x unsigned=%#x signed=%#x bytes=%zu\n",s->key,plan->split,u,i,bytes);
     return v->module;
 }
+/* Index entry -> loaded shader. G.shaders is append-only and entries are stable, so the direct-mapped table is never
+ * stale; a collision just falls back to the scan. Removes ~130 strcmp calls per draw once many shaders are loaded. */
+#define SHADER_GET_CACHE 512
+static struct {const uint8_t *entry;uint32_t stage;VShader *shader;} g_shader_get_cache[SHADER_GET_CACHE];
 static VShader *shader_get(const uint8_t *entry,uint32_t stage) {
     if(!entry)die("original shader not in verified Vulkan cache",stage);
+    unsigned slot=(unsigned)(((uintptr_t)entry>>4)*0x9E3779B1u>>8)&(SHADER_GET_CACHE-1);
+    static int cache_off=-1;if(cache_off<0)cache_off=getenv("DM_DISABLE_SHADER_GET_CACHE")!=NULL;
+    if(!cache_off&&g_shader_get_cache[slot].entry==entry&&g_shader_get_cache[slot].stage==stage)return g_shader_get_cache[slot].shader;
     char key[17]={0};memcpy(key,entry,16);
-    for(int i=0;i<G.nshader;i++)if(!strcmp(G.shaders[i].key,key))return &G.shaders[i];
+    for(int i=0;i<G.nshader;i++)if(!strcmp(G.shaders[i].key,key)){g_shader_get_cache[slot].entry=entry;g_shader_get_cache[slot].stage=stage;g_shader_get_cache[slot].shader=&G.shaders[i];return &G.shaders[i];}
     if(G.nshader==LIMIT_OBJECTS)die("shader object limit",G.nshader);
     VShader *s=&G.shaders[G.nshader++];s->identity=G.nshader;shader_load_into(s,key,stage,0);return s;
 }
