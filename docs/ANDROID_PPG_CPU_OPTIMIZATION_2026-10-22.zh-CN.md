@@ -71,6 +71,17 @@
 
 `guest-wait-diag[=trace]`：游戏线程等待分解、`THREAD_RUSAGE`、`NVN_CALLS`、`FINALIZE_HANDLE`、`SYNC_TRACE`；`desc-diag`：描述符 miss 归因；`draw-timing`；`wsi-diag`。`analysis/perf-runs/ppg-1022/run-world.sh <label> [标记...]` 一键进入世界并输出最后几个 60 帧窗口。
 
+## 测量与回归工具（`tools/android/`）
+
+| 脚本 | 用途 |
+| --- | --- |
+| `perf_run_world.sh <标签> [标记[=值] ...]` | 清掉所有实验标记，冷启动，按屏幕比例点击"进入游戏"，打印最后几个 60 帧窗口的 FPS（`ENTER=gamepad` 或 `ENTER="tap X Y"` 可改进入方式；日志写在脚本目录） |
+| `perf_bench_all.sh [轮数]` | 本批全部优化关闭 vs 默认的累计对比，每轮打印电量和频率上限；电量低于约 60% 时给出警告 |
+| `perf_regress.sh [轮数]` | 换设备（如 TNA / Turnip）回归：全开 vs 逐项关闭，每次都统计日志里的错误，最后对比"全关"与"全开"的截图差异 |
+| `perf_glitch_scan.py <mp4...>` | 在录屏里找孤立的异常帧（闪烁 / 转置帧） |
+
+这些脚本依赖 `android_d2r_apk.py --debuggable` 打出的调试版 APK（`run-as` 读日志、写标记）。
+
 ## 下一步
 
 先让手机充电并保持低温再测一遍。当前 CPU 被限制在约 63%（中大核）和 23%（超大核）的最高频率；仅按中大核频率比例估算，满频能把串行的 ≈23 ms 压到约 15 ms，也就是接近 60 FPS。需要实测确认，这只是估算。
