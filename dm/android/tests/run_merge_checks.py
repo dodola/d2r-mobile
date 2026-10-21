@@ -30,6 +30,7 @@ def main():
         ('dirty-race', ['dm/gfx/tests/t_dirty_race.c', hooks], ['-D__ANDROID__'], [[]]),
         ('dirty-slots', ['dm/gfx/tests/t_dirty_slots.c', core, hooks], ['-D__ANDROID__'], [[]]),
         ('dirty-around', ['dm/gfx/tests/t_dirty_around.c', core, hooks], ['-D__ANDROID__'], [[]]),
+        ('storage-bias-literals', ['dm/gfx/tests/t_storage_bias_literals.c'], ['-Wno-misleading-indentation'], [[]]),
         ('dirty-summary', ['dm/gfx/tests/t_dirty_summary.c', core, hooks], ['-D__ANDROID__'],
          [['tracker', '0'], ['tracker', '1'], ['properties', '1']]),
         ('touch', ['dm/ios/tests/t_touch_controls.c', 'dm/ios/Sources/dm_touch_controls.c'],
