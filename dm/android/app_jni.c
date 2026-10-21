@@ -655,6 +655,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_ANDROID_PRESENT_60FPS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/present-60fps");
     if(access(driver_option,F_OK)==0)setenv("DM_ANDROID_PRESENT_60FPS","1",1);
+    unsetenv("DM_DISABLE_PRESENT_CADENCE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-present-cadence");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_PRESENT_CADENCE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan");
     if(access(driver_option,F_OK)==0)setenv("DM_PRIVATE_VULKAN","turnip",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan-sysmem");

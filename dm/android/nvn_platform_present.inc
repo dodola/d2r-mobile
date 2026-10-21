@@ -190,7 +190,8 @@ static int android_present_hz=-1,android_display_intervals,android_present_fixed
 extern int dm_android_d2r_fps_setting(void) __attribute__((weak));
 void nvn_present_config(int hz,int display_intervals) {if(hz<0 || hz>1000)die("NVN pacing hz=%d",hz);android_present_hz=hz;android_display_intervals=display_intervals;}
 static uint64_t android_present_period(const win_t *w) {
-    if(android_present_hz<0) {const char *e=getenv("DM_PRESENT_HZ");android_present_hz=e?atoi(e):60;
+    if(android_present_hz<0) {const char *e=getenv("DM_PRESENT_HZ");
+        android_present_hz=e?atoi(e):dm_android_cadence_base_hz(mtl_display_hz(),getenv("DM_DISABLE_PRESENT_CADENCE")!=NULL);
         android_display_intervals=mtl_has_window();}
     if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL;
     uint64_t period=dm_android_present_period_ns(android_present_hz,android_display_intervals,w->interval,android_present_fixed_60);

@@ -106,9 +106,19 @@ static int busy_wait(range_t *r, uintptr_t p) {
     }
     return 1;
 }
+/* find() 直接映射缓存（来自 android-integration f09e07f）：g_r 是定长数组、槽位指针稳定，
+ * 只缓存槽位指针，命中时按槽位当前的 live 与 base/end 校验，槽位被复用也不会返回过期区间。
+ * 线程私有，信号处理里可用（无锁无分配）。
+ * Direct-mapped find() cache (from android-integration f09e07f): g_r is a fixed array with stable slot
+ * pointers; only the slot pointer is cached and a hit is validated against the slot's current live and
+ * base/end, so a reused slot never returns a stale range. Thread-local, usable in signal handlers. */
+static _Thread_local range_t *g_find_cache[16];
 static range_t *find(uintptr_t a) {
+    unsigned h = (unsigned)(((a >> 20) ^ (a >> 28)) & 15);
+    range_t *c = g_find_cache[h];
+    if (c && atomic_load_explicit(&c->live, memory_order_acquire) && a >= c->base && a < c->end) return c;
     int n = atomic_load(&g_nr);
-    for (int i = 0; i < n; i++) if (atomic_load_explicit(&g_r[i].live, memory_order_acquire) && a >= g_r[i].base && a < g_r[i].end) return &g_r[i];
+    for (int i = 0; i < n; i++) if (atomic_load_explicit(&g_r[i].live, memory_order_acquire) && a >= g_r[i].base && a < g_r[i].end) { g_find_cache[h] = &g_r[i]; return &g_r[i]; }
     return NULL;
 }
 static void store_generation(range_t *r,uintptr_t page) {

@@ -53,6 +53,16 @@ int main(void) {
         now+=1000000;now+=nvn_pace(&pace,now,step);
         assert(now-start==step);checks++;
     }
+    /* Cadence follows the real display mode: only 120 Hz gets the 25 ms
+     * (three-vsync) guest cadence; every other mode, a missing window and the
+     * disable marker keep the legacy 60 Hz base. */
+    for(int hz=0;hz<=1000;hz++) {
+        assert(dm_android_cadence_base_hz(hz,1)==60);
+        assert(dm_android_cadence_base_hz(hz,0)==(hz==120?80:60));
+        checks+=2;
+    }
+    assert(dm_android_present_period_ns(dm_android_cadence_base_hz(120,0),1,2,0)==25000000ULL);
+    assert(dm_android_present_period_ns(dm_android_cadence_base_hz(60,0),1,2,0)==33333332ULL);
     printf("ANDROID_PRESENT_POLICY checks=%u legacy_equal=1 fixed60=1 paced_frames=600 stall_recovery=1 eco_toggle_frames=90 passed=1\n",checks+6);
     return 0;
 }
