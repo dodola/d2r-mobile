@@ -322,6 +322,11 @@ NVN(nvnQueuePresentTexture,void,NVNqueue *q,NVNwindow *window,int index) {
             atomic_exchange(&gw.push_ns,0)/1e6,atomic_exchange(&gw.drain_ns,0)/1e6,"\n");
         fprintf(stderr,"[nvn-android] FINALIZE_HANDLE hit=%llu miss=%llu""\n",(unsigned long long)atomic_exchange(&gw_ht_hit,0),(unsigned long long)atomic_exchange(&gw_ht_miss,0));
         gw_rusage("guest");
+        {static uint64_t prev[NVN_NFUNC];uint64_t delta[NVN_NFUNC];
+         for(unsigned i=0;i<NVN_NFUNC;i++){uint64_t c=atomic_load(&nvn_slot[i].cnt);delta[i]=c-prev[i];prev[i]=c;}
+         for(int top=0;top<80;top++){unsigned best=0;for(unsigned i=1;i<NVN_NFUNC;i++)if(delta[i]>delta[best])best=i;
+            if(!delta[best])break;
+            fprintf(stderr,"[nvn-android] NVN_CALLS %s per_frame=%.1f\n",nvn_names[best],(double)delta[best]/60.0);delta[best]=0;}}
         for(int top=0;top<4;top++){int best=-1;uint64_t bn=0;
             for(int l=0;l<4096;l++){uint64_t n=atomic_load(&gw_line_ns[l]);if(n>bn){bn=n;best=l;}}
             if(best<0)break;

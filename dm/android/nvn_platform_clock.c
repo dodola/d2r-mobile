@@ -41,11 +41,11 @@ void dm_android_nvn_schedule_thread(const char *role) {
     pid_t tid=(pid_t)syscall(SYS_gettid);
     int error=0;if(setpriority(PRIO_PROCESS,(id_t)tid,-2))error=errno;
     /* Experiment: DM_TRANSLATE_AFFINITY=<hex cpu mask> pins the translation thread (e.g. 80 = cpu7). */
-    if(!strcmp(role,"translate")){const char *m=getenv("DM_TRANSLATE_AFFINITY");
+    if(!strcmp(role,"translate")||!strcmp(role,"acquire")){const char *m=getenv(role[0]=='t'?"DM_TRANSLATE_AFFINITY":"DM_ACQUIRE_AFFINITY");
         if(m){unsigned long mask=strtoul(m,NULL,16);cpu_set_t set;CPU_ZERO(&set);
             for(int c=0;c<(int)(sizeof(mask)*8)&&c<CPU_SETSIZE;c++)if(mask&(1ul<<c))CPU_SET(c,&set);
             int rc=sched_setaffinity(tid,sizeof set,&set);
-            fprintf(stderr,"[nvn-android] TRANSLATE_AFFINITY mask=%#lx rc=%d errno=%d\n",mask,rc,rc?errno:0);}}
+            fprintf(stderr,"[nvn-android] %s_AFFINITY mask=%#lx rc=%d errno=%d\n",role[0]=='t'?"TRANSLATE":"ACQUIRE",mask,rc,rc?errno:0);}}
     errno=0;int nice=getpriority(PRIO_PROCESS,(id_t)tid);int nice_error=errno;
     int policy=0;struct sched_param parameter={0};int query=pthread_getschedparam(pthread_self(),&policy,&parameter);
     fprintf(stderr,"[nvn-android] %s tid=%d requested_nice=-2 actual_nice=%d nice_errno=%d set_errno=%d policy=%d priority=%d sched_query=%d; Darwin hardware instruction/cycle statistics unavailable\n",
