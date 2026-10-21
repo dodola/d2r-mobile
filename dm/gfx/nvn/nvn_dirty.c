@@ -264,7 +264,9 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     uintptr_t run = 0; int open = 0;
     for (uintptr_t i = p; i <= q + 1; i++) {
         uint8_t st = PG_NONE;
-        int took = i <= q && atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY);
+        /* Most pages are already PROT: a plain load rules them out without the (outlined, runtime-dispatched) CAS. */
+        int took = i <= q && atomic_load_explicit(&r->state[i], memory_order_relaxed) == PG_NONE &&
+                   atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY);
         if (took && !open) { run = i; open = 1; }
         if (!took && open) { mp(r->base + (run << g_shift), (i - run) << g_shift, PROT_READ); for (uintptr_t k = run; k < i; k++) atomic_store(&r->state[k], PG_PROT); open = 0; }
     }
