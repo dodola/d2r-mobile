@@ -742,13 +742,17 @@ static void backend_init(void) {
     if(!available.independentBlend)die("NVN independent attachment blending unavailable",0);
     /* Experimental until device validation. Never enable a feature solely on
      * the GPU name: use the feature bit and per-format/image queries. */
+    /* DM_BC_PASSTHROUGH: 1 = force on, 0 = force off, unset = automatic: on for Adreno 8xx (validated on Adreno 830, removes the CPU BC decode),
+     * off elsewhere until each GPU class has been checked in game | 1 强制开，0 强制关，未设置时自动：Adreno 8xx 开（Adreno 830 已验证，省掉 CPU 解码），其余未验证的 GPU 保持关 */
     const char *native_bc=getenv("DM_BC_PASSTHROUGH");
-    enabled.textureCompressionBC=available.textureCompressionBC&&native_bc&&!strcmp(native_bc,"1");
+    int bc_auto=0;{int adreno=0;const char *a=strstr(G.properties.deviceName,"Adreno (TM) ");if(a&&sscanf(a+12,"%d",&adreno)==1&&adreno>=800)bc_auto=1;}
+    int bc_want=native_bc&&*native_bc?!strcmp(native_bc,"1"):bc_auto;
+    enabled.textureCompressionBC=available.textureCompressionBC&&bc_want;
     g_bc_passthrough=enabled.textureCompressionBC;
     const char *batch=getenv("DM_TEXTURE_UPLOAD_BATCH");
     g_texture_upload_batch=!batch||strcmp(batch,"0");
     fprintf(stderr,"[nvn-vulkan] TEXTURE_UPLOAD batch=%d bc_requested=%d bc_enabled=%d\n",
-        g_texture_upload_batch,native_bc&&!strcmp(native_bc,"1"),g_bc_passthrough);
+        g_texture_upload_batch,bc_want,g_bc_passthrough);
     enabled.independentBlend=VK_TRUE;
     enabled.fragmentStoresAndAtomics=available.fragmentStoresAndAtomics;
     G.fragment_stores=enabled.fragmentStoresAndAtomics;

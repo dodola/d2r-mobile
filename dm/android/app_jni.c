@@ -808,6 +808,8 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_BC_PASSTHROUGH");unsetenv("DM_YIELD_BACKOFF");unsetenv("DM_TEXTURE_UPLOAD_BATCH");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-bc-passthrough");
     if(access(driver_option,F_OK)==0)setenv("DM_BC_PASSTHROUGH","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-bc-passthrough");
+    if(access(driver_option,F_OK)==0)setenv("DM_BC_PASSTHROUGH","0",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-yield-backoff");
     if(access(driver_option,F_OK)==0)setenv("DM_YIELD_BACKOFF","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-texture-upload-batch");
