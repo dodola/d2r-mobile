@@ -8,6 +8,8 @@
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vulkan.h>
 #include <android/native_window.h>
+#include <sys/system_properties.h>
+#include "nvn_vk_slot_policy.h"
 #include "nvn_obj.h"
 #include "nvn_vk_attachment_plan.h"
 #include "nvn_vk_coverage.h"
@@ -830,17 +832,22 @@ static void backend_init(void) {
     {const char *coalesce=getenv("DM_WRITEBACK_COALESCE");G.enable_writeback_coalesce=coalesce&&atoi(coalesce)!=0;}
     G.event_trace=getenv("DM_EVENT_TRACE")!=NULL;
     G.current_submission=&G.submission_slot;
-    G.slot_publication=getenv("DM_SLOT_PUBLICATION")!=NULL;
+    char slot_soc[PROP_VALUE_MAX]={0};__system_property_get("ro.soc.model",slot_soc);
+    unsigned slot_enable=(getenv("DM_SLOT_PUBLICATION")?NVN_SLOT_PUBLICATION:0)|(getenv("DM_UNIFORM_VERSIONS")?NVN_SLOT_UNIFORMS:0)|(getenv("DM_BUFFER_VERSIONS")?NVN_SLOT_BUFFERS:0);
+    unsigned slot_disable=(getenv("DM_DISABLE_SLOT_PUBLICATION")?NVN_SLOT_PUBLICATION:0)|(getenv("DM_DISABLE_UNIFORM_VERSIONS")?NVN_SLOT_UNIFORMS:0)|(getenv("DM_DISABLE_BUFFER_VERSIONS")?NVN_SLOT_BUFFERS:0);
+    NvnSlotPolicy slot_policy=nvn_vk_slot_policy(slot_soc,G.properties.deviceName,driver_properties.driverID==VK_DRIVER_ID_QUALCOMM_PROPRIETARY&&(!private_driver||!*private_driver),getenv("DM_RENDER_SLOTS"),slot_enable,slot_disable);
+    G.slot_publication=slot_policy.publication;
+    fprintf(stderr,"[nvn-vulkan] SLOT_POLICY soc=%s automatic=%d explicit_slots=%d disable_mask=%u\n",slot_soc,slot_policy.automatic,getenv("DM_RENDER_SLOTS")!=NULL,slot_disable);
     fprintf(stderr,"[nvn-vulkan] SLOT_PUBLICATION enabled=%d\n",G.slot_publication);
-    {const char *rs=getenv("DM_RENDER_SLOTS");int n=rs?atoi(rs):1;G.render_slots_n=n<1?1:n>4?4:n;G.render_ring_next=0;
+    {G.render_slots_n=slot_policy.slots;G.render_ring_next=0;
      {const char *df=getenv("DM_DIAG_DUMP_FRAME");G.dump_frame=df?(uint64_t)strtoull(df,NULL,10):0;}
      G.submission_slot.slot_index=0;for(int i=1;i<4;i++)G.extra_render_slots[i-1].slot_index=i;G.submission_slot2.slot_index=-1;
      fprintf(stderr,"[nvn-vulkan] RENDER_SLOTS n=%d\n",G.render_slots_n);}
     /* 单槽没有跨提交读写重叠，保留其零拷贝路径；只有多槽需要常量版本。
      * One slot has no cross-submission overlap: preserve its zero-copy path; only multiple slots need uniform versions.
      */
-    G.uniform_versions=G.slot_publication&&G.render_slots_n>1&&getenv("DM_UNIFORM_VERSIONS")!=NULL;
-    G.buffer_versions=G.uniform_versions&&getenv("DM_BUFFER_VERSIONS")!=NULL;
+    G.uniform_versions=slot_policy.uniforms;
+    G.buffer_versions=slot_policy.buffers;
     fprintf(stderr,"[nvn-vulkan] BUFFER_VERSIONS enabled=%d slots=%d\n",G.buffer_versions,G.render_slots_n);
     fprintf(stderr,"[nvn-vulkan] UNIFORM_VERSIONS enabled=%d slots=%d\n",G.uniform_versions,G.render_slots_n);
     S.desc_entries=calloc(DESC_ENTRIES,sizeof(*S.desc_entries));S.desc_arena=malloc(DESC_ARENA);G.control_cache=calloc(CONTROL_CACHE,sizeof(*G.control_cache));
