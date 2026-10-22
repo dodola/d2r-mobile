@@ -707,6 +707,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-pso-reuse");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_PSO_REUSE","1",1);
+    unsetenv("DM_DISABLE_PSO_ASYNC");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-pso-async");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_PSO_ASYNC","1",1);
     unsetenv("DM_PSO_LAST_CACHE");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-pso-last-cache");
     if(access(driver_option,F_OK)==0)setenv("DM_PSO_LAST_CACHE","1",1);

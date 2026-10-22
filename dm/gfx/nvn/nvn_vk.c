@@ -301,6 +301,8 @@ static struct {
     _Atomic uint64_t fence,completed,present_count,frame; uint64_t draws,pass_count,uploads,pool_adds;
     int trace_frame,trace_ui,capture_feedback;_Atomic int window_origin,depth_mode;
     uint64_t profile_pipeline_ns,profile_wait_ns,profile_decode_ns,profile_submits,profile_start_ns,profile_draws,profile_frames;
+    /* 卡顿归因：相邻两次出图间隔超阈值时按计数器差值打一行 | Hitch attribution: when the interval between two presents exceeds the threshold, one line is printed from counter deltas */
+    uint64_t profile_shader_ns,hitch_last_ns,hitch_pipe,hitch_wait,hitch_decode,hitch_shader,hitch_pso_sync,hitch_pso_wait,hitch_count,hitch_max_ns;double hitch_ema_ms;
     uint64_t profile_t2t_copies,profile_t2t_scaled,profile_t2t_texels;
     uint64_t profile_submit_candidates,profile_candidate_wait_ns,profile_writeback_bytes,profile_events,profile_reports;
     uint64_t profile_writeback_raw_bytes,profile_writeback_raw_ranges,profile_writeback_copy_ranges,profile_writeback_plan_cpu_ns;
@@ -465,6 +467,8 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL validation_message(VkDebugUtilsMessageSeve
     return VK_FALSE;
 }
 
+/* 计数器每 60 帧清零，差值遇到回绕时取当前值 | The counters are zeroed every 60 frames; on wrap-around the delta is the current value */
+#define HITCH_DELTA(cur,saved) ((cur)>=(saved)?(cur)-(saved):(cur))
 static inline uint64_t prof_now(void) { return G.profile_detail?dm_android_nvn_clock_ns():0; }
 static uint32_t memory_type(uint32_t mask,VkMemoryPropertyFlags properties) {
     for(uint32_t i=0;i<G.memory.memoryTypeCount;i++) if((mask&(1u<<i)) &&
@@ -2376,7 +2380,7 @@ static VShader *shader_get(const uint8_t *entry,uint32_t stage) {
     char key[17]={0};memcpy(key,entry,16);
     for(int i=0;i<G.nshader;i++)if(!strcmp(G.shaders[i].key,key)){g_shader_get_cache[slot].entry=entry;g_shader_get_cache[slot].stage=stage;g_shader_get_cache[slot].shader=&G.shaders[i];return &G.shaders[i];}
     if(G.nshader==LIMIT_OBJECTS)die("shader object limit",G.nshader);
-    VShader *s=&G.shaders[G.nshader++];s->identity=G.nshader;shader_load_into(s,key,stage,0);return s;
+    VShader *s=&G.shaders[G.nshader++];s->identity=G.nshader;{uint64_t t=dm_android_nvn_clock_ns();shader_load_into(s,key,stage,0);G.profile_shader_ns+=dm_android_nvn_clock_ns()-t;}return s;
 }
 static VkShaderModule shader_module(VShader *s,uint64_t mask) {
     if(!mask)return s->module;
@@ -3809,13 +3813,16 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
         key.pass.attachments[i].loadOp=key.pass.attachments[i].stencilLoadOp=VK_ATTACHMENT_LOAD_OP_LOAD;
         key.pass.attachments[i].storeOp=key.pass.attachments[i].stencilStoreOp=VK_ATTACHMENT_STORE_OP_STORE;
     }
-    uint64_t hash=0;Pso pso,*cached=pso_lookup(&key,&hash);
+    uint64_t hash=0;Pso pso,*cached=pso_lookup(&key,&hash);int pso_pending=0;
     if(cached)pso=*cached;
-    else pso=pipeline_obtain(&key,hash,vs,ps);
+    else pso=pipeline_obtain(&key,hash,vs,ps,&pso_pending);
     int cache_commands=G.enable_command_cache&&!G.trace_frame;
+    /* 管线还在后台编译且本帧等待预算用完：只跳过实际绘制，其余状态照常 | Pipeline still compiling and this frame's wait budget is spent: only the actual draw is skipped, all other state proceeds as usual */
+    if(!pso_pending){
     command_bind_profile(NVN_VK_CMD_PIPELINE,nvn_vk_cmd_pipeline(&S.command_state,cache_commands,S.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pso.pipeline));
     command_bind_profile(NVN_VK_CMD_DESCRIPTORS,nvn_vk_cmd_descriptors(&S.command_state,cache_commands,S.command,
         VK_PIPELINE_BIND_POINT_GRAPHICS,pso.layout,ps?2:1,descriptor_sets,draw_ndyn,draw_dyn));
+    }
     if(G.state.viewport.width<=0 || G.state.viewport.height<=0)die("viewport bounds",0);
     VkViewport viewport=G.state.viewport;if(upper_left){viewport.y+=viewport.height;viewport.height=-viewport.height;}
     command_bind_profile(NVN_VK_CMD_VIEWPORT,nvn_vk_cmd_viewport(&S.command_state,cache_commands,S.command,&viewport));
@@ -3843,7 +3850,7 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
     int skip_class=0;
     if(G.diag_skip_class){const tex_t *first=G.state.rt.n>0?G.state.rt.color[0]:G.state.rt.depth;unsigned w=first?first->d.width:0,h=first?first->d.height:0;
         int cls=(w==2100&&h==2100)?1:(w==960&&h==540)?(G.state.rt.n==0?2:G.state.rt.n==1?4:8):16;skip_class=(G.diag_skip_class&cls)!=0;}
-    if(G.diag_skip_draws||skip_class){}
+    if(G.diag_skip_draws||skip_class||pso_pending){}
     else if(a) {if(a->count<0 || a->first<0||instances<0||base_instance<0)die("draw arrays bounds",a->count);vkCmdDraw(S.command,(G.diag_shape&2)&&a->count>3?3:a->count,instances,a->first,base_instance);}
     else { if(idx->count<0 || idx->instances<0 || (idx->itype!=NVN_INDEX_TYPE_UNSIGNED_SHORT && idx->itype!=NVN_INDEX_TYPE_UNSIGNED_INT))die("index type/bounds",idx->itype);
         uint64_t offset=0,size=(uint64_t)idx->count*(idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?2:4);VPool *p=pool_read(idx->ibuf,size,&offset);
@@ -3879,7 +3886,7 @@ static void dispatch(const p_dispatch *p) {
     key.null_bindings[0]=S.null_bindings[5];
     uint64_t hash=0;Pso pso,*cached=pso_lookup(&key,&hash);
     if(cached)pso=*cached;
-    else pso=pipeline_obtain(&key,hash,s,NULL);
+    else pso=pipeline_obtain(&key,hash,s,NULL,NULL);
     int cache_commands=G.enable_command_cache&&!G.trace_frame;
     command_bind_profile(NVN_VK_CMD_PIPELINE,nvn_vk_cmd_pipeline(&S.command_state,cache_commands,S.command,VK_PIPELINE_BIND_POINT_COMPUTE,pso.pipeline));
     command_bind_profile(NVN_VK_CMD_DESCRIPTORS,nvn_vk_cmd_descriptors(&S.command_state,cache_commands,S.command,
@@ -4640,12 +4647,27 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     temporaries_retire(&S);
     }
     G.profile_frames++;
+    {   /* 卡顿归因 | hitch attribution: counter deltas since the previous present, printed only for frames well above the recent mean */
+        uint64_t now_h=dm_android_nvn_clock_ns();
+        if(G.hitch_last_ns){
+            double dt=(now_h-G.hitch_last_ns)/1e6;uint64_t pso_sync=PW.sync_creates,pso_wait=PW.wait_ns;
+            if(G.hitch_ema_ms>0&&dt>40.0&&dt>2.0*G.hitch_ema_ms&&G.hitch_count<600){
+                G.hitch_count++;
+                fprintf(stderr,"[nvn-vulkan] HITCH frame=%llu dt_ms=%.1f mean_ms=%.1f pipeline_ms=%.1f pso_sync=%llu pso_wait_ms=%.1f shader_load_ms=%.1f tex_decode_ms=%.1f gpu_wait_ms=%.1f\n",(unsigned long long)G.present_count+1,dt,G.hitch_ema_ms,HITCH_DELTA(G.profile_pipeline_ns,G.hitch_pipe)/1e6,(unsigned long long)(pso_sync-G.hitch_pso_sync),(pso_wait-G.hitch_pso_wait)/1e6,HITCH_DELTA(G.profile_shader_ns,G.hitch_shader)/1e6,HITCH_DELTA(G.profile_decode_ns,G.hitch_decode)/1e6,HITCH_DELTA(G.profile_wait_ns,G.hitch_wait)/1e6);
+            }
+            if(dt>G.hitch_max_ns/1e6)G.hitch_max_ns=(uint64_t)(dt*1e6);
+            G.hitch_ema_ms=G.hitch_ema_ms>0?G.hitch_ema_ms+((dt<3*G.hitch_ema_ms?dt:3*G.hitch_ema_ms)-G.hitch_ema_ms)/32:dt;
+            G.hitch_pso_sync=pso_sync;G.hitch_pso_wait=pso_wait;
+        }
+        G.hitch_last_ns=now_h;G.hitch_pipe=G.profile_pipeline_ns;G.hitch_wait=G.profile_wait_ns;G.hitch_decode=G.profile_decode_ns;G.hitch_shader=G.profile_shader_ns;
+    }
     G.profile_present_ns+=dm_android_nvn_clock_ns()-present_started;
     if(--present_cpu_depth==0){G.profile_present_cpu_ns+=dm_android_nvn_thread_cpu_ns()-present_cpu_started;G.profile_present_calls++;}
     if(G.trace_frame || G.profile_frames>=60 || G.present_count<2){uint64_t now=dm_android_nvn_clock_ns();
         double elapsed_ms=(now-G.profile_start_ns)/1e6;
         double fps=elapsed_ms>0?1000.0*G.profile_frames/elapsed_ms:0;
         fprintf(stderr,"[nvn-vulkan] RENDER_PROFILE frame=%llu frames=%llu fps=%.3f elapsed_ms=%.3f pipeline_ms=%.3f gpu_wait_ms=%.3f upload_decode_ms=%.3f submits=%llu draws=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,fps,elapsed_ms,G.profile_pipeline_ns/1e6,G.profile_wait_ns/1e6,G.profile_decode_ns/1e6,(unsigned long long)G.profile_submits,(unsigned long long)(G.draws-G.profile_draws));
+        if(PW.async)fprintf(stderr,"[nvn-vulkan] PSO_ASYNC frame=%llu skipped_draws_total=%llu budget_us=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)PW.skips,(unsigned long long)(PW.async_budget_ns/1000));
         fprintf(stderr,"[nvn-vulkan] RENDER_TEXTURE_COPY_PROFILE frame=%llu frames=%llu calls=%llu scaled=%llu destination_texels=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,(unsigned long long)G.profile_t2t_copies,(unsigned long long)G.profile_t2t_scaled,(unsigned long long)G.profile_t2t_texels);
         G.profile_t2t_copies=G.profile_t2t_scaled=G.profile_t2t_texels=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_SUBMIT_CLASS_PROFILE frame=%llu total_submits=%llu observed_eligible_candidates=%llu candidate_fence_wait_ms=%.3f pool_writeback_bytes=%llu events=%llu counter_reports=%llu write_submits=%llu event_submits=%llu report_submits=%llu trace_submits=%llu cpu_readback_submits=%llu event_wait_submits=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_submits,(unsigned long long)G.profile_submit_candidates,G.profile_candidate_wait_ns/1e6,(unsigned long long)G.profile_writeback_bytes,(unsigned long long)G.profile_events,(unsigned long long)G.profile_reports,(unsigned long long)G.profile_write_submits,(unsigned long long)G.profile_event_submits,(unsigned long long)G.profile_report_submits,(unsigned long long)G.profile_trace_submits,(unsigned long long)G.profile_cpu_readback_submits,(unsigned long long)G.profile_event_wait_submits);

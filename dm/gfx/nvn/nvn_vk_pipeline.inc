@@ -2,7 +2,10 @@
  * Record only complete pipelines actually requested; never a shader cross-product.
  * Stable shader names replace process-local shader indices in the disk manifest.
  * One compiler owns pending work. Replay may wait for a required pipeline, but
- * never skips a draw or uses a substitute pipeline. No worker takes G.lock. */
+ * never uses a substitute pipeline. No worker takes G.lock.
+ * 异步模式 | Async mode (default, DM_DISABLE_PSO_ASYNC turns it off): a graphics draw whose pipeline is still
+ * queued/building is waited for only within a small per-frame budget, after that the draw is skipped
+ * (the pipeline keeps compiling and the next frames pick it up) instead of stalling the replay thread. */
 typedef struct {PsoKey key;char shader[2][17];} StablePso;
 enum { PJ_QUEUED=1,PJ_BUILDING,PJ_READY,PJ_FAILED,PJ_CLAIMED,PJ_DORMANT };
 typedef struct {StablePso stable;Pso pso;int state,demand,seed;VkResult result;} PipelineJob;
@@ -11,7 +14,7 @@ static struct {
     PipelineJob jobs[LIMIT_PSOS];unsigned count;int mode,started,trace;
     char manifest_path[1200],legacy_path[1200];DmPipelineIdentity identity;
     uint64_t generation,saved_generation,last_save,loaded_bytes;
-    uint64_t sync_creates,claims,waits,wait_ns;
+    uint64_t sync_creates,claims,waits,wait_ns,skips,frame_wait_ns,async_budget_ns;int async;
     _Atomic uint64_t background_creates,background_ns;
     _Atomic unsigned warm_pending;
 } PW={.lock=PTHREAD_MUTEX_INITIALIZER,.store_lock=PTHREAD_MUTEX_INITIALIZER,.changed=PTHREAD_COND_INITIALIZER};
@@ -192,17 +195,32 @@ static void pipeline_worker_start(void) {
     else{char seed[1200];snprintf(seed,sizeof seed,"%s/pso_manifest.vkbin",G.shader_root);pipeline_manifest_load(seed,warm);}
     pipeline_manifest_load(PW.legacy_path,warm);
     pipeline_manifest_load(PW.manifest_path,warm);
+    {const char *off=getenv("DM_DISABLE_PSO_ASYNC"),*budget=getenv("DM_PSO_ASYNC_BUDGET_US");
+     PW.async=PW.mode==2&&!(off&&*off);PW.async_budget_ns=(uint64_t)(budget&&atoi(budget)>0?atoi(budget):3000)*1000ull;}
     int rc=pthread_create(&PW.thread,NULL,pipeline_worker,NULL);if(rc){PW.mode=0;atomic_store(&PW.warm_pending,0);fprintf(stderr,"[nvn-vulkan] PIPELINE_WORKER unavailable=%d synchronous_fallback=1\n",rc);return;}
     pthread_detach(PW.thread);PW.started=1;
     fprintf(stderr,"[nvn-vulkan] PIPELINE_WARM_START entries=%u queued=%u mode=%d\n",PW.count,atomic_load(&PW.warm_pending),PW.mode);
 }
-static Pso pipeline_obtain(const PsoKey *key,uint64_t hash,VShader *v,VShader *f) {
+static Pso pipeline_obtain(const PsoKey *key,uint64_t hash,VShader *v,VShader *f,int *skipped) {
     uint64_t t=dm_android_nvn_clock_ns();Pso pso={0};int obtained=0;
+    if(skipped)*skipped=0;
     if(PW.started&&PW.mode==2&&!G.disable_pso_reuse&&G.npso<LIMIT_PSOS){
         StablePso stable=pipeline_stable(key);pthread_mutex_lock(&PW.lock);int at=pipeline_find(&stable);
         if(at<0&&PW.count<LIMIT_PSOS){at=(int)PW.count++;PW.jobs[at]=(PipelineJob){.stable=stable,.state=PJ_QUEUED};PW.generation++;}
         if(at>=0){PipelineJob *j=&PW.jobs[at];j->demand=1;pthread_cond_signal(&PW.changed);
             int waited=j->state==PJ_QUEUED||j->state==PJ_BUILDING;if(waited)PW.waits++;
+            if(skipped&&PW.async&&!key->compute){
+                /* 本帧等待预算内才等，预算用完就跳过这次绘制，管线继续在后台编译 | Wait only inside this frame's budget; once spent, skip the draw while the pipeline keeps compiling in the background */
+                while((j->state==PJ_QUEUED||j->state==PJ_BUILDING)&&PW.frame_wait_ns<PW.async_budget_ns){
+                    uint64_t left=PW.async_budget_ns-PW.frame_wait_ns,started=dm_android_nvn_clock_ns();
+                    struct timespec deadline;clock_gettime(CLOCK_REALTIME,&deadline);
+                    uint64_t ns=(uint64_t)deadline.tv_nsec+left;deadline.tv_sec+=(time_t)(ns/1000000000ull);deadline.tv_nsec=(long)(ns%1000000000ull);
+                    pthread_cond_timedwait(&PW.changed,&PW.lock,&deadline);
+                    PW.frame_wait_ns+=dm_android_nvn_clock_ns()-started;
+                }
+                if(j->state==PJ_QUEUED||j->state==PJ_BUILDING){*skipped=1;PW.skips++;pthread_mutex_unlock(&PW.lock);
+                    PW.wait_ns+=dm_android_nvn_clock_ns()-t;G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-t;return pso;}
+            }
             while(j->state==PJ_QUEUED||j->state==PJ_BUILDING)pthread_cond_wait(&PW.changed,&PW.lock);
             if(j->state==PJ_READY){pso=j->pso;j->state=PJ_CLAIMED;obtained=1;PW.claims++;
                 fprintf(stderr,"[nvn-vulkan] PIPELINE_USE seed=%d waited=%d wait_ns=%llu compute=%u\n",j->seed,waited,(unsigned long long)(dm_android_nvn_clock_ns()-t),key->compute);}
@@ -224,5 +242,6 @@ int mtl_warm_wait(int timeout) {
     return (int)((dm_android_nvn_clock_ns()-begin)/1000000);
 }
 static void pipeline_frame(uint64_t frame) {
+    PW.frame_wait_ns=0;
     if(PW.trace)fprintf(stderr,"[nvn-vulkan] PIPELINE_FRAME pid=%d frame=%llu mono_ns=%llu mode=%d cached=%u sync_creates=%llu claims=%llu waits=%llu wait_ns=%llu bg_created=%llu bg_ns=%llu pending=%u\n",getpid(),(unsigned long long)frame,(unsigned long long)dm_android_nvn_clock_ns(),PW.mode,G.npso,(unsigned long long)PW.sync_creates,(unsigned long long)PW.claims,(unsigned long long)PW.waits,(unsigned long long)PW.wait_ns,(unsigned long long)atomic_load(&PW.background_creates),(unsigned long long)atomic_load(&PW.background_ns),atomic_load(&PW.warm_pending));
 }
