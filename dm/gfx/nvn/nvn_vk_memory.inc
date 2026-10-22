@@ -13,6 +13,12 @@ static void memory_snapshot_ownership(DmVkMemoryStats *out) {
         for(int i=0;i<sub->ntemporary;i++)bytes+=sub->temporaries[i]->allocation_size;
         if(sub->phase==SUBMISSION_RECORDING)out->temp_recording_bytes+=bytes;
         else out->temp_inflight_bytes+=bytes;
+        for(unsigned i=0;i<READ_CACHE_ENTRIES;i++){
+            ReadPersistent *e=&sub->read_cache[i];if(!e->buffer.b)continue;
+            if(e->epoch!=sub->epoch||sub->phase==SUBMISSION_UNUSED||sub->phase==SUBMISSION_RETIRED)out->temp_retired_bytes+=e->buffer.allocation_size;
+            else if(sub->phase==SUBMISSION_RECORDING)out->temp_recording_bytes+=e->buffer.allocation_size;
+            else out->temp_inflight_bytes+=e->buffer.allocation_size;
+        }
     }
 }
 int dm_vk_memory_get_stats(DmVkMemoryStats *out) {
@@ -35,6 +41,7 @@ int dm_vk_memory_trim_caches(unsigned flags,DmVkMemoryStats *out) {
     /* The caller blocks new guest graphics while this lock is released again.
      * No submission is recorded, in flight or awaiting CPU publication. */
     if(flags&DM_VK_TRIM_RETIRED)while(G.nretired){VBuffer *b=retired_take(G.nretired-1);freed+=b->allocation_size;buffer_free(b);free(b);}
+    if(flags&DM_VK_TRIM_RETIRED)for(unsigned k=0;k<count;k++)freed+=read_snapshot_cache_clear(contexts[k],0);
     if(flags&DM_VK_TRIM_DERIVED)for(unsigned k=0;k<count;k++)resource_cache_clear(contexts[k]);
     if(flags&DM_VK_TRIM_DERIVED)for(uint32_t i=0;i<G.texture_used;i++)if(G.textures[i].serial)freed+=texture_derived_release(&G.textures[i]);
     if(flags&DM_VK_TRIM_WRITEBACK)for(unsigned k=0;k<count;k++){

@@ -252,7 +252,7 @@ static struct {
     VkFormatProperties format_properties[256];uint8_t format_known[256];
     int depth_order,depth_input_experiment,depth_input_profile,depth_input_calibrated_ties,fragment_stores;
     VkPipelineCache pipeline_cache;
-    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts,dump_frame;int filter_cubic_ext,present_cubic;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit,slot_publication,uniform_versions;uint64_t profile_uniform_bytes,profile_uniform_gpu_bytes,profile_uniform_reuses,profile_uniform_fallbacks,profile_uniform_hash_bytes,profile_uniform_content_hits;_Atomic int recording_active;uint64_t profile_overlap_publications;uint64_t recording_epoch;
+    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts,dump_frame;int filter_cubic_ext,present_cubic;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit,slot_publication,uniform_versions,buffer_versions;uint64_t profile_read_bytes[7],profile_read_gpu_bytes[7],profile_read_reuses[7],profile_read_incremental_bytes,profile_read_fallbacks;uint64_t profile_uniform_bytes,profile_uniform_gpu_bytes,profile_uniform_reuses,profile_uniform_fallbacks,profile_uniform_hash_bytes,profile_uniform_content_hits;_Atomic int recording_active;uint64_t profile_overlap_publications;uint64_t recording_epoch;
     uint64_t profile_slot_wait_ns,profile_drain_wait_ns,profile_completion_wait_ns,profile_completion_waits;
     VBuffer support,zero,default_vertex; VPool pools[LIMIT_POOLS]; int npool;
     PoolUpload pool_uploads[UPLOAD_BUCKETS][UPLOAD_WAYS];uint64_t upload_age;
@@ -362,6 +362,9 @@ static NvnVkPublicationQueue g_publication=NVN_VK_PUBLICATION_QUEUE_INIT;
 static void publication_stage_record(void);
 static void publication_enqueue(VkSubmission *sub,int kind);
 static void publication_retire_ready_locked(void);
+#include "nvn_vk_read_source_profile.inc"
+static uint64_t read_snapshot_cache_clear(VkSubmission *sub,uint64_t serial);
+static void read_snapshot_forget_pool(uint64_t serial);
 static VkRenderPass render_pass_cached(const PassKey *key,const VkRenderPassCreateInfo *info,uint8_t *owned) {
     uint64_t hash=1469598103934665603ull;const uint8_t *bytes=(const uint8_t *)key;
     for(size_t i=0;i<sizeof *key;i++){hash^=bytes[i];hash*=1099511628211ull;}
@@ -837,6 +840,8 @@ static void backend_init(void) {
      * One slot has no cross-submission overlap: preserve its zero-copy path; only multiple slots need uniform versions.
      */
     G.uniform_versions=G.slot_publication&&G.render_slots_n>1&&getenv("DM_UNIFORM_VERSIONS")!=NULL;
+    G.buffer_versions=G.uniform_versions&&getenv("DM_BUFFER_VERSIONS")!=NULL;
+    fprintf(stderr,"[nvn-vulkan] BUFFER_VERSIONS enabled=%d slots=%d\n",G.buffer_versions,G.render_slots_n);
     fprintf(stderr,"[nvn-vulkan] UNIFORM_VERSIONS enabled=%d slots=%d\n",G.uniform_versions,G.render_slots_n);
     S.desc_entries=calloc(DESC_ENTRIES,sizeof(*S.desc_entries));S.desc_arena=malloc(DESC_ARENA);G.control_cache=calloc(CONTROL_CACHE,sizeof(*G.control_cache));
     if(!S.desc_entries||!S.desc_arena||!G.control_cache)die("descriptor/control cache allocation",0);
@@ -972,6 +977,7 @@ void mtl_pool_del(const void *mem) {
     if(G.active) die("pool deleted during submission",(long long)(uintptr_t)mem);
     pthread_mutex_lock(&G.lock);async_drain_locked(); for(int i=0;i<G.npool;i++) if(G.pools[i].guest==mem) {
         for(int k=0;k<4;k++){free(G.pools[i].use_rd[k]);free(G.pools[i].use_wr[k]);}
+        read_snapshot_forget_pool(G.pools[i].serial);
         buffer_free(&G.pools[i].v); G.pools[i]=G.pools[--G.npool];G.pool_revision++; pthread_mutex_unlock(&G.lock); return; }
     pthread_mutex_unlock(&G.lock); die("unknown memory pool delete",(long long)(uintptr_t)mem);
 }
@@ -1546,7 +1552,7 @@ static void sub_begin_ctx(VkSubmission *ctx) {
             chunk_applied_sequence=chunk_control_sequence;
         }
         atomic_store(&chunk_applied,(int)S.chunk_draws);}
-    nvn_uniform_reset(&S.uniform_arena);
+    nvn_uniform_reset(&S.uniform_arena);nvn_uniform_reset(&S.read_arena);
     S.nwrites=S.nevents=S.ntemporary=S.npipeline=S.nread_snapshots=S.ndirect_reads=0;S.in_pass=0;
     S.pending_clear=0;S.flushing_clear=0;S.pass_discard=0;
     if(!G.present_count&&!attachment_ab_sequence)attachment_ab_poll(0);
@@ -1573,10 +1579,13 @@ void mtl_sub_begin(void) {
     int i=G.render_ring_next;G.render_ring_next=(i+1)%G.render_slots_n;
     sub_begin_ctx(i?&G.extra_render_slots[i-1]:&G.submission_slot);
 }
+#include "nvn_vk_read_snapshot.inc"
 void mtl_sub_copy(uint64_t src,uint64_t dst,uint64_t len) {
-    all_barrier(); uint64_t so=0,doff=0; VPool *s=pool_read(src,len,&so),*d=pool_find(dst,len,&doff);
+    read_source_note(READ_COPY,(Range){src,len});
+    all_barrier();VkDescriptorBufferInfo source=buffer_read_range((Range){src,len},READ_COPY);
+    uint64_t doff=0;VPool *d=pool_find(dst,len,&doff);
     if(!d || overlap(src,len,dst,len)) die("buffer copy bounds/overlap",dst);pool_materialize(d);
-    VkBufferCopy copy={so,doff,len}; vkCmdCopyBuffer(S.command,s->v.b,d->v.b,1,&copy); mark_write(dst,len);
+    VkBufferCopy copy={source.offset,doff,len}; vkCmdCopyBuffer(S.command,source.buffer,d->v.b,1,&copy); mark_write(dst,len);
 }
 void mtl_sub_event(volatile uint32_t *addr,uint32_t mode,uint32_t value) {
     if(mode>1 || S.nevents==LIMIT_WRITES) die("event mode/count",mode);
@@ -2863,7 +2872,7 @@ static VkDescriptorSet binding_plan_try(VShader *s) {
     uint32_t live_dyn[LIMIT_BINDINGS];memset(live_dyn,0,(size_t)s->h.nb*sizeof(*live_dyn));
     for(uint32_t n=0;n<plan->nbuffer;n++){
         unsigned i=plan->buffers[n];const RBinding *b=&s->b[i];
-        Range r=G.state.uniform[s->h.stage][b->slot];uint64_t offset=0;
+        Range r=G.state.uniform[s->h.stage][b->slot];read_source_note(READ_UNIFORM,r);uint64_t offset=0;
         if(!r.addr||!r.size){binding_plan_miss(PLAN_MISS_BUFFER_RANGE);return VK_NULL_HANDLE;}
         const BindingBuffer *cached=&plan->resources[i].buffer;int dynamic=(s->dyn_bindings>>i)&1;
         VkDescriptorBufferInfo version;uint64_t serial=0;
@@ -3080,10 +3089,13 @@ static VkDescriptorSet bind_shader(VShader *s) {
            VkFormat f=format(nvn);VkFormatProperties properties=format_properties(f);
            VkFormatFeatureFlags required=b->type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER?VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT:VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
            if(!(properties.bufferFeatures&required))die("texel buffer format feature",nvn);
-           uint64_t offset=0;VPool *p=pool_read((uint64_t)(uintptr_t)t->mem,t->L.size,&offset);VkBuffer buffer=p->v.b;
+           read_source_note(READ_TEXEL,(Range){(uint64_t)(uintptr_t)t->mem,t->L.size});
+           uint64_t offset=0;VkBuffer buffer;
+           if(b->type==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER){VkDescriptorBufferInfo source=buffer_read_range((Range){(uint64_t)(uintptr_t)t->mem,t->L.size},READ_TEXEL);buffer=source.buffer;offset=source.offset;}
+           else{VPool *p=pool_read((uint64_t)(uintptr_t)t->mem,t->L.size,&offset);buffer=p->v.b;}
            if(offset%G.properties.limits.minTexelBufferOffsetAlignment){VBuffer *aligned=temporary((t->L.size+3)&~3ULL,VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT);
                if(b->type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER||offset%4||t->L.size%4)die("writable/word-unaligned texel buffer",offset);
-               all_barrier();VkBufferCopy copy={offset,0,t->L.size};vkCmdCopyBuffer(S.command,p->v.b,aligned->b,1,&copy);all_barrier();buffer=aligned->b;offset=0;}
+               all_barrier();VkBufferCopy copy={offset,0,t->L.size};vkCmdCopyBuffer(S.command,buffer,aligned->b,1,&copy);all_barrier();buffer=aligned->b;offset=0;}
            if(S.nbuffer_view==LIMIT_WRITES)die("texel buffer view count",S.nbuffer_view);
            VkBufferViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,.buffer=buffer,.format=f,.offset=offset,.range=t->L.size};
            CHECK(vkCreateBufferView(G.device,&vi,NULL,&S.buffer_views[S.nbuffer_view]));w[i].pTexelBufferView=&S.buffer_views[S.nbuffer_view++];
@@ -3097,6 +3109,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
        else if(b->kind==2 || b->kind==3 || b->kind==9) {
            if(b->slot<0 || b->slot>=16)die("shader buffer slot",b->slot);
            Range r=(b->kind==2||b->kind==9)?G.state.uniform[s->h.stage][b->slot]:G.state.storage[s->h.stage][b->slot];
+           read_source_note(b->kind==2?READ_UNIFORM:b->flags?READ_STORAGE_WRITE:READ_STORAGE,r);
            if(G.pool_range_stats&&b->kind==2)G.pool_ranges[pool_range_bucket(r.size)].uniforms++;
            /* A zero-address, zero-size NVN binding has no resource. Preserve
             * that state with a real null descriptor; never allocate substitute
@@ -3117,6 +3130,15 @@ static VkDescriptorSet bind_shader(VShader *s) {
                    char name[160];snprintf(name,sizeof name,"feedback-effective-%04llu-%llu-%s-ubo%d",(unsigned long long)G.present_count+1,(unsigned long long)G.draws,s->h.stage?"ps":"vs",b->slot);trace_capture_queue(capture,r.size,name);
                }
                if((s->dyn_bindings>>i)&1){live_dyn[i]=(uint32_t)version.offset;bi[i].offset=0;}
+               w[i].pBufferInfo=&bi[i];continue;
+           }
+           if((b->kind==3||b->kind==9)&&!b->flags&&read_snapshot(r,READ_STORAGE,&version)){
+               bi[i]=version;plan_safe=0;
+               if(G.capture_feedback&&b->kind==9){
+                   VBuffer *capture=temporary(r.size,VK_BUFFER_USAGE_TRANSFER_DST_BIT);all_barrier();
+                   VkBufferCopy copy={version.offset,0,r.size};vkCmdCopyBuffer(S.command,version.buffer,capture->b,1,&copy);
+                   char name[160];snprintf(name,sizeof name,"feedback-effective-%04llu-%llu-%s-ubo%d",(unsigned long long)G.present_count+1,(unsigned long long)G.draws,s->h.stage?"ps":"vs",b->slot);trace_capture_queue(capture,r.size,name);
+               }
                w[i].pBufferInfo=&bi[i];continue;
            }
            uint64_t offset=0;VPool *p=pool_read(r.addr,r.size,&offset);
@@ -3723,6 +3745,7 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
     ps=depth_input_select(vs,ps);
     if(G.skip_ps[0]&&ps&&!strcmp(ps->key,G.skip_ps))return;
     S.read_snapshots_allowed=1;
+    if(G.buffer_versions)read_snapshot_writers(vs,ps);
     for(unsigned stage=0;stage<2;stage++){VShader *s=stage?ps:vs;if(!s)continue;
         for(unsigned i=0;i<s->h.nb;i++){RBinding *b=&s->b[i];if(((b->kind==3||b->kind==9)&&b->flags)||b->kind==6||b->type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)S.read_snapshots_allowed=0;}
     }
@@ -3785,6 +3808,23 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
     if(G.profile_detail){int n=0;G.last_uses[0]=0;for(unsigned u=0;u<S.nimage_uses&&n<90;u++)n+=snprintf(G.last_uses+n,sizeof G.last_uses-n,"%llu%s ",(unsigned long long)S.image_uses[u].serial,(S.image_uses[u].roles&2)?"w":"");}
     G.xition_vertex=0;
     if(S.active_occlusion==UINT32_MAX)query_reserve(S.occlusion,&S.occlusion_reset_count,S.nocc,1,LIMIT_WRITES);
+    /* 快照的 GPU 覆盖拷贝必须先于渲染通道；避免在绑定管线后结束通道。
+     * GPU overlay copies for snapshots must precede the render pass, never end it after pipeline binding.
+     */
+    VkDescriptorBufferInfo vertex_sources[16]={{0}},index_source={0};
+    if(G.buffer_versions){
+        for(uint32_t i=0;i<vs->h.na;i++){
+            unsigned location=vs->attr[i][0];if(location>=16)die("vertex attribute count",location);
+            va_st v=G.state.attributes[location];if(v.stream>=16)die("vertex stream",v.stream);
+            if(v.fmt==NVN_FORMAT_NONE||vertex_sources[v.stream].buffer)continue;
+            NVNbufferRange r=G.state.vbuf[v.stream];if(!r.address||!r.size)die("unbound vertex stream",v.stream);
+            vertex_sources[v.stream]=buffer_read_range((Range){r.address,r.size},READ_VERTEX);
+        }
+        if(idx){
+            if(idx->count<0||idx->instances<0||(idx->itype!=NVN_INDEX_TYPE_UNSIGNED_SHORT&&idx->itype!=NVN_INDEX_TYPE_UNSIGNED_INT))die("index type/bounds",idx->itype);
+            index_source=buffer_read_range((Range){idx->ibuf,(uint64_t)idx->count*(idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?2:4)},READ_INDEX);
+        }
+    }
     uint64_t render_started=prof_now();render_begin();G.profile_render_ns+=prof_now()-render_started;
     VkVertexInputAttributeDescription attributes[32];VkVertexInputBindingDescription bindings[16];uint32_t nbindings=0,nattributes=0,locations=0;uint8_t used[16]={0};
     NvnVkVertexAdapt vertex_plan={0};int has_default=0;
@@ -3846,8 +3886,9 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
     vs->vertex_layout_logged=1;
     for(unsigned i=0;i<16;i++)if(used[i]) { vs_st v=G.state.streams[i];if(v.divisor>1)die("vertex divisor",v.divisor);
         bindings[nbindings++]=(VkVertexInputBindingDescription){i,v.stride,v.divisor?VK_VERTEX_INPUT_RATE_INSTANCE:VK_VERTEX_INPUT_RATE_VERTEX};
-        NVNbufferRange r=G.state.vbuf[i];if(!r.address || !r.size)die("unbound vertex stream",i);uint64_t offset=0;VPool *p=pool_read(r.address,r.size,&offset);
-        command_bind_profile(NVN_VK_CMD_VERTEX,nvn_vk_cmd_vertex(&S.command_state,G.enable_command_cache&&!G.trace_frame,S.command,i,p->v.b,offset)); }
+        NVNbufferRange r=G.state.vbuf[i];if(!r.address || !r.size)die("unbound vertex stream",i);read_source_note(READ_VERTEX,(Range){r.address,r.size});
+        VkDescriptorBufferInfo source=G.buffer_versions?vertex_sources[i]:buffer_read_range((Range){r.address,r.size},READ_VERTEX);
+        command_bind_profile(NVN_VK_CMD_VERTEX,nvn_vk_cmd_vertex(&S.command_state,G.enable_command_cache&&!G.trace_frame,S.command,i,source.buffer,source.offset)); }
     VkPipelineInputAssemblyStateCreateInfo ai={.sType=VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology=topology(a?a->prim:idx->prim)};
     VkPipelineRasterizationStateCreateInfo raster={.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,.polygonMode=VK_POLYGON_MODE_FILL,.depthClampEnable=G.state.depth_clamp,
@@ -3939,8 +3980,9 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
     if(G.diag_skip_draws||skip_class||pso_pending){}
     else if(a) {if(a->count<0 || a->first<0||instances<0||base_instance<0)die("draw arrays bounds",a->count);vkCmdDraw(S.command,(G.diag_shape&2)&&a->count>3?3:a->count,instances,a->first,base_instance);}
     else { if(idx->count<0 || idx->instances<0 || (idx->itype!=NVN_INDEX_TYPE_UNSIGNED_SHORT && idx->itype!=NVN_INDEX_TYPE_UNSIGNED_INT))die("index type/bounds",idx->itype);
-        uint64_t offset=0,size=(uint64_t)idx->count*(idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?2:4);VPool *p=pool_read(idx->ibuf,size,&offset);
-        command_bind_profile(NVN_VK_CMD_INDEX,nvn_vk_cmd_index(&S.command_state,cache_commands,S.command,p->v.b,offset,idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32));
+        uint64_t size=(uint64_t)idx->count*(idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?2:4);read_source_note(READ_INDEX,(Range){idx->ibuf,size});
+        VkDescriptorBufferInfo source=G.buffer_versions?index_source:buffer_read_range((Range){idx->ibuf,size},READ_INDEX);
+        command_bind_profile(NVN_VK_CMD_INDEX,nvn_vk_cmd_index(&S.command_state,cache_commands,S.command,source.buffer,source.offset,idx->itype==NVN_INDEX_TYPE_UNSIGNED_SHORT?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32));
         vkCmdDrawIndexed(S.command,(G.diag_shape&2)&&idx->count>3?3:idx->count,idx->instances,0,idx->base_vertex,idx->base_instance); }
     if(G.draw_timing&&!(G.diag_skip_draws||skip_class))dt_mark_draw(vs->key,ps?ps->key:NULL,(uint32_t)(a?a->count:idx->count),(uint32_t)(a?instances:idx->instances));
     if(G.disable_query_batch||G.trace_frame)occlusion_end();
@@ -3965,6 +4007,7 @@ static void dispatch(const p_dispatch *p) {
     for(unsigned axis=0;axis<3;axis++)if(groups[axis]>G.properties.limits.maxComputeWorkGroupCount[axis])die("dispatch device group limit",axis);
     if(memcmp(G.state.dispatch,groups,sizeof groups)){memcpy(G.state.dispatch,groups,sizeof groups);G.ssbo_revision[5]++;G.binding_revision[5]++;}
     VShader *s=program_stage(5);
+    if(G.buffer_versions)read_snapshot_writers(s,NULL);
     S.nimage_uses=0;collect_image_uses(s);prepare_comparison_images(s);
     VkDescriptorSet set=bind_shader(s);
     PsoKey key;memset(&key,0,sizeof(key));key.compute=1;key.shader[0]=s->identity;
@@ -4012,7 +4055,9 @@ static void copy_b2t(const p_copy_b2t *p) {
             die("compressed buffer-to-texture range/stride",row);
         for(int i=0;i<S.nwrites;++i)if(overlap(p->src,size,S.writes[i].addr,S.writes[i].size))
             die("compressed decode requires completed GPU source write",p->src);
-        if(!pool_find(p->src,size,NULL))die("compressed decode source range",p->src);
+        uint64_t source_offset=0;VPool *source_pool=pool_find(p->src,size,&source_offset);
+        if(!source_pool)die("compressed decode source range",p->src);
+        if(G.buffer_versions)pool_conflict_wait(source_pool,source_offset,size,0);
         /* No queued GPU write overlaps this range (checked above), so the
          * compressed source bytes are authoritative in guest CPU memory. */
         const uint8_t *compressed=(const void *)(uintptr_t)p->src;
@@ -4035,7 +4080,7 @@ static void copy_b2t(const p_copy_b2t *p) {
        die("buffer-to-texture pitch",G.state.copy_image_stride);
     if(row%t->bpp || row/t->bpp>UINT32_MAX || image%t->bpp || (uint64_t)p->r.xoffset+p->r.width>width || (uint64_t)p->r.yoffset+p->r.height>height)
        die("buffer-to-texture extent/stride",row);
-    uint64_t offset=0;VPool *src=pool_read(p->src,size,&offset);all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    read_source_note(READ_COPY,(Range){p->src,size});VkDescriptorBufferInfo src=buffer_read_range((Range){p->src,size},READ_COPY);uint64_t offset=src.offset;all_barrier();texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy c={.bufferOffset=offset,.bufferRowLength=(uint32_t)(row/t->bpp),.imageSubresource={aspect(t->format),level,volume?0:layer,volume?1:p->r.depth},
        .imageOffset={p->r.xoffset,p->r.yoffset,volume?p->r.zoffset:0},.imageExtent={p->r.width,p->r.height,volume?p->r.depth:1}};
     if(G.state.copy_image_stride) {
@@ -4046,9 +4091,9 @@ static void copy_b2t(const p_copy_b2t *p) {
             c.bufferOffset=offset+(size_t)z*image;
             c.imageSubresource.baseArrayLayer=volume?0:layer+(unsigned)z;
             c.imageOffset.z=volume?p->r.zoffset+z:0;
-            vkCmdCopyBufferToImage(S.command,src->v.b,t->image,t->layout,1,&c);
+            vkCmdCopyBufferToImage(S.command,src.buffer,t->image,t->layout,1,&c);
         }
-    }else vkCmdCopyBufferToImage(S.command,src->v.b,t->image,t->layout,1,&c);
+    }else vkCmdCopyBufferToImage(S.command,src.buffer,t->image,t->layout,1,&c);
     t->cpu_owned=0;tex_dirty(t);
 }
 static void clear_color(const p_clear_color *p) {
@@ -4296,7 +4341,7 @@ static void zcull_data(const p_zcull *p,int restore) {
         mtl_sub_commit();mtl_sub_begin();
         VPool *pool=pool_find(p->address,sizeof(expected),&offset);
         if(!pool || !pool->v.map)die("ZCull restore pool lifetime",p->address);
-        NvnVkZCullRecord saved;memcpy(&saved,pool->v.map+offset,sizeof(saved));
+        NvnVkZCullRecord saved;memcpy(&saved,G.buffer_versions?(const void *)(uintptr_t)p->address:pool->v.map+offset,sizeof(saved));
         if(!nvn_vk_zcull_valid(&saved,&expected))die("ZCull restore incompatible/corrupt state",p->address);
         /* No external hierarchy is imported into Vulkan. Each image keeps its
          * own driver-managed HiZ; never roll back or clear real depth pixels. */
@@ -4770,8 +4815,9 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         if(G.profile_frames>=60)fprintf(stderr,"[nvn-vulkan] RENDER_PHASE_CPU_PROFILE frame=%llu frames=%llu clock=thread_cpu writeback_prepare=%d replay_inclusive_ms=%.3f begin_ms=%.3f commit_prepare_ms=%.3f commit_wait_ms=%.3f retire_ms=%.3f writeback_subset_ms=%.3f present_body_inclusive_ms=%.3f replay_calls=%llu begin_calls=%llu commit_calls=%llu writeback_calls=%llu present_calls=%llu wb_global_faults=%llu wb_global_preps=%llu wb_global_mp_calls=%llu wb_global_mp_pages=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,G.enable_writeback_prepare,G.profile_replay_cpu_ns/1e6,G.profile_begin_cpu_ns/1e6,G.profile_commit_prepare_cpu_ns/1e6,G.profile_commit_wait_cpu_ns/1e6,G.profile_retire_cpu_ns/1e6,G.profile_writeback_cpu_ns/1e6,G.profile_present_cpu_ns/1e6,(unsigned long long)G.profile_replay_calls,(unsigned long long)G.profile_begin_calls,(unsigned long long)G.profile_commit_calls,(unsigned long long)G.profile_writeback_calls,(unsigned long long)G.profile_present_calls,(unsigned long long)G.profile_writeback_global_faults,(unsigned long long)G.profile_writeback_global_preps,(unsigned long long)G.profile_writeback_global_mp_calls,(unsigned long long)G.profile_writeback_global_mp_pages);
         if(G.profile_frames>=60){
             unsigned contexts=(G.submission_slot.phase!=SUBMISSION_UNUSED)+(G.submission_slot2.phase!=SUBMISSION_UNUSED);for(int i=1;i<G.render_slots_n;i++)contexts+=G.extra_render_slots[i-1].phase!=SUBMISSION_UNUSED;
-            fprintf(stderr,"[nvn-vulkan] RENDER_SLOT_PROFILE frame=%llu slots=%d conflicts=%llu\n",(unsigned long long)G.present_count+1,G.render_slots_n,(unsigned long long)G.slot_conflicts);conflict_ledger_dump();
+            fprintf(stderr,"[nvn-vulkan] RENDER_SLOT_PROFILE frame=%llu slots=%d conflicts=%llu\n",(unsigned long long)G.present_count+1,G.render_slots_n,(unsigned long long)G.slot_conflicts);conflict_ledger_dump();read_source_dump(G.present_count+1);
             if(G.slot_publication)fprintf(stderr,"[nvn-vulkan] SLOT_PUBLICATION_PROFILE frame=%llu overlap_publications=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_overlap_publications);
+            read_snapshot_profile_dump(G.present_count+1);
             if(G.uniform_versions){fprintf(stderr,"[nvn-vulkan] UNIFORM_VERSION_PROFILE frame=%llu copied_bytes=%llu gpu_overlay_bytes=%llu reuses=%llu private_fallbacks=%llu hash_bytes=%llu content_hits=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_uniform_bytes,(unsigned long long)G.profile_uniform_gpu_bytes,(unsigned long long)G.profile_uniform_reuses,(unsigned long long)G.profile_uniform_fallbacks,(unsigned long long)G.profile_uniform_hash_bytes,(unsigned long long)G.profile_uniform_content_hits);G.profile_uniform_bytes=G.profile_uniform_gpu_bytes=G.profile_uniform_reuses=G.profile_uniform_fallbacks=G.profile_uniform_hash_bytes=G.profile_uniform_content_hits=0;}
             fprintf(stderr,"[nvn-vulkan] RENDER_SUBMISSION_PROFILE frame=%llu contexts=%u epoch=%llu creates=%llu reuses=%llu publications=%llu context_struct_bytes=%zu descriptor_arena_bytes=%u descriptor_entry_bytes=%zu async=%d slot_wait_ms=%.3f drain_wait_ms=%.3f completion_fence_wait_ms=%.3f completion_waits=%llu\n",
                 (unsigned long long)G.present_count+1,contexts,(unsigned long long)S.epoch,

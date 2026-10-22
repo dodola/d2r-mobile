@@ -30,9 +30,13 @@ static void ghost_clear(void){for(unsigned i=0;i<ghost.n;i++)free(ghost.c[i]);gh
 /* Only CPU-known reads are eligible. Exact queued CPU updates are overlaid in
  * order; a GPU producer causes this optional overlay candidate to be rejected. */
 static int ghost_cpu_read(Range r,void *out){
-    uint64_t off=0;VPool *p=pool_find(r.addr,r.size,&off);if(!p||!p->v.map)return 0;
+    uint64_t off=0;VPool *p=pool_find(r.addr,r.size,&off);if(!p||(!G.buffer_versions&&!p->v.map))return 0;
     for(int i=0;i<S.nwrites;i++)if(!S.write_cpu[i]&&overlap(r.addr,r.size,S.writes[i].addr,S.writes[i].size))return 0;
-    memcpy(out,p->v.map+off,r.size);
+    /* 等待旧槽发布，再读 guest；录制中的 CPU 更新仍按顺序覆盖。
+     * Wait for older slot publication before reading guest bytes; recorded CPU updates remain ordered overlays.
+     */
+    if(G.buffer_versions)pool_conflict_wait(p,off,r.size,0);
+    memcpy(out,G.buffer_versions?(const void *)(uintptr_t)r.addr:p->v.map+off,r.size);
     for(int i=0;i<S.nwrites;i++)if(S.write_cpu[i]&&overlap(r.addr,r.size,S.writes[i].addr,S.writes[i].size)){
         Range w=S.writes[i];uint64_t lo=r.addr>w.addr?r.addr:w.addr,hi=r.addr+r.size<w.addr+w.size?r.addr+r.size:w.addr+w.size;
         memcpy((uint8_t *)out+lo-r.addr,S.write_cpu[i]+lo-w.addr,hi-lo);

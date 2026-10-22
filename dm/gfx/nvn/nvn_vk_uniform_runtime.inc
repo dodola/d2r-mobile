@@ -3,6 +3,7 @@
  */
 static int uniform_snapshot(Range r,VkDescriptorBufferInfo *info,uint64_t *serial) {
     if(!G.uniform_versions||!r.addr||!r.size||r.size>65536)return 0;
+    if(G.buffer_versions&&read_snapshot_aliases_writer(r))return 0;
     uint64_t off=0;if(ghost_pool_override(r.addr,r.size,&off))return 0;
     VPool *p=pool_find(r.addr,r.size,&off);if(!p)die("uniform snapshot pool range",r.addr);
     pool_conflict_wait(p,off,r.size,0);*serial=p->serial;
@@ -45,8 +46,9 @@ static int uniform_snapshot(Range r,VkDescriptorBufferInfo *info,uint64_t *seria
         /* 镜像中的写入按命令顺序完成；只拷贝写入范围，未写入部分已经固定。
          * Mirror writes execute in command order; copy only written ranges, while untouched bytes are already frozen.
          */
-        for(int i=0;i<S.nwrites;i++)if(overlap(r.addr,r.size,S.writes[i].addr,S.writes[i].size)){
-            Range w=S.writes[i];uint64_t lo=r.addr>w.addr?r.addr:w.addr,hi=r.addr+r.size<w.addr+w.size?r.addr+r.size:w.addr+w.size;
+        uint64_t cursor=r.addr;Range span;
+        while(nvn_vk_snapshot_next_write(r,S.writes,S.nwrites,&cursor,&span)){
+            uint64_t lo=span.addr,hi=lo+span.size;
             uint64_t src=off+lo-r.addr,dst=ref.offset+lo-r.addr;
             if((src|dst|(hi-lo))&3)die("uniform GPU overlay word alignment",lo);
             VkBufferCopy copy={src,dst,hi-lo};vkCmdCopyBuffer(S.command,p->v.b,block->b,1,&copy);

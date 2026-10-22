@@ -24,9 +24,18 @@ typedef enum {
 typedef struct {
     Range range;uint64_t serial,epoch,stamp;int writes;VkDescriptorBufferInfo info;
 } UniformSource;
+#define READ_CACHE_ENTRIES 128
+typedef struct {
+    Range range;uint64_t serial,stamp,epoch;VBuffer buffer;UniformSource current;
+} ReadPersistent;
 typedef struct {
     NvnUniformArena uniform_arena;
     UniformSource uniform_sources[UNIFORM_SOURCES];
+    NvnUniformArena read_arena;
+    UniformSource read_sources[UNIFORM_SOURCES];
+    ReadPersistent read_cache[READ_CACHE_ENTRIES];
+    uint64_t read_cache_bytes;
+    Range read_writer_ranges[2*LIMIT_BINDINGS];unsigned read_writer_count;
     _Atomic SubmissionPhase phase;
     int slot_index; /* Render slot (0..3); -1 for the present slot. */
     uint64_t epoch,ticket;
