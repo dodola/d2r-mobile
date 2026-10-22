@@ -909,15 +909,37 @@ static void pool_use_clear(int idx){
         size_t words=(size_t)(((p->size>>SLOT_PAGE_SHIFT)+1+31)/32);memset(p->use_rd[idx],0,words*4);memset(p->use_wr[idx],0,words*4);}
 }
 static int ctx_busy(const VkSubmission *c);
+/* 冲突台账：按（池，类别）汇总，找出冲突集中在哪些范围、有多少是页粒度造成的假冲突 | Conflict ledger: aggregated per (pool, class) to see where conflicts concentrate and how many are page-granularity false sharing */
+typedef struct {int used,pool,kind;uint64_t n,range_bytes,hit_pages,range_pages,wait_ns,first_page,last_page;} ConflictLedger;
+static ConflictLedger g_conflicts[48];
+static void conflict_note(int pool,int kind,uint64_t range_bytes,uint64_t hit_pages,uint64_t range_pages,uint64_t wait_ns,uint64_t first,uint64_t last){
+    ConflictLedger *e=NULL;
+    for(unsigned i=0;i<48;i++){if(g_conflicts[i].used&&g_conflicts[i].pool==pool&&g_conflicts[i].kind==kind){e=&g_conflicts[i];break;}if(!g_conflicts[i].used&&!e)e=&g_conflicts[i];}
+    if(!e)return;if(!e->used){e->used=1;e->pool=pool;e->kind=kind;e->first_page=first;e->last_page=last;}
+    e->n++;e->range_bytes+=range_bytes;e->hit_pages+=hit_pages;e->range_pages+=range_pages;e->wait_ns+=wait_ns;
+    if(first<e->first_page)e->first_page=first;if(last>e->last_page)e->last_page=last;
+}
+static void conflict_ledger_dump(void){
+    for(unsigned i=0;i<48;i++){ConflictLedger *e=&g_conflicts[i];if(!e->used)continue;
+        fprintf(stderr,"[nvn-vulkan] SLOT_CONFLICT pool=%d kind=%s n=%llu avg_range_bytes=%llu hit_pages_of_range=%.2f wait_ms=%.2f page_span=%llu-%llu\n",
+            e->pool,e->kind==0?"cpu_upload_vs_slot_write":e->kind==1?"cpu_upload_vs_slot_read":e->kind==2?"snapshot_vs_slot_write":"snapshot_vs_slot_read",
+            (unsigned long long)e->n,(unsigned long long)(e->n?e->range_bytes/e->n:0),e->range_pages?(double)e->hit_pages/e->range_pages:0.0,e->wait_ns/1e6,
+            (unsigned long long)e->first_page,(unsigned long long)e->last_page);}
+    memset(g_conflicts,0,sizeof g_conflicts);
+}
 static void pool_conflict_wait(VPool *p,uint64_t off,uint64_t len,int cpu_writes){
     if(!p->use_rd[0]||!len||S.slot_index<0)return;
     uint64_t first=off>>SLOT_PAGE_SHIFT,last=(off+len-1)>>SLOT_PAGE_SHIFT;
     for(int j=0;j<G.render_slots_n;j++){
         VkSubmission *c=render_slot_ptr(j);if(j==S.slot_index||c->phase!=SUBMISSION_INFLIGHT)continue;
-        int hit=0;
-        for(uint64_t pg=first;pg<=last&&!hit;pg++){uint32_t m=1u<<(pg&31);hit=(p->use_wr[j][pg>>5]&m)||(cpu_writes&&(p->use_rd[j][pg>>5]&m));}
+        int hit=0,write_hit=0;uint64_t hit_pages=0;
+        for(uint64_t pg=first;pg<=last;pg++){uint32_t m=1u<<(pg&31);
+            int w=(p->use_wr[j][pg>>5]&m)!=0,r=cpu_writes&&(p->use_rd[j][pg>>5]&m);
+            if(w||r){hit=1;hit_pages++;if(w)write_hit=1;}}
         if(!hit)continue;
+        uint64_t started=dm_android_nvn_clock_ns();
         G.slot_conflicts++;CHECK(cpu_work_wait_fences(G.device,1,&c->gpu_fence,VK_TRUE,UINT64_MAX));
+        conflict_note((int)(p-G.pools),(cpu_writes?0:2)+(write_hit?0:1),len,hit_pages,last-first+1,dm_android_nvn_clock_ns()-started,first,last);
     }
 }
 static VPool *pool_find(uint64_t addr,uint64_t size,uint64_t *offset) {
@@ -4688,7 +4710,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         if(G.profile_frames>=60)fprintf(stderr,"[nvn-vulkan] RENDER_PHASE_CPU_PROFILE frame=%llu frames=%llu clock=thread_cpu writeback_prepare=%d replay_inclusive_ms=%.3f begin_ms=%.3f commit_prepare_ms=%.3f commit_wait_ms=%.3f retire_ms=%.3f writeback_subset_ms=%.3f present_body_inclusive_ms=%.3f replay_calls=%llu begin_calls=%llu commit_calls=%llu writeback_calls=%llu present_calls=%llu wb_global_faults=%llu wb_global_preps=%llu wb_global_mp_calls=%llu wb_global_mp_pages=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,G.enable_writeback_prepare,G.profile_replay_cpu_ns/1e6,G.profile_begin_cpu_ns/1e6,G.profile_commit_prepare_cpu_ns/1e6,G.profile_commit_wait_cpu_ns/1e6,G.profile_retire_cpu_ns/1e6,G.profile_writeback_cpu_ns/1e6,G.profile_present_cpu_ns/1e6,(unsigned long long)G.profile_replay_calls,(unsigned long long)G.profile_begin_calls,(unsigned long long)G.profile_commit_calls,(unsigned long long)G.profile_writeback_calls,(unsigned long long)G.profile_present_calls,(unsigned long long)G.profile_writeback_global_faults,(unsigned long long)G.profile_writeback_global_preps,(unsigned long long)G.profile_writeback_global_mp_calls,(unsigned long long)G.profile_writeback_global_mp_pages);
         if(G.profile_frames>=60){
             unsigned contexts=(G.submission_slot.phase!=SUBMISSION_UNUSED)+(G.submission_slot2.phase!=SUBMISSION_UNUSED);for(int i=1;i<G.render_slots_n;i++)contexts+=G.extra_render_slots[i-1].phase!=SUBMISSION_UNUSED;
-            fprintf(stderr,"[nvn-vulkan] RENDER_SLOT_PROFILE frame=%llu slots=%d conflicts=%llu\n",(unsigned long long)G.present_count+1,G.render_slots_n,(unsigned long long)G.slot_conflicts);
+            fprintf(stderr,"[nvn-vulkan] RENDER_SLOT_PROFILE frame=%llu slots=%d conflicts=%llu\n",(unsigned long long)G.present_count+1,G.render_slots_n,(unsigned long long)G.slot_conflicts);conflict_ledger_dump();
             fprintf(stderr,"[nvn-vulkan] RENDER_SUBMISSION_PROFILE frame=%llu contexts=%u epoch=%llu creates=%llu reuses=%llu publications=%llu context_struct_bytes=%zu descriptor_arena_bytes=%u descriptor_entry_bytes=%zu async=%d slot_wait_ms=%.3f drain_wait_ms=%.3f completion_fence_wait_ms=%.3f completion_waits=%llu\n",
                 (unsigned long long)G.present_count+1,contexts,(unsigned long long)S.epoch,
                 (unsigned long long)G.profile_submission_creates,(unsigned long long)G.profile_submission_reuses,
