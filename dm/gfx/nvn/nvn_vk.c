@@ -23,6 +23,7 @@
 #include "../tex/nvn_bcdec.h"
 #include <stdatomic.h>
 #include <pthread.h>
+#include <sys/resource.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -4652,17 +4653,22 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     }
     G.profile_frames++;
     {   /* 卡顿归因 | hitch attribution: counter deltas since the previous present, printed only for frames well above the recent mean */
-        uint64_t now_h=dm_android_nvn_clock_ns();
+        static uint64_t h_cpu,h_faults,h_mp_ns,h_majflt,h_inblock,h_vcsw,h_icsw;
+        uint64_t now_h=dm_android_nvn_clock_ns(),cpu_h=dm_android_nvn_thread_cpu_ns(),fa_h=0,pr_h=0,mc_h=0,mpg_h=0,mn_h=0;
+        nvn_dirty_stats(&fa_h,&pr_h);nvn_dirty_mp_stats(&mc_h,&mpg_h,&mn_h);
+        struct rusage ru_h;getrusage(RUSAGE_SELF,&ru_h);
         if(G.hitch_last_ns){
             double dt=(now_h-G.hitch_last_ns)/1e6;uint64_t pso_sync=PW.sync_creates,pso_wait=PW.wait_ns;
             if(G.hitch_ema_ms>0&&dt>40.0&&dt>2.0*G.hitch_ema_ms&&G.hitch_count<600){
                 G.hitch_count++;
-                fprintf(stderr,"[nvn-vulkan] HITCH frame=%llu dt_ms=%.1f mean_ms=%.1f pipeline_ms=%.1f pso_sync=%llu pso_wait_ms=%.1f shader_load_ms=%.1f tex_decode_ms=%.1f gpu_wait_ms=%.1f\n",(unsigned long long)G.present_count+1,dt,G.hitch_ema_ms,HITCH_DELTA(G.profile_pipeline_ns,G.hitch_pipe)/1e6,(unsigned long long)(pso_sync-G.hitch_pso_sync),(pso_wait-G.hitch_pso_wait)/1e6,HITCH_DELTA(G.profile_shader_ns,G.hitch_shader)/1e6,HITCH_DELTA(G.profile_decode_ns,G.hitch_decode)/1e6,HITCH_DELTA(G.profile_wait_ns,G.hitch_wait)/1e6);
+                fprintf(stderr,"[nvn-vulkan] HITCH frame=%llu dt_ms=%.1f mean_ms=%.1f pipeline_ms=%.1f pso_sync=%llu pso_wait_ms=%.1f shader_load_ms=%.1f tex_decode_ms=%.1f gpu_wait_ms=%.1f replay_cpu_ms=%.1f faults=%llu mprotect_ms=%.1f majflt=%llu inblock=%llu vol_csw=%llu invol_csw=%llu\n",(unsigned long long)G.present_count+1,dt,G.hitch_ema_ms,HITCH_DELTA(G.profile_pipeline_ns,G.hitch_pipe)/1e6,(unsigned long long)(pso_sync-G.hitch_pso_sync),(pso_wait-G.hitch_pso_wait)/1e6,HITCH_DELTA(G.profile_shader_ns,G.hitch_shader)/1e6,HITCH_DELTA(G.profile_decode_ns,G.hitch_decode)/1e6,HITCH_DELTA(G.profile_wait_ns,G.hitch_wait)/1e6,
+                    (cpu_h-h_cpu)/1e6,(unsigned long long)(fa_h-h_faults),(mn_h-h_mp_ns)/1e6,(unsigned long long)(ru_h.ru_majflt-h_majflt),(unsigned long long)(ru_h.ru_inblock-h_inblock),(unsigned long long)(ru_h.ru_nvcsw-h_vcsw),(unsigned long long)(ru_h.ru_nivcsw-h_icsw));
             }
             if(dt>G.hitch_max_ns/1e6)G.hitch_max_ns=(uint64_t)(dt*1e6);
             G.hitch_ema_ms=G.hitch_ema_ms>0?G.hitch_ema_ms+((dt<3*G.hitch_ema_ms?dt:3*G.hitch_ema_ms)-G.hitch_ema_ms)/32:dt;
             G.hitch_pso_sync=pso_sync;G.hitch_pso_wait=pso_wait;
         }
+        h_cpu=cpu_h;h_faults=fa_h;h_mp_ns=mn_h;h_majflt=(uint64_t)ru_h.ru_majflt;h_inblock=(uint64_t)ru_h.ru_inblock;h_vcsw=(uint64_t)ru_h.ru_nvcsw;h_icsw=(uint64_t)ru_h.ru_nivcsw;
         G.hitch_last_ns=now_h;G.hitch_pipe=G.profile_pipeline_ns;G.hitch_wait=G.profile_wait_ns;G.hitch_decode=G.profile_decode_ns;G.hitch_shader=G.profile_shader_ns;
     }
     G.profile_present_ns+=dm_android_nvn_clock_ns()-present_started;
