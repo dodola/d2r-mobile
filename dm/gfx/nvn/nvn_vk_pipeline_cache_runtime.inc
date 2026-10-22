@@ -12,9 +12,9 @@ static struct {
     PFN_vkGetPipelineCacheData get;
     char path[1200];
     _Atomic uint64_t revision;uint64_t saved_revision,next_ns,loaded_bytes;
-    pthread_mutex_t cache_lock;
+    pthread_rwlock_t cache_lock;   /* 创建管线取读锁（可并行），取缓存快照取写锁 | pipeline creation takes the read lock (may run in parallel), the cache snapshot takes the write lock */
     PipelineCacheWrite *pending;pthread_t thread;
-} PC={.cache_lock=PTHREAD_MUTEX_INITIALIZER};
+} PC={.cache_lock=PTHREAD_RWLOCK_INITIALIZER};
 
 static void *pipeline_cache_writer(void *opaque) {
     PipelineCacheWrite *job=opaque;
@@ -36,14 +36,14 @@ static void pipeline_cache_checkpoint(int force) {
     uint64_t now=dm_android_nvn_clock_ns();if(!force&&now<PC.next_ns)return;
     PC.next_ns=now+30000000000ull;
     PipelineCacheWrite *job=calloc(1,sizeof(*job));if(!job)return;
-    pthread_mutex_lock(&PC.cache_lock);
+    pthread_rwlock_wrlock(&PC.cache_lock);
     size_t bytes=0;VkResult result=PC.get(G.device,G.pipeline_cache,&bytes,NULL);
     if(result==VK_SUCCESS&&bytes>=32&&bytes<=NVN_VK_CACHE_MAX_BYTES){
         job->data=malloc(bytes);
         if(job->data)result=PC.get(G.device,G.pipeline_cache,&bytes,job->data);
     }
     job->revision=atomic_load(&PC.revision);
-    pthread_mutex_unlock(&PC.cache_lock);
+    pthread_rwlock_unlock(&PC.cache_lock);
     if(result!=VK_SUCCESS||!job->data||!nvn_vk_cache_blob_valid(job->data,bytes,&G.pipeline_cache_key)){
         fprintf(stderr,"[nvn-vulkan] PIPELINE_CACHE_SNAPSHOT skipped result=%d bytes=%zu\n",result,bytes);
         free(job->data);free(job);return;}

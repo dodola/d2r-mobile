@@ -7,17 +7,18 @@
  * queued/building is waited for only within a small per-frame budget, after that the draw is skipped
  * (the pipeline keeps compiling and the next frames pick it up) instead of stalling the replay thread. */
 typedef struct {PsoKey key;char shader[2][17];} StablePso;
+#define PSO_WORKERS_MAX 4
 enum { PJ_QUEUED=1,PJ_BUILDING,PJ_READY,PJ_FAILED,PJ_CLAIMED,PJ_DORMANT };
 typedef struct {StablePso stable;Pso pso;int state,demand,seed;VkResult result;} PipelineJob;
 static struct {
-    pthread_mutex_t lock,store_lock;pthread_cond_t changed;pthread_t thread;
+    pthread_mutex_t lock,store_lock,build_lock;pthread_cond_t changed;pthread_t thread;
     PipelineJob jobs[LIMIT_PSOS];unsigned count;int mode,started,trace;
     char manifest_path[1200],legacy_path[1200];DmPipelineIdentity identity;
     uint64_t generation,saved_generation,last_save,loaded_bytes;
-    uint64_t sync_creates,claims,waits,wait_ns,skips,frame_wait_ns,async_budget_ns;int async;
+    uint64_t sync_creates,claims,waits,wait_ns,skips,frame_wait_ns,async_budget_ns;int async,workers;
     _Atomic uint64_t background_creates,background_ns;
     _Atomic unsigned warm_pending;
-} PW={.lock=PTHREAD_MUTEX_INITIALIZER,.store_lock=PTHREAD_MUTEX_INITIALIZER,.changed=PTHREAD_COND_INITIALIZER};
+} PW={.lock=PTHREAD_MUTEX_INITIALIZER,.store_lock=PTHREAD_MUTEX_INITIALIZER,.build_lock=PTHREAD_MUTEX_INITIALIZER,.changed=PTHREAD_COND_INITIALIZER};
 typedef struct {uint32_t bias[LIMIT_BINDINGS];int32_t draw[3];} PipelineSpecialization;
 static VkSpecializationInfo pipeline_specialization(const VShader *s,const uint32_t *bias,const int32_t draw[3],
     PipelineSpecialization *values,VkSpecializationMapEntry *entries) {
@@ -36,6 +37,8 @@ static VkResult pipeline_build(const PsoKey *k,VShader *v,VShader *f,Pso *out) {
     VkSpecializationMapEntry maps[2][LIMIT_BINDINGS+3];PipelineSpecialization values[2];
     VkSpecializationInfo spec[]={pipeline_specialization(v,k->storage_bias[0],k->compute?NULL:k->draw_parameters,&values[0],maps[0]),{0}};
     if(f)spec[1]=pipeline_specialization(f,k->storage_bias[1],NULL,&values[1],maps[1]);
+    /* 着色器模块缓存挂在共享的 VShader 上，多个编译线程要串行准备；真正耗时的驱动编译在锁外并行 | The module caches hang off shared VShaders, so the compile threads prepare them one at a time; the expensive driver compile runs outside the lock in parallel */
+    pthread_mutex_lock(&PW.build_lock);
     VkShaderModule vertex=k->compute?shader_module(v,k->null_bindings[0]):v->module;
     if(!k->compute){
         NvnVkVertexAdapt plan={.split=k->vertex_split};uint32_t locations=0;
@@ -46,7 +49,7 @@ static VkResult pipeline_build(const PsoKey *k,VShader *v,VShader *f,Pso *out) {
         /* Match draw's deterministic tail-location allocation in metadata order. */
         for(unsigned i=0;i<v->h.na;i++){unsigned l=v->attr[i][0];if(!(plan.split&(1u<<l)))continue;
             unsigned tail=0;while(tail<32&&(locations&(1u<<tail)))tail++;
-            if(tail>=32){vkDestroyPipelineLayout(G.device,out->layout,NULL);memset(out,0,sizeof *out);return VK_ERROR_INITIALIZATION_FAILED;}
+            if(tail>=32){pthread_mutex_unlock(&PW.build_lock);vkDestroyPipelineLayout(G.device,out->layout,NULL);memset(out,0,sizeof *out);return VK_ERROR_INITIALIZATION_FAILED;}
             locations|=1u<<tail;plan.tail[l]=tail;
         }
         vertex=vertex_module(v,&plan,k->null_bindings[0]);
@@ -54,10 +57,11 @@ static VkResult pipeline_build(const PsoKey *k,VShader *v,VShader *f,Pso *out) {
     VkPipelineShaderStageCreateInfo stages[2]={
         {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=k->compute?VK_SHADER_STAGE_COMPUTE_BIT:VK_SHADER_STAGE_VERTEX_BIT,.module=vertex,.pName="main",.pSpecializationInfo=spec[0].mapEntryCount?&spec[0]:NULL},
         {.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_FRAGMENT_BIT,.module=f?shader_module(f,k->null_bindings[1]):VK_NULL_HANDLE,.pName="main",.pSpecializationInfo=spec[1].mapEntryCount?&spec[1]:NULL}};
+    pthread_mutex_unlock(&PW.build_lock);
     VkRenderPass pass=VK_NULL_HANDLE;
     if(k->compute){
         VkComputePipelineCreateInfo ci={.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,.stage=stages[0],.layout=out->layout};
-        pthread_mutex_lock(&PC.cache_lock);result=vkCreateComputePipelines(G.device,G.pipeline_cache,1,&ci,NULL,&out->pipeline);if(result==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);pthread_mutex_unlock(&PC.cache_lock);
+        pthread_rwlock_rdlock(&PC.cache_lock);result=vkCreateComputePipelines(G.device,G.pipeline_cache,1,&ci,NULL,&out->pipeline);if(result==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);pthread_rwlock_unlock(&PC.cache_lock);
     }else{
         const PassKey *p=&k->pass;
         VkSubpassDescription sub={.flags=p->subpass_flags,.inputAttachmentCount=p->input_count,.pInputAttachments=p->input_count?&p->input:NULL,.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS,.colorAttachmentCount=p->color_count,.pColorAttachments=p->color,.pDepthStencilAttachment=p->has_depth?&p->depth:NULL};
@@ -77,7 +81,7 @@ static VkResult pipeline_build(const PsoKey *k,VShader *v,VShader *f,Pso *out) {
         VkDynamicState dynamic[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS};
         VkPipelineDynamicStateCreateInfo dy={.sType=VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,.dynamicStateCount=3,.pDynamicStates=dynamic};
         VkGraphicsPipelineCreateInfo gp={.sType=VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,.flags=k->flags,.stageCount=f?2u:1u,.pStages=stages,.pVertexInputState=&vi,.pInputAssemblyState=&ai,.pViewportState=&vp,.pRasterizationState=&rs,.pMultisampleState=&ms,.pDepthStencilState=&ds,.pColorBlendState=&cb,.pDynamicState=&dy,.layout=out->layout,.renderPass=pass};
-        pthread_mutex_lock(&PC.cache_lock);result=vkCreateGraphicsPipelines(G.device,G.pipeline_cache,1,&gp,NULL,&out->pipeline);if(result==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);pthread_mutex_unlock(&PC.cache_lock);
+        pthread_rwlock_rdlock(&PC.cache_lock);result=vkCreateGraphicsPipelines(G.device,G.pipeline_cache,1,&gp,NULL,&out->pipeline);if(result==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);pthread_rwlock_unlock(&PC.cache_lock);
     }
 done:
     if(pass)vkDestroyRenderPass(G.device,pass,NULL);
@@ -144,13 +148,16 @@ static void pipeline_cache_init(void) {
 }
 typedef struct WarmShader {struct WarmShader *next;VShader shader;} WarmShader;
 static WarmShader *pipeline_shaders;
-static VShader *pipeline_shader(const char *key,unsigned stage,unsigned variant) {
+static VShader *pipeline_shader_locked(const char *key,unsigned stage,unsigned variant) {
     if(!*key)return NULL;
     for(WarmShader *p=pipeline_shaders;p;p=p->next)if(!strcmp(p->shader.key,key)&&p->shader.h.stage==stage)return variant?depth_input_shader(&p->shader):&p->shader;
     char path[1200];snprintf(path,sizeof path,"%s/%s.vkmeta",G.shader_root,key);FILE *f=fopen(path,"rb");if(!f)return NULL;
     RHeader h;int ok=fread(&h,1,sizeof h,f)==sizeof h&&h.magic==0x4d4b5644&&h.version==1&&h.stage==stage;fclose(f);if(!ok)return NULL;
     snprintf(path,sizeof path,"%s/%s.spv%s",G.shader_root,key,h.reserved?".gz":"");if(access(path,R_OK))return NULL;
     WarmShader *p=calloc(1,sizeof *p);if(!p)return NULL;shader_load_into(&p->shader,key,stage,1);p->next=pipeline_shaders;pipeline_shaders=p;return variant?depth_input_shader(&p->shader):&p->shader;
+}
+static VShader *pipeline_shader(const char *key,unsigned stage,unsigned variant) {
+    pthread_mutex_lock(&PW.build_lock);VShader *s=pipeline_shader_locked(key,stage,variant);pthread_mutex_unlock(&PW.build_lock);return s;
 }
 static void pipeline_checkpoint(void) {
     pthread_mutex_lock(&PW.store_lock);
@@ -166,12 +173,12 @@ static void pipeline_manifest_flush(void) {
     pthread_mutex_lock(&PW.lock);int save=PW.started&&PW.mode&&PW.generation!=PW.saved_generation;pthread_mutex_unlock(&PW.lock);
     if(save)pipeline_checkpoint();
 }
-static void *pipeline_worker(void *unused) {
-    (void)unused;
+static void *pipeline_worker(void *opaque) {
+    const int leader=(uintptr_t)opaque==0;   /* 只有 0 号线程负责落盘清单 | only worker 0 writes the manifest to disk */
     for(;;){
         pthread_mutex_lock(&PW.lock);int at=-1;
         for(unsigned i=0;i<PW.count;i++)if(PW.jobs[i].state==PJ_QUEUED&&(at<0||PW.jobs[i].demand)){at=(int)i;if(PW.jobs[i].demand)break;}
-        uint64_t now=dm_android_nvn_clock_ns();int save=PW.generation!=PW.saved_generation&&now-PW.last_save>=5000000000ull;
+        uint64_t now=dm_android_nvn_clock_ns();int save=leader&&PW.generation!=PW.saved_generation&&now-PW.last_save>=5000000000ull;
         if(at>=0){PW.jobs[at].state=PJ_BUILDING;}
         if(at<0&&!save){struct timespec deadline;clock_gettime(CLOCK_REALTIME,&deadline);deadline.tv_sec++;pthread_cond_timedwait(&PW.changed,&PW.lock,&deadline);pthread_mutex_unlock(&PW.lock);continue;}
         pthread_mutex_unlock(&PW.lock);
@@ -197,9 +204,16 @@ static void pipeline_worker_start(void) {
     pipeline_manifest_load(PW.manifest_path,warm);
     {const char *off=getenv("DM_DISABLE_PSO_ASYNC"),*budget=getenv("DM_PSO_ASYNC_BUDGET_US");
      PW.async=PW.mode==2&&!(off&&*off);PW.async_budget_ns=(uint64_t)(budget&&atoi(budget)>0?atoi(budget):3000)*1000ull;}
-    int rc=pthread_create(&PW.thread,NULL,pipeline_worker,NULL);if(rc){PW.mode=0;atomic_store(&PW.warm_pending,0);fprintf(stderr,"[nvn-vulkan] PIPELINE_WORKER unavailable=%d synchronous_fallback=1\n",rc);return;}
-    pthread_detach(PW.thread);PW.started=1;
-    fprintf(stderr,"[nvn-vulkan] PIPELINE_WARM_START entries=%u queued=%u mode=%d\n",PW.count,atomic_load(&PW.warm_pending),PW.mode);
+    {   /* 编译线程数：缺省 3（至少留 2 个核给游戏线程和回放线程），DM_PSO_WORKERS 覆盖，1 = 原单线程行为 | Compile threads: default 3 (leave at least 2 cores for the game and replay threads), DM_PSO_WORKERS overrides, 1 = the old single-thread behaviour */
+        long cpus=sysconf(_SC_NPROCESSORS_ONLN);const char *w=getenv("DM_PSO_WORKERS");
+        int want=w&&atoi(w)>0?atoi(w):(cpus>=6?3:cpus>=4?2:1);if(want>PSO_WORKERS_MAX)want=PSO_WORKERS_MAX;
+        int started=0;
+        for(int i=0;i<want;i++){pthread_t thread;if(pthread_create(&thread,NULL,pipeline_worker,(void *)(uintptr_t)i))break;if(!started)PW.thread=thread;pthread_detach(thread);started++;}
+        if(!started){PW.mode=0;atomic_store(&PW.warm_pending,0);fprintf(stderr,"[nvn-vulkan] PIPELINE_WORKER unavailable=1 synchronous_fallback=1\n");return;}
+        PW.workers=started;
+    }
+    PW.started=1;
+    fprintf(stderr,"[nvn-vulkan] PIPELINE_WARM_START entries=%u queued=%u mode=%d workers=%d\n",PW.count,atomic_load(&PW.warm_pending),PW.mode,PW.workers);
 }
 static Pso pipeline_obtain(const PsoKey *key,uint64_t hash,VShader *v,VShader *f,int *skipped) {
     uint64_t t=dm_android_nvn_clock_ns();Pso pso={0};int obtained=0;

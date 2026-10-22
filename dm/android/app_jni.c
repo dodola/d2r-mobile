@@ -861,6 +861,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     marker_to_env("diagnostics/protect-around.txt","DM_PROTECT_AROUND",NULL);
     unsetenv("DM_FAULT_AROUND");
     marker_to_env("diagnostics/fault-around.txt","DM_FAULT_AROUND",NULL);
+    unsetenv("DM_PSO_WORKERS");unsetenv("DM_PSO_ASYNC_BUDGET_US");
+    marker_to_env("diagnostics/pso-workers.txt","DM_PSO_WORKERS",NULL);
+    marker_to_env("diagnostics/pso-async-budget-us.txt","DM_PSO_ASYNC_BUDGET_US",NULL);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-fault-around");
     if(access(driver_option,F_OK)==0){setenv("DM_FAULT_AROUND","1",1);setenv("DM_PROTECT_AROUND","1",1);}
     unsetenv("DM_ENABLE_DYNAMIC_UBO");
