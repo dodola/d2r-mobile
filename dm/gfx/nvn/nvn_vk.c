@@ -252,7 +252,7 @@ static struct {
     VkFormatProperties format_properties[256];uint8_t format_known[256];
     int depth_order,depth_input_experiment,depth_input_profile,depth_input_calibrated_ties,fragment_stores;
     VkPipelineCache pipeline_cache;
-    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts,dump_frame;int filter_cubic_ext,present_cubic;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit,slot_publication;_Atomic int recording_active;uint64_t profile_overlap_publications;uint64_t recording_epoch;
+    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts,dump_frame;int filter_cubic_ext,present_cubic;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit,slot_publication,uniform_versions;uint64_t profile_uniform_bytes,profile_uniform_gpu_bytes,profile_uniform_reuses,profile_uniform_fallbacks,profile_uniform_hash_bytes,profile_uniform_content_hits;_Atomic int recording_active;uint64_t profile_overlap_publications;uint64_t recording_epoch;
     uint64_t profile_slot_wait_ns,profile_drain_wait_ns,profile_completion_wait_ns,profile_completion_waits;
     VBuffer support,zero,default_vertex; VPool pools[LIMIT_POOLS]; int npool;
     PoolUpload pool_uploads[UPLOAD_BUCKETS][UPLOAD_WAYS];uint64_t upload_age;
@@ -833,6 +833,11 @@ static void backend_init(void) {
      {const char *df=getenv("DM_DIAG_DUMP_FRAME");G.dump_frame=df?(uint64_t)strtoull(df,NULL,10):0;}
      G.submission_slot.slot_index=0;for(int i=1;i<4;i++)G.extra_render_slots[i-1].slot_index=i;G.submission_slot2.slot_index=-1;
      fprintf(stderr,"[nvn-vulkan] RENDER_SLOTS n=%d\n",G.render_slots_n);}
+    /* 单槽没有跨提交读写重叠，保留其零拷贝路径；只有多槽需要常量版本。
+     * One slot has no cross-submission overlap: preserve its zero-copy path; only multiple slots need uniform versions.
+     */
+    G.uniform_versions=G.slot_publication&&G.render_slots_n>1&&getenv("DM_UNIFORM_VERSIONS")!=NULL;
+    fprintf(stderr,"[nvn-vulkan] UNIFORM_VERSIONS enabled=%d slots=%d\n",G.uniform_versions,G.render_slots_n);
     S.desc_entries=calloc(DESC_ENTRIES,sizeof(*S.desc_entries));S.desc_arena=malloc(DESC_ARENA);G.control_cache=calloc(CONTROL_CACHE,sizeof(*G.control_cache));
     if(!S.desc_entries||!S.desc_arena||!G.control_cache)die("descriptor/control cache allocation",0);
     {const char *d=getenv("DM_DIAG_BARRIER");G.diag_barrier=d?atoi(d):0;G.barrier_stats=getenv("DM_BARRIER_STATS")!=NULL;
@@ -899,6 +904,7 @@ static void pool_materialize(VPool *pool) {
 /* Render-slot overlap guard. With several render slots in flight, CPU writes to a pool mirror (guest uploads, CPU snapshots)
  * must not land on pages an earlier in-flight slot still reads or writes. Each slot keeps 4 KiB page bitmaps per pool; a
  * real conflict waits for that slot's GPU fence and is counted, so a clean run shows slot_conflicts=0. */
+#include "nvn_vk_slot_pages.h"
 #define SLOT_PAGE_SHIFT 8
 static VkSubmission *render_slot_ptr(int i){return i?&G.extra_render_slots[i-1]:&G.submission_slot;}
 static void pool_use_alloc(VPool *p){
@@ -909,7 +915,7 @@ static void pool_use_alloc(VPool *p){
 static void pool_use_mark(VPool *p,uint64_t off,uint64_t len,int write){
     if(!p->use_rd[0]||!len||S.slot_index<0)return;
     uint32_t *bm=write?p->use_wr[S.slot_index]:p->use_rd[S.slot_index];
-    for(uint64_t pg=off>>SLOT_PAGE_SHIFT,e=(off+len-1)>>SLOT_PAGE_SHIFT;pg<=e;pg++)bm[pg>>5]|=1u<<(pg&31);
+    nvn_slot_pages_mark(bm,off>>SLOT_PAGE_SHIFT,(off+len-1)>>SLOT_PAGE_SHIFT);
 }
 static void pool_use_clear(int idx){
     for(int i=0;i<G.npool;i++){VPool *p=&G.pools[i];if(!p->use_rd[0])continue;
@@ -940,11 +946,8 @@ static void pool_conflict_wait(VPool *p,uint64_t off,uint64_t len,int cpu_writes
     for(int j=0;j<G.render_slots_n;j++){
         VkSubmission *c=render_slot_ptr(j);SubmissionPhase phase=atomic_load(&c->phase);
         if(j==S.slot_index||(phase!=SUBMISSION_INFLIGHT&&!(G.slot_publication&&phase==SUBMISSION_GPU_DONE)))continue;
-        int hit=0,write_hit=0;uint64_t hit_pages=0;
-        for(uint64_t pg=first;pg<=last;pg++){uint32_t m=1u<<(pg&31);
-            int w=(p->use_wr[j][pg>>5]&m)!=0,r=cpu_writes&&(p->use_rd[j][pg>>5]&m);
-            if(w||r){hit=1;hit_pages++;if(w)write_hit=1;}}
-        if(!hit)continue;
+        int write_hit=0;uint64_t hit_pages=nvn_slot_pages_hits(cpu_writes?p->use_rd[j]:NULL,p->use_wr[j],first,last,&write_hit);
+        if(!hit_pages)continue;
         uint64_t started=dm_android_nvn_clock_ns();
         G.slot_conflicts++;
         if(G.slot_publication)nvn_vk_publication_wait(&g_publication,c->ticket);
@@ -1543,6 +1546,7 @@ static void sub_begin_ctx(VkSubmission *ctx) {
             chunk_applied_sequence=chunk_control_sequence;
         }
         atomic_store(&chunk_applied,(int)S.chunk_draws);}
+    nvn_uniform_reset(&S.uniform_arena);
     S.nwrites=S.nevents=S.ntemporary=S.npipeline=S.nread_snapshots=S.ndirect_reads=0;S.in_pass=0;
     S.pending_clear=0;S.flushing_clear=0;S.pass_discard=0;
     if(!G.present_count&&!attachment_ab_sequence)attachment_ab_poll(0);
@@ -2391,7 +2395,7 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
      * order, so enable this only for ascending bindings. */
     s->dyn_bindings=0;s->dyn_count=0;
     if(!getenv("DM_DISABLE_DYNAMIC_UBO")&&
-       (G.profile.driver_id==VK_DRIVER_ID_MESA_TURNIP||getenv("DM_ENABLE_DYNAMIC_UBO"))){
+       (G.profile.driver_id==VK_DRIVER_ID_MESA_TURNIP||getenv("DM_ENABLE_DYNAMIC_UBO")||G.uniform_versions)){
      int ordered=1;uint32_t previous=0;
      for(uint32_t i=0;i<s->h.nb;i++){if(i&&s->b[i].binding<previous)ordered=0;previous=s->b[i].binding;}
      for(uint32_t i=0;ordered&&i<s->h.nb;i++)
@@ -2826,6 +2830,7 @@ static VkImageView submission_image_view(const VkImageViewCreateInfo *info) {
     if(cacheable){S.view_keys[index]=key;S.view_table[slot]=index+1;}
     return S.temporary_views[index];
 }
+#include "nvn_vk_uniform_runtime.inc"
 static void binding_plan_remember(VShader *s,VkDescriptorSet set,const BindingResource *resources,int safe) {
     BindingPlan *plan=s->plan;
     if(!plan||!safe||G.disable_binding_plans||G.disable_desc_cache||G.trace_frame||!set){if(plan)plan->resolved=0;return;}
@@ -2860,8 +2865,15 @@ static VkDescriptorSet binding_plan_try(VShader *s) {
         unsigned i=plan->buffers[n];const RBinding *b=&s->b[i];
         Range r=G.state.uniform[s->h.stage][b->slot];uint64_t offset=0;
         if(!r.addr||!r.size){binding_plan_miss(PLAN_MISS_BUFFER_RANGE);return VK_NULL_HANDLE;}
-        VPool *pool=pool_read(r.addr,r.size,&offset);const BindingBuffer *cached=&plan->resources[i].buffer;
-        int dynamic=(s->dyn_bindings>>i)&1;
+        const BindingBuffer *cached=&plan->resources[i].buffer;int dynamic=(s->dyn_bindings>>i)&1;
+        VkDescriptorBufferInfo version;uint64_t serial=0;
+        if(uniform_snapshot(r,&version,&serial)){
+            if(cached->arena_epoch!=S.epoch||cached->buffer!=version.buffer||cached->range.size!=r.size||cached->pool_serial!=serial){binding_plan_miss(PLAN_MISS_BUFFER_POOL);return VK_NULL_HANDLE;}
+            if(!dynamic&&cached->offset!=version.offset){binding_plan_miss(PLAN_MISS_BUFFER_OFFSET);return VK_NULL_HANDLE;}
+            if(dynamic)live_dyn[i]=(uint32_t)version.offset;G.profile_plan_buffers++;continue;
+        }
+        if(cached->arena_epoch){binding_plan_miss(PLAN_MISS_BUFFER_POOL);return VK_NULL_HANDLE;}
+        VPool *pool=pool_read(r.addr,r.size,&offset);
         if(offset%G.properties.limits.minUniformBufferOffsetAlignment){binding_plan_miss(PLAN_MISS_BUFFER_ALIGNMENT);return VK_NULL_HANDLE;}
         if(!dynamic&&(r.addr!=cached->range.addr||r.size!=cached->range.size)){binding_plan_miss(PLAN_MISS_BUFFER_RANGE);return VK_NULL_HANDLE;}
         if(pool->serial!=cached->pool_serial){binding_plan_miss(PLAN_MISS_BUFFER_POOL);return VK_NULL_HANDLE;}
@@ -3095,6 +3107,18 @@ static VkDescriptorSet bind_shader(VShader *s) {
                plan_safe=0;continue;
            }
            if(!r.addr || !r.size){fprintf(stderr,"[nvn-vulkan] BUFFER_MISSING shader=%s stage=%u binding=%u kind=%u slot=%d addr=%#llx size=%llu\n",s->key,s->h.stage,b->binding,b->kind,b->slot,(unsigned long long)r.addr,(unsigned long long)r.size);die("unbound original shader buffer",b->slot);}
+           VkDescriptorBufferInfo version;uint64_t version_pool=0;
+           if(b->kind==2&&uniform_snapshot(r,&version,&version_pool)){
+               bi[i]=version;
+               if(plan_safe)plan_resources[i].buffer=(BindingBuffer){.range=r,.pool_serial=version_pool,.offset=version.offset,.arena_epoch=S.epoch,.buffer=version.buffer};
+               if(G.capture_feedback){
+                   VBuffer *capture=temporary(r.size,VK_BUFFER_USAGE_TRANSFER_DST_BIT);all_barrier();
+                   VkBufferCopy copy={version.offset,0,r.size};vkCmdCopyBuffer(S.command,version.buffer,capture->b,1,&copy);
+                   char name[160];snprintf(name,sizeof name,"feedback-effective-%04llu-%llu-%s-ubo%d",(unsigned long long)G.present_count+1,(unsigned long long)G.draws,s->h.stage?"ps":"vs",b->slot);trace_capture_queue(capture,r.size,name);
+               }
+               if((s->dyn_bindings>>i)&1){live_dyn[i]=(uint32_t)version.offset;bi[i].offset=0;}
+               w[i].pBufferInfo=&bi[i];continue;
+           }
            uint64_t offset=0;VPool *p=pool_read(r.addr,r.size,&offset);
            uint64_t alignment=b->kind==2?G.properties.limits.minUniformBufferOffsetAlignment:G.properties.limits.minStorageBufferOffsetAlignment;
            uint64_t prefix=offset%alignment;
@@ -4748,6 +4772,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
             unsigned contexts=(G.submission_slot.phase!=SUBMISSION_UNUSED)+(G.submission_slot2.phase!=SUBMISSION_UNUSED);for(int i=1;i<G.render_slots_n;i++)contexts+=G.extra_render_slots[i-1].phase!=SUBMISSION_UNUSED;
             fprintf(stderr,"[nvn-vulkan] RENDER_SLOT_PROFILE frame=%llu slots=%d conflicts=%llu\n",(unsigned long long)G.present_count+1,G.render_slots_n,(unsigned long long)G.slot_conflicts);conflict_ledger_dump();
             if(G.slot_publication)fprintf(stderr,"[nvn-vulkan] SLOT_PUBLICATION_PROFILE frame=%llu overlap_publications=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_overlap_publications);
+            if(G.uniform_versions){fprintf(stderr,"[nvn-vulkan] UNIFORM_VERSION_PROFILE frame=%llu copied_bytes=%llu gpu_overlay_bytes=%llu reuses=%llu private_fallbacks=%llu hash_bytes=%llu content_hits=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_uniform_bytes,(unsigned long long)G.profile_uniform_gpu_bytes,(unsigned long long)G.profile_uniform_reuses,(unsigned long long)G.profile_uniform_fallbacks,(unsigned long long)G.profile_uniform_hash_bytes,(unsigned long long)G.profile_uniform_content_hits);G.profile_uniform_bytes=G.profile_uniform_gpu_bytes=G.profile_uniform_reuses=G.profile_uniform_fallbacks=G.profile_uniform_hash_bytes=G.profile_uniform_content_hits=0;}
             fprintf(stderr,"[nvn-vulkan] RENDER_SUBMISSION_PROFILE frame=%llu contexts=%u epoch=%llu creates=%llu reuses=%llu publications=%llu context_struct_bytes=%zu descriptor_arena_bytes=%u descriptor_entry_bytes=%zu async=%d slot_wait_ms=%.3f drain_wait_ms=%.3f completion_fence_wait_ms=%.3f completion_waits=%llu\n",
                 (unsigned long long)G.present_count+1,contexts,(unsigned long long)S.epoch,
                 (unsigned long long)G.profile_submission_creates,(unsigned long long)G.profile_submission_reuses,

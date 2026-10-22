@@ -19,7 +19,14 @@ typedef enum {
     SUBMISSION_GPU_DONE, SUBMISSION_PUBLISHED, SUBMISSION_RETIRED
 } SubmissionPhase;
 
+#include "nvn_vk_uniform_arena.h"
+#define UNIFORM_SOURCES 4096
 typedef struct {
+    Range range;uint64_t serial,epoch,stamp;int writes;VkDescriptorBufferInfo info;
+} UniformSource;
+typedef struct {
+    NvnUniformArena uniform_arena;
+    UniformSource uniform_sources[UNIFORM_SOURCES];
     _Atomic SubmissionPhase phase;
     int slot_index; /* Render slot (0..3); -1 for the present slot. */
     uint64_t epoch,ticket;

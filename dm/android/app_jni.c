@@ -943,6 +943,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_SLOT_PUBLICATION");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-slot-publication");
     if(access(driver_option,F_OK)==0)setenv("DM_SLOT_PUBLICATION","1",1);
+    unsetenv("DM_UNIFORM_VERSIONS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-uniform-versions");
+    if(access(driver_option,F_OK)==0)setenv("DM_UNIFORM_VERSIONS","1",1);
     unsetenv("DM_RENDER_SLOTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/render-slots.txt");
     {FILE *rf=fopen(driver_option,"r");if(rf){char rv[8]={0};size_t rn=fread(rv,1,7,rf);fclose(rf);if(rn)setenv("DM_RENDER_SLOTS",rv,1);}}
