@@ -25,6 +25,7 @@ def main():
     hooks = 'dm/gfx/tests/t_dirty_host_hooks.c'
     core = 'dm/gfx/nvn/nvn_dirty.c'
     tests = [
+        ('publication-queue', ['dm/gfx/tests/t_publication_queue.c'], [], [[]]),
         ('pace', ['dm/gfx/tests/t_pace.c'], [], [[]]),
         ('present', ['dm/android/tests/t_present_policy.c'], [], [[]]),
         ('dirty-race', ['dm/gfx/tests/t_dirty_race.c', hooks], ['-D__ANDROID__'], [[]]),

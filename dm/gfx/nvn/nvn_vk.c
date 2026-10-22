@@ -252,7 +252,7 @@ static struct {
     VkFormatProperties format_properties[256];uint8_t format_known[256];
     int depth_order,depth_input_experiment,depth_input_profile,depth_input_calibrated_ties,fragment_stores;
     VkPipelineCache pipeline_cache;
-    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts,dump_frame;int filter_cubic_ext,present_cubic;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit;uint64_t recording_epoch;
+    VkSubmission submission_slot,submission_slot2;VkSubmission extra_render_slots[3];int render_slots_n,render_ring_next;uint64_t slot_conflicts,dump_frame;int filter_cubic_ext,present_cubic;VkSubmission *current_submission;VkSemaphore swap_finished[16];int async_enabled,completing,async_drain_after_submit,slot_publication;_Atomic int recording_active;uint64_t profile_overlap_publications;uint64_t recording_epoch;
     uint64_t profile_slot_wait_ns,profile_drain_wait_ns,profile_completion_wait_ns,profile_completion_waits;
     VBuffer support,zero,default_vertex; VPool pools[LIMIT_POOLS]; int npool;
     PoolUpload pool_uploads[UPLOAD_BUCKETS][UPLOAD_WAYS];uint64_t upload_age;
@@ -357,6 +357,11 @@ static VkFormatProperties format_properties(VkFormat format) {
 }
 /* Recording helpers access the selected slot; completion receives its owner explicitly. */
 #define S (*G.current_submission)
+#include "nvn_vk_publication_queue.h"
+static NvnVkPublicationQueue g_publication=NVN_VK_PUBLICATION_QUEUE_INIT;
+static void publication_stage_record(void);
+static void publication_enqueue(VkSubmission *sub,int kind);
+static void publication_retire_ready_locked(void);
 static VkRenderPass render_pass_cached(const PassKey *key,const VkRenderPassCreateInfo *info,uint8_t *owned) {
     uint64_t hash=1469598103934665603ull;const uint8_t *bytes=(const uint8_t *)key;
     for(size_t i=0;i<sizeof *key;i++){hash^=bytes[i];hash*=1099511628211ull;}
@@ -822,6 +827,8 @@ static void backend_init(void) {
     {const char *coalesce=getenv("DM_WRITEBACK_COALESCE");G.enable_writeback_coalesce=coalesce&&atoi(coalesce)!=0;}
     G.event_trace=getenv("DM_EVENT_TRACE")!=NULL;
     G.current_submission=&G.submission_slot;
+    G.slot_publication=getenv("DM_SLOT_PUBLICATION")!=NULL;
+    fprintf(stderr,"[nvn-vulkan] SLOT_PUBLICATION enabled=%d\n",G.slot_publication);
     {const char *rs=getenv("DM_RENDER_SLOTS");int n=rs?atoi(rs):1;G.render_slots_n=n<1?1:n>4?4:n;G.render_ring_next=0;
      {const char *df=getenv("DM_DIAG_DUMP_FRAME");G.dump_frame=df?(uint64_t)strtoull(df,NULL,10):0;}
      G.submission_slot.slot_index=0;for(int i=1;i<4;i++)G.extra_render_slots[i-1].slot_index=i;G.submission_slot2.slot_index=-1;
@@ -931,14 +938,17 @@ static void pool_conflict_wait(VPool *p,uint64_t off,uint64_t len,int cpu_writes
     if(!p->use_rd[0]||!len||S.slot_index<0)return;
     uint64_t first=off>>SLOT_PAGE_SHIFT,last=(off+len-1)>>SLOT_PAGE_SHIFT;
     for(int j=0;j<G.render_slots_n;j++){
-        VkSubmission *c=render_slot_ptr(j);if(j==S.slot_index||c->phase!=SUBMISSION_INFLIGHT)continue;
+        VkSubmission *c=render_slot_ptr(j);SubmissionPhase phase=atomic_load(&c->phase);
+        if(j==S.slot_index||(phase!=SUBMISSION_INFLIGHT&&!(G.slot_publication&&phase==SUBMISSION_GPU_DONE)))continue;
         int hit=0,write_hit=0;uint64_t hit_pages=0;
         for(uint64_t pg=first;pg<=last;pg++){uint32_t m=1u<<(pg&31);
             int w=(p->use_wr[j][pg>>5]&m)!=0,r=cpu_writes&&(p->use_rd[j][pg>>5]&m);
             if(w||r){hit=1;hit_pages++;if(w)write_hit=1;}}
         if(!hit)continue;
         uint64_t started=dm_android_nvn_clock_ns();
-        G.slot_conflicts++;CHECK(cpu_work_wait_fences(G.device,1,&c->gpu_fence,VK_TRUE,UINT64_MAX));
+        G.slot_conflicts++;
+        if(G.slot_publication)nvn_vk_publication_wait(&g_publication,c->ticket);
+        else CHECK(cpu_work_wait_fences(G.device,1,&c->gpu_fence,VK_TRUE,UINT64_MAX));
         conflict_note((int)(p-G.pools),(cpu_writes?0:2)+(write_hit?0:1),len,hit_pages,last-first+1,dm_android_nvn_clock_ns()-started,first,last);
     }
 }
@@ -991,7 +1001,12 @@ static VPool *pool_read_resolved(VPool *p,uint64_t addr,uint64_t len,uint64_t *o
     uint64_t started=prof_now();
     unsigned range_bucket=0;
     if(G.pool_range_stats){range_bucket=pool_range_bucket(len);G.pool_ranges[range_bucket].reads++;G.pool_ranges[range_bucket].read_bytes+=len;}
-    pool_materialize(p);pool_use_alloc(p);pool_use_mark(p,*off,len,0);
+    pool_materialize(p);pool_use_alloc(p);
+    /* 先等旧写者发布，再查脏页；否则会把尚未写回的客体数据当作最新版本。
+     * Wait for old writers before the dirty check, or stale guest bytes could be accepted as current.
+     */
+    if(G.slot_publication)pool_conflict_wait(p,*off,len,0);
+    pool_use_mark(p,*off,len,0);
     /* The existing guest-span copier omits every byte in queued write ranges.
      * When their union covers this entire read, no CPU upload is possible.
      * Leave the upload cache untouched: a later uncovered read still needs
@@ -1473,7 +1488,9 @@ static void submission_complete_effects(VkSubmission *sub) {
             uint64_t stamp=(uint64_t)((long double)ticks*G.properties.limits.timestampPeriod*12/625);
             uint64_t result[2]={op->kind==2?G.samples_passed:stamp,stamp},off=0;
             VPool *p=pool_find(op->address,16,&off);if(!p)die("counter report pool lifetime",op->address);
-            if(p->v.map)memcpy(p->v.map+off,result,16);memcpy((void *)(uintptr_t)op->address,result,16);}
+            if(!G.slot_publication&&p->v.map)memcpy(p->v.map+off,result,16);
+            if(G.slot_publication)dm_guest_write_prepare((void *)(uintptr_t)op->address,16);
+            memcpy((void *)(uintptr_t)op->address,result,16);}
     }
     for(int i=0;i<sub->nevents;i++) { Event *e=&sub->events[i]; if(e->mode) atomic_fetch_add((_Atomic uint32_t *)e->addr,e->value);
        else atomic_store((_Atomic uint32_t *)e->addr,e->value); }
@@ -1485,6 +1502,7 @@ static AsyncJob g_jobs[8];static int g_jhead,g_jcount,g_worker_up;
 static int ctx_busy(const VkSubmission *c) { return c->phase==SUBMISSION_INFLIGHT||c->phase==SUBMISSION_GPU_DONE||c->phase==SUBMISSION_PUBLISHED; }
 /* Caller holds G.lock; the condition wait releases it so the completion worker can publish. */
 static void async_drain_locked(void) {
+    if(G.slot_publication){nvn_vk_publication_drain(&g_publication);publication_retire_ready_locked();return;}
     if(!g_jcount)return;
     uint64_t started=dm_android_nvn_clock_ns();
     uint64_t work_wait=dm_android_nvn_work_wait_begin(DM_NVN_WAIT_FENCE);
@@ -1494,10 +1512,12 @@ static void async_drain_locked(void) {
 }
 static void sub_begin_ctx(VkSubmission *ctx) {
     mtl_init();uint64_t begin_cpu=dm_android_nvn_thread_cpu_ns();pthread_mutex_lock(&G.lock);
+    if(G.slot_publication)publication_retire_ready_locked();
     if(ctx_busy(ctx)){
         uint64_t w0=dm_android_nvn_clock_ns();
         uint64_t work_wait=dm_android_nvn_work_wait_begin(DM_NVN_WAIT_FENCE);
-        while(ctx_busy(ctx))pthread_cond_wait(&g_done_cv,&G.lock);
+        if(G.slot_publication){nvn_vk_publication_wait(&g_publication,ctx->ticket);publication_retire_ready_locked();}
+        else while(ctx_busy(ctx))pthread_cond_wait(&g_done_cv,&G.lock);
         dm_android_nvn_work_wait_end(work_wait);
         uint64_t waited=dm_android_nvn_clock_ns()-w0;
         G.profile_wait_ns+=waited;G.profile_slot_wait_ns+=waited;
@@ -1514,7 +1534,7 @@ static void sub_begin_ctx(VkSubmission *ctx) {
     }
     resource_cache_begin(&S);
     S.command=S.command_primary;S.chunk_index=0;S.chunk_mark=G.draws;G.seg_begin_ns=dm_android_nvn_clock_ns();
-    S.phase=SUBMISSION_RECORDING;S.epoch=++G.recording_epoch;S.ticket=0;S.recorder=pthread_self();G.active=1;
+    S.phase=SUBMISSION_RECORDING;S.epoch=++G.recording_epoch;S.ticket=0;S.recorder=pthread_self();G.active=1;atomic_store(&G.recording_active,1);S.publication_cpu_ns=S.publication_wait_ns=0;S.publication_overlap=0;
     if(!G.present_count&&!chunk_control_sequence)chunk_control_poll();
     {int target=atomic_load(&chunk_override);S.chunk_draws=target<0?(uint32_t)G.chunk_draws:(uint32_t)target;
         if(atomic_load(&chunk_applied)!=(int)S.chunk_draws||chunk_applied_sequence!=chunk_control_sequence){
@@ -1561,6 +1581,10 @@ void mtl_sub_event(volatile uint32_t *addr,uint32_t mode,uint32_t value) {
 static void counter_op(uint32_t kind,uint32_t query,uint64_t address) {
     if(S.ncounter==LIMIT_WRITES)die("counter operation limit",S.ncounter);
     S.counter_ops[S.ncounter++]=(CounterOp){kind,query,address};
+    if(G.slot_publication&&kind>=2){uint64_t off=0;VPool *p=pool_find(address,16,&off);
+        if(!p)die("counter publication range",address);pool_use_alloc(p);pool_use_mark(p,off,16,1);
+        nvn_dirty_mark_gpu_written((void *)(uintptr_t)address,16);
+    }
 }
 void mtl_sub_counter(uint64_t addr,uint32_t type) {
     if(type!=NVN_COUNTER_TYPE_SAMPLES_PASSED && type!=NVN_COUNTER_TYPE_TIMESTAMP && type!=NVN_COUNTER_TYPE_TIMESTAMP_TOP)
@@ -1583,7 +1607,7 @@ static CommitInfo commit_submit(void) {
     unsigned reports=0;for(int i=0;i<S.ncounter;i++)if(S.counter_ops[i].kind==2 || S.counter_ops[i].kind==3)reports++;
     int traced=G.trace_frame || S.ntrace_captures;
     int candidate=!S.nwrites && !S.nevents && !reports && !traced && !S.submission_cpu_readback && !S.submission_event_wait;
-    wb_stage_record();
+    if(G.slot_publication)publication_stage_record();else wb_stage_record();
     VkMemoryBarrier barrier={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT,.dstAccessMask=VK_ACCESS_HOST_READ_BIT};
     vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,NULL,0,NULL);
     if(S.chunk_draws&&S.chunk_index&&G.chunk_log)fprintf(stderr,"[nvn-vulkan] CHUNKED_SUBMIT chunks=%u threshold=%u\n",S.chunk_index+1,S.chunk_draws);
@@ -1601,10 +1625,11 @@ static CommitInfo commit_submit(void) {
     return ci;
 }
 uint64_t mtl_sub_commit(void) {
+    if(G.slot_publication)async_drain_locked();
     CommitInfo ci=commit_submit();VkFence fence=S.gpu_fence;
     uint64_t wait_start=ci.wait_start;CHECK(cpu_work_wait_fences(G.device,1,&fence,VK_TRUE,UINT64_MAX));uint64_t waited=dm_android_nvn_clock_ns()-wait_start;
     uint64_t ticket=commit_after_gpu(ci,waited);
-    pthread_mutex_unlock(&G.lock);return ticket;
+    atomic_store(&G.recording_active,0);pthread_mutex_unlock(&G.lock);return ticket;
 }
 static uint64_t commit_after_gpu(CommitInfo ci,uint64_t waited) {
     uint64_t wait_cpu=ci.wait_cpu;unsigned reports=ci.reports;int candidate=ci.candidate,traced=ci.traced;
@@ -1615,14 +1640,20 @@ static uint64_t commit_after_gpu(CommitInfo ci,uint64_t waited) {
             for(uint32_t i=0;i+1<(S.nchunk_ts&~1u);i+=2){busy+=(ts[i+1]-ts[i])&mask;if(i>=2){uint64_t g=(ts[i]-ts[i-1])&mask;if(g<(1ULL<<40))gap+=g;}}
             G.gts_busy[si]+=(uint64_t)(busy*period);G.gts_gap[si]+=(uint64_t)(gap*period);G.gts_span[si]+=(uint64_t)(((ts[(S.nchunk_ts&~1u)-1]-ts[0])&mask)*period);G.gts_chunks[si]+=S.nchunk_ts/2;}}
     G.seg_wait_ns[S.profile_segment]+=waited;
-    submission_gpu_done(&S);
+    int published=G.slot_publication&&S.phase==SUBMISSION_PUBLISHED;
+    if(published){cov_probe_complete(&S);pass_timing_collect(&S);trace_capture_complete(&S);}
+    else submission_gpu_done(&S);
     uint64_t retire_cpu=dm_android_nvn_thread_cpu_ns();G.profile_commit_wait_cpu_ns+=retire_cpu-wait_cpu;
     G.profile_wait_ns+=waited;G.profile_submits++;
     if(candidate){G.profile_submit_candidates++;G.profile_candidate_wait_ns+=waited;}
     G.profile_write_submits+=S.nwrites!=0;G.profile_event_submits+=S.nevents!=0;G.profile_report_submits+=reports!=0;
     G.profile_trace_submits+=traced!=0;G.profile_cpu_readback_submits+=S.submission_cpu_readback!=0;G.profile_event_wait_submits+=S.submission_event_wait!=0;
     G.profile_events+=S.nevents;G.profile_reports+=reports;
-    submission_complete_effects(&S);
+    if(published){
+        G.profile_writeback_bytes+=S.wb_stage_total;G.profile_writeback_raw_bytes+=S.publication_raw_bytes;
+        G.profile_writeback_raw_ranges+=S.nwrites;G.profile_writeback_copy_ranges+=S.publication_copy_count;
+        G.profile_writeback_cpu_ns+=S.publication_cpu_ns;G.profile_writeback_calls+=S.nwrites!=0;
+    }else submission_complete_effects(&S);
     for(int i=0;i<S.npipeline;i++) { vkDestroyPipeline(G.device,S.pipelines[i],NULL); vkDestroyPipelineLayout(G.device,S.layouts[i],NULL); }
     resource_cache_retire(&S);
     temporaries_retire(&S);
@@ -1646,13 +1677,16 @@ static uint64_t commit_after_gpu(CommitInfo ci,uint64_t waited) {
     uint64_t ticket=S.ticket;submission_released(&S);G.profile_retire_cpu_ns+=dm_android_nvn_thread_cpu_ns()-retire_cpu;return ticket;
 }
 static void present_after_gpu(void) {
-    submission_gpu_done(&S);pass_timing_collect(&S);trace_capture_complete(&S);
+    int published=G.slot_publication&&S.phase==SUBMISSION_PUBLISHED;
+    if(published)cov_probe_complete(&S);else submission_gpu_done(&S);
+    pass_timing_collect(&S);trace_capture_complete(&S);
     vkDestroySemaphore(G.device,S.present_available,NULL);S.present_available=VK_NULL_HANDLE;
     resource_cache_retire(&S);
     temporaries_retire(&S);
     if(S.nwrites || S.nevents || S.ncounter)die("present has unpublished guest effects",S.epoch);
-    submission_publish(&S);submission_released(&S);
+    if(!published)submission_publish(&S);submission_released(&S);
 }
+#include "nvn_vk_publication_runtime.inc"
 /* Completion worker: publishes finished submissions strictly in submission order while the guest thread records
  * the next frame. It runs the same completion code as the synchronous path with G.lock held. */
 static void *async_worker(void *arg) {
@@ -1678,6 +1712,7 @@ static void *async_worker(void *arg) {
     }
 }
 static void async_enqueue_locked(VkSubmission *ctx,int kind) {
+    if(G.slot_publication){publication_enqueue(ctx,kind);return;}
     if(g_jcount==8)die("async job queue overflow",g_jcount);
     if(!g_worker_up){pthread_t thread;if(pthread_create(&thread,NULL,async_worker,NULL))die("async worker creation",0);pthread_detach(thread);g_worker_up=1;}
     g_jobs[(g_jhead+g_jcount)%8]=(AsyncJob){ctx,kind};g_jcount++;
@@ -1687,7 +1722,7 @@ static void async_enqueue_locked(VkSubmission *ctx,int kind) {
 void mtl_sub_commit_async(void) {
     if(!G.async_enabled){mtl_sub_commit();return;}
     CommitInfo ci=commit_submit();
-    memcpy(&S.commit_info,&ci,sizeof ci);G.active=0;
+    memcpy(&S.commit_info,&ci,sizeof ci);G.active=0;atomic_store(&G.recording_active,0);
     async_enqueue_locked(&S,0);
     if(G.async_drain_after_submit)async_drain_locked();
     pthread_mutex_unlock(&G.lock);
@@ -4653,6 +4688,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     int async_present=G.async_enabled&&!capture.b&&!G.trace_frame&&!S.ntrace_captures;
     if(async_present)S.present_available=available;
     else{
+    if(G.slot_publication)async_drain_locked();
     uint64_t pres_t0=dm_android_nvn_clock_ns();CHECK(cpu_work_wait_fences(G.device,1,&fence,VK_TRUE,UINT64_MAX));uint64_t pres_t1=dm_android_nvn_clock_ns();G.pres_fence_ns+=pres_t1-pres_t0;G.pres_idle_ns+=dm_android_nvn_clock_ns()-pres_t1;
     submission_gpu_done(&S);
     pass_timing_collect(&S);
@@ -4711,6 +4747,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         if(G.profile_frames>=60){
             unsigned contexts=(G.submission_slot.phase!=SUBMISSION_UNUSED)+(G.submission_slot2.phase!=SUBMISSION_UNUSED);for(int i=1;i<G.render_slots_n;i++)contexts+=G.extra_render_slots[i-1].phase!=SUBMISSION_UNUSED;
             fprintf(stderr,"[nvn-vulkan] RENDER_SLOT_PROFILE frame=%llu slots=%d conflicts=%llu\n",(unsigned long long)G.present_count+1,G.render_slots_n,(unsigned long long)G.slot_conflicts);conflict_ledger_dump();
+            if(G.slot_publication)fprintf(stderr,"[nvn-vulkan] SLOT_PUBLICATION_PROFILE frame=%llu overlap_publications=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_overlap_publications);
             fprintf(stderr,"[nvn-vulkan] RENDER_SUBMISSION_PROFILE frame=%llu contexts=%u epoch=%llu creates=%llu reuses=%llu publications=%llu context_struct_bytes=%zu descriptor_arena_bytes=%u descriptor_entry_bytes=%zu async=%d slot_wait_ms=%.3f drain_wait_ms=%.3f completion_fence_wait_ms=%.3f completion_waits=%llu\n",
                 (unsigned long long)G.present_count+1,contexts,(unsigned long long)S.epoch,
                 (unsigned long long)G.profile_submission_creates,(unsigned long long)G.profile_submission_reuses,
@@ -4811,6 +4848,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
             fprintf(stderr,"[nvn-vulkan] TRACE_NEXT_FRAME frame=%llu\n",(unsigned long long)G.present_count+2);}}
     pipeline_cache_checkpoint(0);
     pipeline_frame(G.present_count+1);attachment_ab_frame(G.present_count+1);
+    atomic_store(&G.recording_active,0);
     if(async_present){G.active=0;async_enqueue_locked(&S,1);uint64_t pticket=++G.present_count;pthread_mutex_unlock(&G.lock);return pticket;}
     if(S.nwrites || S.nevents || S.ncounter)die("present has unpublished guest effects",S.epoch);
     submission_publish(&S);submission_released(&S);

@@ -20,7 +20,7 @@ typedef enum {
 } SubmissionPhase;
 
 typedef struct {
-    SubmissionPhase phase;
+    _Atomic SubmissionPhase phase;
     int slot_index; /* Render slot (0..3); -1 for the present slot. */
     uint64_t epoch,ticket;
     pthread_t recorder;
@@ -51,6 +51,12 @@ typedef struct {
     unsigned depth_input_guard_active,depth_input,pass_depth_input;
     uint64_t wb_stage_total;
     int wb_staged;
+    /* 独立发布的数据与测量随槽退役，发布线程不修改全局帧统计。
+     * Publication data and measurements retire with the slot; the worker never mutates global frame statistics.
+     */
+    size_t publication_copy_count;
+    uint64_t publication_raw_bytes,publication_wait_ns,publication_cpu_ns;
+    int publication_overlap;
     struct { uint32_t stages,access; } pend[4];
     NvnVkCommandState command_state;
     uint64_t null_bindings[6];
