@@ -1,3 +1,7 @@
+/* 启动前设置与存档入口；交互参考 sydeEvans/d2r-android 5d8e322（MIT）。
+ * Pre-launch settings and saves; interaction inspired by sydeEvans/d2r-android 5d8e322 (MIT).
+ * 保留离线安装状态机，参数复用游戏内协议，文件任务由进程会话拥有。
+ * Retains the installer state machine, shares in-game settings and gives file jobs process ownership. */
 package org.d2r.binaryprobe;
 
 import android.app.Activity;
@@ -9,219 +13,184 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.*;
 import android.widget.*;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Locale;
+import java.io.*;
+import java.util.*;
 
-/** The launcher owns resource preparation; native game code loads only after success. */
 public final class InstallerActivity extends Activity {
-    private static final int PICK_PACKAGE=917, GOLD=0xffc8ad7f, MUTED=0xffb5b1aa, ERROR=0xffffb5a7;
+    private static final int PICK_PACKAGE=917,EXPORT_SAVE=918,IMPORT_SAVE=919;
+    private static final int GOLD=0xffd4b17b,MUTED=0xffa9a49b,INK=0xff101114,TEXT=0xffeee8dd,ERROR=0xffffb5a7;
     private OfflineInstallSession session;
+    private SaveTransferSession saves;
+    private LauncherSettingsStore store;
+    private LauncherStrings strings;
     private final OfflineInstallSession.Observer observer=this::render;
-    private TextView heading,message,amount,help,steps,feedback,configuration,driverDetail,modDetail;
-    private ProgressBar progress;
-    private Button choose,cancel,settingsToggle,helpToggle;
-    private RadioGroup drivers;
-    private LinearLayout settings;
-    private AlertDialog cancelDialog,modDialog;
-    private boolean resumed,openingGame,picking,settingsExpanded,helpExpanded,bindingDrivers,modValid;
+    private final Runnable saveObserver=this::renderSaves;
+    private TextView heading,message,amount,feedback,driverValue,qualityValue,modValue,scopeView,saveStatus;
+    private ProgressBar progress,saveProgress;
+    private Button choose,cancel,exportSave,importSave,exportBackup;
+    private Switch fps;
+    private LinearLayout settings,body,resourceCard,optionsColumn;
+    private AlertDialog cancelDialog,choiceDialog,previewDialog;
+    private boolean resumed,openingGame,picking,binding,modValid,steppedAside,wide,layoutBound;
     private String modId="";
-
+    private String t(String key){return strings.text("dmLaunch"+key);}
+    private String f(String key,Object... args){return strings.format("dmLaunch"+key,args);}
     private int dp(int n){return Math.round(n*getResources().getDisplayMetrics().density);}
-    private TextView text(String value,int size,boolean bold) {
-        TextView view=new TextView(this);view.setText(value);view.setTextColor(TouchControlsView.TEXT);view.setTextSize(size);
-        view.setLineSpacing(dp(3),1);if(bold)view.setTypeface(Typeface.DEFAULT,Typeface.BOLD);return view;
+    private TextView text(String value,int size,int color,boolean bold){
+        TextView v=new TextView(this);v.setText(value);v.setTextColor(color);v.setTextSize(size);v.setLineSpacing(dp(3),1);
+        if(bold)v.setTypeface(Typeface.DEFAULT,Typeface.BOLD);return v;
     }
-    private void add(LinearLayout column,View view,int top) {
-        LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2);p.topMargin=dp(top);column.addView(view,p);
-    }
-    private LinearLayout column(){LinearLayout view=new LinearLayout(this);view.setOrientation(LinearLayout.VERTICAL);return view;}
-    private Button button(String label,boolean primary) {
-        Button button=new Button(this);button.setText(label);button.setAllCaps(false);button.setTextSize(16);
-        button.setMinHeight(dp(52));button.setPadding(dp(12),dp(8),dp(12),dp(8));
-        button.setTextColor(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{}},
-            new int[]{MUTED,primary?0xff191510:TouchControlsView.TEXT}));
-        button.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{android.R.attr.state_pressed},new int[]{android.R.attr.state_focused},new int[]{}},
-            new int[]{0xff34312d,primary?0xffe4ceaa:0xff4b4236,primary?0xffe4ceaa:0xff4b4236,primary?GOLD:0xff292621}));
-        return button;
-    }
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);session=OfflineInstallSession.get(this);
-        picking=state!=null&&state.getBoolean("picking");
-        settingsExpanded=state!=null&&state.getBoolean("settingsExpanded");helpExpanded=state!=null&&state.getBoolean("helpExpanded");
-        getWindow().setStatusBarColor(0xff0d0d0f);getWindow().setNavigationBarColor(0xff0d0d0f);
-        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);scroll.setBackgroundColor(0xff0d0d0f);
-        scroll.setOnApplyWindowInsetsListener((view,insets)->{
-            view.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;
-        });
-        LinearLayout center=column();center.setGravity(Gravity.CENTER_HORIZONTAL);center.setPadding(dp(20),dp(28),dp(20),dp(24));
-        scroll.addView(center,new ScrollView.LayoutParams(-1,-2));
-        LinearLayout content=column();center.addView(content,new LinearLayout.LayoutParams(-1,-2));
-        // Use measured space so split-screen and landscape do not inherit the full display width.
-        center.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
-            int width=Math.min(dp(600),Math.max(0,r-l-center.getPaddingLeft()-center.getPaddingRight()));
-            if(content.getLayoutParams().width!=width){content.getLayoutParams().width=width;content.requestLayout();}
-        });
-        TextView brand=text("D2R MOBILE",14,true);brand.setTextColor(GOLD);add(content,brand,0);
-        heading=text("正在检查游戏文件",28,true);heading.setAccessibilityHeading(true);add(content,heading,10);
-        steps=text("检查资源  →  导入并校验  →  启动游戏",14,false);steps.setTextColor(MUTED);add(content,steps,10);
-        LinearLayout card=column();card.setPadding(dp(18),dp(18),dp(18),dp(14));
-        GradientDrawable background=new GradientDrawable();background.setColor(0xff1b1916);background.setCornerRadius(dp(14));
-        background.setStroke(dp(1),0xff463c2e);card.setBackground(background);add(content,card,22);
-        message=text("",16,false);message.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);add(card,message,0);
-        progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);progress.setMax(1000);
-        progress.setProgressTintList(ColorStateList.valueOf(GOLD));progress.setIndeterminateTintList(ColorStateList.valueOf(GOLD));
-        progress.setContentDescription("游戏资源处理进度");add(card,progress,14);
-        amount=text("",14,false);amount.setTextColor(MUTED);add(card,amount,10);
-        configuration=text("",14,false);add(card,configuration,14);
-        choose=button("选择离线资源包",true);choose.setOnClickListener(v->{if(session.state.ready())openGame();else pick();});add(card,choose,16);
-        cancel=button("停止导入",false);cancel.setOnClickListener(v->confirmCancel());add(card,cancel,6);
-        feedback=text("",14,false);feedback.setTextColor(ERROR);feedback.setVisibility(View.GONE);
-        feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);add(content,feedback,10);
-        settingsToggle=button("",false);settingsToggle.setOnClickListener(v->{settingsExpanded=!settingsExpanded;updateExpansion();});add(content,settingsToggle,14);
-        settings=column();settings.setPadding(dp(8),0,dp(8),dp(8));add(content,settings,0);
-        TextView driverHeading=text("图形驱动",17,true);driverHeading.setAccessibilityHeading(true);add(settings,driverHeading,14);
-        drivers=new RadioGroup(this);drivers.setOrientation(RadioGroup.VERTICAL);drivers.setSaveEnabled(false);
-        String[] values={GraphicsDriverPolicy.AUTO,GraphicsDriverPolicy.SYSTEM,GraphicsDriverPolicy.TURNIP};
-        String[] labels={"自动推荐（推荐）","系统驱动","内置兼容驱动（Turnip）"};
-        for(int i=0;i<values.length;i++) {
-            RadioButton option=new RadioButton(this);option.setId(View.generateViewId());option.setTag(values[i]);option.setSaveEnabled(false);
-            option.setText(labels[i]);option.setTextSize(16);option.setTextColor(TouchControlsView.TEXT);option.setMinHeight(dp(48));
-            option.setButtonTintList(ColorStateList.valueOf(GOLD));drivers.addView(option,new RadioGroup.LayoutParams(-1,-2));
+    private LinearLayout column(){LinearLayout v=new LinearLayout(this);v.setOrientation(LinearLayout.VERTICAL);return v;}
+    private void add(LinearLayout parent,View v,int top){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2);p.topMargin=dp(top);parent.addView(v,p);}
+    private GradientDrawable background(int color,int border,int radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));if(border!=0)d.setStroke(dp(1),border);return d;}
+    private LinearLayout card(String title){LinearLayout c=column();c.setPadding(dp(20),dp(20),dp(20),dp(20));c.setBackground(background(0xff1b1c20,0xff39342c,18));
+        TextView h=text(title,19,GOLD,true);h.setAccessibilityHeading(true);add(c,h,0);return c;}
+    private Button button(String label,boolean primary){Button b=new Button(this);b.setText(label);b.setTextSize(16);b.setAllCaps(false);b.setMinHeight(dp(52));
+        b.setPadding(dp(12),dp(8),dp(12),dp(8));b.setTextColor(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{}},new int[]{MUTED,primary?INK:TEXT}));
+        b.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{android.R.attr.state_pressed},new int[]{}},new int[]{0xff343438,primary?0xffedcd9b:0xff49433a,primary?GOLD:0xff302e2a}));return b;}
+    private TextView row(LinearLayout parent,String title,Runnable action){LinearLayout r=column();r.setPadding(dp(4),dp(12),dp(4),dp(12));r.setMinimumHeight(dp(64));
+        add(r,text(title,14,MUTED,false),0);TextView value=text("",17,TEXT,true);add(r,value,4);r.setFocusable(true);r.setClickable(true);
+        android.util.TypedValue attr=new android.util.TypedValue();getTheme().resolveAttribute(android.R.attr.selectableItemBackground,attr,true);r.setBackgroundResource(attr.resourceId);
+        r.setOnClickListener(v->action.run());add(parent,r,4);return value;}
+    @Override public void onCreate(Bundle state){super.onCreate(state);
+        strings=new LauncherStrings(getResources().getConfiguration().getLocales().get(0));
+        if(GameSessionGate.guestRunning()){
+            steppedAside=true;startActivity(new Intent(this,GameActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));finish();return;
         }
-        add(settings,drivers,4);driverDetail=text("",14,false);driverDetail.setTextColor(MUTED);add(settings,driverDetail,4);
-        drivers.setOnCheckedChangeListener((group,id)->{
-            if(bindingDrivers)return;RadioButton selected=group.findViewById(id);if(selected==null)return;
-            if(GraphicsDriverSettings.save(this,(String)selected.getTag()))showFeedback("驱动已保存，下次启动游戏时生效。",false);
-            else showFeedback("驱动选择未能保存，请重试。",true);
-            bindDriver();updateConfiguration();
+        session=OfflineInstallSession.get(this);saves=SaveTransferSession.get(this);store=new LauncherSettingsStore(getFilesDir());
+        picking=state!=null&&state.getBoolean("picking");
+        getWindow().setStatusBarColor(INK);getWindow().setNavigationBarColor(INK);
+        LinearLayout screen=column();screen.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,new int[]{0xff222029,INK,0xff1b1712}));
+        screen.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());return i;});
+        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);screen.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        LinearLayout center=column();center.setGravity(Gravity.CENTER_HORIZONTAL);center.setPadding(dp(20),dp(28),dp(20),dp(28));scroll.addView(center);
+        LinearLayout content=column();center.addView(content,new LinearLayout.LayoutParams(-1,-2));
+        add(content,text("D2R MOBILE",14,GOLD,true),0);TextView title=text(t("Title"),30,TEXT,true);title.setAccessibilityHeading(true);add(content,title,10);
+        add(content,text(t("Subtitle"),15,MUTED,false),8);
+        body=column();add(content,body,24);resourceCard=card(t("Resources"));optionsColumn=column();
+        body.addView(resourceCard,new LinearLayout.LayoutParams(-1,-2));body.addView(optionsColumn,new LinearLayout.LayoutParams(-1,-2));
+        center.addOnLayoutChangeListener((v,l,tp,r,b,ol,ot,or,ob)->{
+            int w=Math.min(dp(960),Math.max(0,r-l-center.getPaddingLeft()-center.getPaddingRight()));
+            if(content.getLayoutParams().width!=w){content.getLayoutParams().width=w;content.requestLayout();}
+            boolean next=w>=dp(720);if(next!=wide||!layoutBound){wide=next;layoutBound=true;body.setOrientation(wide?LinearLayout.HORIZONTAL:LinearLayout.VERTICAL);
+                LinearLayout.LayoutParams a=new LinearLayout.LayoutParams(wide?0:-1,-2,wide?0.9f:0),o=new LinearLayout.LayoutParams(wide?0:-1,-2,wide?1.1f:0);
+                o.leftMargin=wide?dp(18):0;o.topMargin=wide?0:dp(18);resourceCard.setLayoutParams(a);optionsColumn.setLayoutParams(o);}
         });
-        TextView modHeading=text("MOD",17,true);modHeading.setAccessibilityHeading(true);add(settings,modHeading,18);
-        modDetail=text("",14,false);add(settings,modDetail,8);
-        Button mods=button("选择已安装 MOD",false);mods.setOnClickListener(v->chooseMod());add(settings,mods,6);
-        TextView modHelp=text("选择在启动游戏时生效。MOD 使用独立存档；关闭 MOD 后可回到原版存档。",14,false);modHelp.setTextColor(MUTED);add(settings,modHelp,8);
-        helpToggle=button("",false);helpToggle.setOnClickListener(v->{helpExpanded=!helpExpanded;updateExpansion();});add(content,helpToggle,8);
-        help=text("",14,false);help.setTextColor(MUTED);add(content,help,8);
-        setContentView(scroll);bindDriver();refreshMod();updateExpansion();
+        heading=text(session.title,22,TEXT,true);heading.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);add(resourceCard,heading,20);
+        message=text(t("ResourceHint"),15,MUTED,false);add(resourceCard,message,10);
+        progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);progress.setMax(1000);progress.setProgressTintList(ColorStateList.valueOf(GOLD));progress.setIndeterminateTintList(ColorStateList.valueOf(GOLD));add(resourceCard,progress,16);
+        amount=text("",13,MUTED,false);add(resourceCard,amount,12);
+        choose=button(t("PickPackage"),true);choose.setOnClickListener(v->{if(session.state.ready())openGame();else pickPackage();});
+        cancel=button(t("Stop"),false);cancel.setOnClickListener(v->confirmCancel());add(resourceCard,cancel,4);
+        Button help=button(t("Help"),false);help.setOnClickListener(v->new AlertDialog.Builder(this).setTitle(t("Help")).setMessage(t("HelpBody")).setPositiveButton(android.R.string.ok,null).show());add(resourceCard,help,16);
+        LinearLayout graphics=card(t("Display"));optionsColumn.addView(graphics,new LinearLayout.LayoutParams(-1,-2));settings=column();add(graphics,settings,8);
+        qualityValue=row(settings,t("Quality"),this::chooseQuality);driverValue=row(settings,t("Driver"),this::chooseDriver);
+        fps=new Switch(this);fps.setText(t("Fps"));fps.setContentDescription(t("FpsHint"));fps.setTextSize(16);fps.setTextColor(TEXT);fps.setMinHeight(dp(56));fps.setThumbTintList(ColorStateList.valueOf(GOLD));add(settings,fps,4);
+        fps.setOnCheckedChangeListener((v,on)->{if(binding)return;if(!canEdit()){bindSettings();return;}try{store.fps(on);showFeedback(t("Saved"),false);}catch(IOException e){settingsError(e);}bindSettings();});
+        modValue=row(settings,t("Mod"),this::chooseMod);
+        LinearLayout saveCard=card(t("Saves"));add(optionsColumn,saveCard,18);scopeView=text("",15,TEXT,true);add(saveCard,scopeView,14);
+        add(saveCard,text(t("SaveScopeHint"),13,MUTED,false),6);
+        LinearLayout actions=new LinearLayout(this);exportSave=button(t("Export"),false);importSave=button(t("Import"),false);
+        LinearLayout.LayoutParams left=new LinearLayout.LayoutParams(0,-2,1),right=new LinearLayout.LayoutParams(0,-2,1);right.leftMargin=dp(8);actions.addView(exportSave,left);actions.addView(importSave,right);add(saveCard,actions,14);
+        exportSave.setOnClickListener(v->pickSave(false));importSave.setOnClickListener(v->pickSave(true));
+        exportBackup=button(t("ExportBackup"),false);exportBackup.setOnClickListener(v->pickBackup());add(saveCard,exportBackup,6);
+        saveProgress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);saveProgress.setIndeterminate(true);saveProgress.setIndeterminateTintList(ColorStateList.valueOf(GOLD));add(saveCard,saveProgress,12);
+        saveStatus=text(t("SaveHint"),14,MUTED,false);saveStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);add(saveCard,saveStatus,10);
+        feedback=text("",14,GOLD,false);feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);add(content,feedback,14);
+        try{add(content,text(f("Version",getPackageManager().getPackageInfo(getPackageName(),0).versionName),12,MUTED,false),18);}catch(Exception ignored){}
+        LinearLayout dock=column();dock.setPadding(dp(20),dp(8),dp(20),dp(8));dock.setBackgroundColor(INK);add(dock,choose,0);screen.addView(dock,new LinearLayout.LayoutParams(-1,-2));
+        setContentView(screen);bindSettings();render();
         if(state!=null&&state.getString("feedback")!=null)showFeedback(state.getString("feedback"),state.getBoolean("feedbackError"));
     }
-    private void updateExpansion(){
-        settings.setVisibility(settingsExpanded?View.VISIBLE:View.GONE);settingsToggle.setText("启动设置 · "+(settingsExpanded?"收起":"展开"));
-        settingsToggle.setContentDescription("图形驱动和 MOD 设置，当前已"+(settingsExpanded?"展开":"折叠"));
-        help.setVisibility(helpExpanded?View.VISIBLE:View.GONE);helpToggle.setText("资源包与存档说明 · "+(helpExpanded?"收起":"展开"));
+    private boolean canEdit(){if(GameSessionGate.guestStarted()){showFeedback(t("GameRunning"),true);return false;}
+        if(saves.locked()||session.state.busy()||picking||openingGame){showFeedback(t("Busy"),false);return false;}return true;}
+    private void settingsError(Exception e){android.util.Log.w("D2RLauncher","settings",e);showFeedback(t("SettingsFailed"),true);}
+    private String driverName(String mode){return t(GraphicsDriverPolicy.SYSTEM.equals(mode)?"System":GraphicsDriverPolicy.TURNIP.equals(mode)?"Turnip":"AutoDriver");}
+    private String scope(){return modId.isEmpty()?"base":"mod-"+modId;}
+    private String scopeName(String scope){return scope.equals("base")?t("Base"):scope.substring(4);}
+    private String qualityName(String value){for(int i=0;i<LauncherSettingsStore.SCALES.length;i++)if(value.equals(LauncherSettingsStore.SCALES[i]))return qualityNames()[i];return f("QualityCustom",value);}
+    private String[] qualityNames(){return new String[]{t("QualityAuto"),t("QualityFull"),t("QualityBalanced"),t("QualityFast")};}
+    private void bindSettings(){if(steppedAside)return;binding=true;
+        try{qualityValue.setText(qualityName(store.scale())+"  ›");fps.setChecked(store.fps());}
+        catch(IOException e){qualityValue.setText(t("ConfigInvalid"));showFeedback(t("ConfigInvalid"),true);}
+        driverValue.setText(driverName(GraphicsDriverSettings.read(this))+"  ›");
+        try{ModSelectionStore mods=new ModSelectionStore(getFilesDir());modId=mods.selected();modValid=modId.isEmpty()||mods.installed().contains(modId);}
+        catch(IOException e){modValid=false;}
+        modValue.setText((modValid?(modId.isEmpty()?t("NoMod"):modId):t("ModMissing"))+"  ›");modValue.setTextColor(modValid?TEXT:ERROR);
+        scopeView.setText(modValid?f("Scope",scopeName(scope())):t("ModMissing"));binding=false;
     }
-    private static String driverLabel(String mode){
-        return GraphicsDriverPolicy.SYSTEM.equals(mode)?"系统驱动":GraphicsDriverPolicy.TURNIP.equals(mode)?"内置 Turnip":"自动推荐";
+    private void choice(String title,String hint,String[] labels,int selected,java.util.function.IntConsumer apply){
+        if(!canEdit()||choiceDialog!=null)return;
+        choiceDialog=new AlertDialog.Builder(this).setTitle(title).setSingleChoiceItems(labels,selected,(d,i)->{apply.accept(i);d.dismiss();})
+            .setNeutralButton(t("More"),(d,w)->new AlertDialog.Builder(this).setTitle(title).setMessage(hint).setPositiveButton(android.R.string.ok,null).show()).setNegativeButton(t("Cancel"),null).create();
+        choiceDialog.setOnDismissListener(d->choiceDialog=null);choiceDialog.show();
     }
-    private void bindDriver(){
-        String mode=GraphicsDriverSettings.read(this);bindingDrivers=true;
-        for(int i=0;i<drivers.getChildCount();i++)if(mode.equals(drivers.getChildAt(i).getTag()))drivers.check(drivers.getChildAt(i).getId());
-        bindingDrivers=false;
-        driverDetail.setText(GraphicsDriverPolicy.SYSTEM.equals(mode)?"使用手机自带的图形驱动。启动失败时可返回此处更换。":
-            GraphicsDriverPolicy.TURNIP.equals(mode)?"使用 APK 内的 Turnip 驱动，适用于部分骁龙设备。其他设备建议使用自动推荐。":
-            "按设备选择驱动，当前设备推荐"+(GraphicsDriverSettings.recommendedTurnip()?"内置 Turnip":"系统驱动")+"。连续启动失败后会尝试系统驱动。");
-    }
-    private void updateConfiguration(){
-        configuration.setText("驱动："+driverLabel(GraphicsDriverSettings.read(this))+"\nMOD："+(modValid?(modId.isEmpty()?"不加载（原版存档）":modId+"（独立存档）"):"选择异常，请在启动设置中重新选择"));
-        configuration.setTextColor(modValid?TouchControlsView.TEXT:ERROR);
-    }
-    private boolean refreshMod(){
-        try{
-            ModSelectionStore store=new ModSelectionStore(getFilesDir());modId=store.selected();
-            modValid=modId.isEmpty()||store.installed().contains(modId);
-            modDetail.setText(modValid?(modId.isEmpty()?"当前：不加载 MOD":"当前："+modId):"已选择的 MOD 不存在，请重新选择或关闭 MOD。");
-        }catch(IOException e){modValid=false;modDetail.setText("无法读取 MOD 设置，请重新选择“不加载 MOD”或已安装包。");}
-        modDetail.setTextColor(modValid?MUTED:ERROR);updateConfiguration();return modValid;
-    }
-    private void chooseMod(){
-        if(modDialog!=null)return;
-        try{
-            ModSelectionStore store=new ModSelectionStore(getFilesDir());ArrayList<String> ids=store.installed();ids.add(0,"");
-            String[] labels=new String[ids.size()];labels[0]="不加载 MOD（原版）";
-            for(int i=1;i<labels.length;i++)labels[i]=ids.get(i);
-            int checked=modValid?ids.indexOf(modId):-1;
-            modDialog=new AlertDialog.Builder(this).setTitle(ids.size()==1?"暂无已安装 MOD":"选择启动 MOD")
-                .setSingleChoiceItems(labels,checked,(dialog,index)->{
-                    try{store.select(ids.get(index));refreshMod();showFeedback("MOD 选择已保存，启动游戏时生效。",false);dialog.dismiss();}
-                    catch(IOException e){showFeedback("MOD 选择保存失败，请重试。",true);}
-                }).setNegativeButton("返回",null).create();
-            modDialog.setOnDismissListener(d->{modDialog=null;if(!isFinishing())settingsToggle.requestFocus();});modDialog.show();
-        }catch(IOException e){showFeedback("无法读取已安装 MOD，请检查应用可用空间后重试。",true);}
-    }
-    private void showFeedback(String value,boolean error){
-        feedback.setText(value);feedback.setTextColor(error?ERROR:GOLD);feedback.setVisibility(value.isEmpty()?View.GONE:View.VISIBLE);
-    }
-    private void openGame() {
-        if(!session.state.ready()||!resumed||openingGame)return;
-        if(!refreshMod()){settingsExpanded=true;updateExpansion();showFeedback("请先在启动设置中修复 MOD 选择。",true);chooseMod();return;}
-        try{openingGame=true;render();startActivity(new Intent(this,GameActivity.class));finish();}
-        catch(android.content.ActivityNotFoundException|SecurityException e){openingGame=false;showFeedback("无法打开游戏，请检查 APK 是否完整安装。",true);render();}
-    }
-    private void pick() {
-        if(picking||!session.canSelect())return;
-        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType("*/*");
+    private void chooseQuality(){int selected=-1;try{selected=Arrays.asList(LauncherSettingsStore.SCALES).indexOf(store.scale());}catch(IOException ignored){}
+        choice(t("Quality"),t("QualityHint"),qualityNames(),selected,i->{try{store.scale(i);showFeedback(t("Saved"),false);}catch(IOException e){settingsError(e);}bindSettings();});}
+    private void chooseDriver(){String[] modes={GraphicsDriverPolicy.AUTO,GraphicsDriverPolicy.SYSTEM,GraphicsDriverPolicy.TURNIP};
+        choice(t("Driver"),t("DriverHint"),new String[]{t("AutoDriver"),t("System"),t("Turnip")},Arrays.asList(modes).indexOf(GraphicsDriverSettings.read(this)),i->{
+            if(GraphicsDriverSettings.save(this,modes[i]))showFeedback(t("Saved"),false);else showFeedback(t("SettingsFailed"),true);bindSettings();});}
+    private void chooseMod(){if(!canEdit())return;try{ModSelectionStore mods=new ModSelectionStore(getFilesDir());ArrayList<String> ids=mods.installed();ids.add(0,"");
+        String[] names=ids.toArray(new String[0]);names[0]=t("NoMod");choice(t("Mod"),t("ModHint"),names,modValid?ids.indexOf(modId):-1,i->{try{mods.select(ids.get(i));showFeedback(t("Saved"),false);}catch(IOException e){settingsError(e);}bindSettings();renderSaves();if(modValid)saves.refreshBackup(scope());});
+        }catch(IOException e){settingsError(e);}}
+    private void showFeedback(String value,boolean error){feedback.setText(value);feedback.setTextColor(error?ERROR:GOLD);feedback.setVisibility(value.isEmpty()?View.GONE:View.VISIBLE);}
+    private void openGame(){if(!resumed||!session.state.ready()||!canEdit())return;bindSettings();if(!modValid){chooseMod();return;}
+        try{store.scale();}catch(IOException e){showFeedback(t("ConfigInvalid"),true);chooseQuality();return;}
+        try{openingGame=true;render();startActivity(new Intent(this,GameActivity.class));finish();}catch(RuntimeException e){openingGame=false;showFeedback(t("OpenFailed"),true);render();}}
+    private void pickPackage(){if(!canEdit()||!session.canSelect())return;Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
         intent.putExtra(Intent.EXTRA_LOCAL_ONLY,true);intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        try{picking=true;showFeedback("",false);render();startActivityForResult(intent,PICK_PACKAGE);}
-        catch(android.content.ActivityNotFoundException|SecurityException e){picking=false;showFeedback("无法打开文件选择器，请启用系统“文件”应用后重试。",true);render();}
+        try{picking=true;render();startActivityForResult(intent,PICK_PACKAGE);}catch(RuntimeException e){picking=false;showFeedback(t("PickerFailed"),true);render();}}
+    private void pickSave(boolean importing){if(!canEdit()||!modValid)return;
+        try{if(!importing&&SaveArchive.inspect(SaveArchive.target(getFilesDir(),scope())).files==0){showFeedback(t("NoSaves"),false);return;}}
+        catch(IOException e){settingsError(e);return;}
+        if(!saves.reserve(scope()))return;
+        Intent intent=new Intent(importing?Intent.ACTION_OPEN_DOCUMENT:Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(importing?"*/*":"application/zip");
+        intent.addFlags(importing?Intent.FLAG_GRANT_READ_URI_PERMISSION:Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        if(!importing)intent.putExtra(Intent.EXTRA_TITLE,"d2r-save-"+scope()+"-"+new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",Locale.US).format(new Date())+".zip");
+        try{startActivityForResult(intent,importing?IMPORT_SAVE:EXPORT_SAVE);}catch(RuntimeException e){saves.pickerFailed();}
     }
-    private void confirmCancel(){
-        if(!session.state.canCancel()||cancelDialog!=null)return;
-        cancelDialog=new AlertDialog.Builder(this).setTitle("停止本次导入？")
-            .setMessage("已校验的文件会保留。下次选择同一资源包时会复用这些文件；尚未完成的文件需要重新导入。")
-            .setNegativeButton("继续导入",null).setPositiveButton("停止导入",(d,w)->session.cancel()).create();
-        cancelDialog.setOnDismissListener(d->{cancelDialog=null;if(!isFinishing())choose.requestFocus();});cancelDialog.show();
-        cancelDialog.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus();
+    private void pickBackup(){if(!canEdit()||!saves.reserveBackup(scope()))return;
+        Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/zip");
+        intent.putExtra(Intent.EXTRA_TITLE,saves.latestBackup.getName());intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        try{startActivityForResult(intent,EXPORT_SAVE);}catch(RuntimeException e){saves.pickerFailed();}
     }
-    private String size(long n){
-        if(n>=1_000_000_000L)return String.format(Locale.SIMPLIFIED_CHINESE,"%.2f GB",n/1_000_000_000.0);
-        if(n>=1_000_000L)return String.format(Locale.SIMPLIFIED_CHINESE,"%.1f MB",n/1_000_000.0);
-        return String.format(Locale.SIMPLIFIED_CHINESE,"%.0f KB",Math.max(0,n)/1000.0);
+    private void renderSaves(){if(steppedAside||saveStatus==null)return;
+        saveProgress.setVisibility(saves.working()?View.VISIBLE:View.GONE);boolean enabled=!saves.locked()&&!session.state.busy()&&!GameSessionGate.guestStarted()&&modValid&&!picking&&!openingGame;
+        exportSave.setEnabled(enabled);importSave.setEnabled(enabled);
+        exportBackup.setVisibility(scope().equals(saves.latestScope)&&saves.latestBackup!=null?View.VISIBLE:View.GONE);exportBackup.setEnabled(enabled);
+        setEnabled(settings,!saves.locked()&&!session.state.busy()&&!GameSessionGate.guestStarted()&&!picking&&!openingGame);
+        String value=strings.text(saves.messageKey);
+        if(saves.phase==SaveTransferSession.Phase.DONE){value+="\n"+f("Scope",scopeName(saves.scope));if(saves.summary!=null)value+="\n"+f("FileCount",saves.summary.files,saves.summary.characters);if(saves.backup!=null)value+="\n"+f("Backup",saves.backup.getName());}
+        saveStatus.setText(value);saveStatus.setTextColor(saves.phase==SaveTransferSession.Phase.FAILED?ERROR:MUTED);
+        if(saves.phase==SaveTransferSession.Phase.PREVIEW&&resumed&&previewDialog==null){SaveArchive.Summary s=saves.summary;
+            previewDialog=new AlertDialog.Builder(this).setTitle(t("Preview")).setMessage(f("PreviewBody",scopeName(saves.scope),s.files,s.characters,s.conflicts))
+                .setNegativeButton(t("Cancel"),(d,w)->saves.cancel()).setPositiveButton(t("ConfirmImport"),(d,w)->saves.confirm()).create();
+            previewDialog.setOnCancelListener(d->saves.cancel());previewDialog.setOnDismissListener(d->previewDialog=null);previewDialog.show();}
+        renderStart();updateAwake();
     }
-    private void render() {
-        if(isFinishing())return;
-        OfflineInstallState.Phase phase=session.state.phase();boolean busy=session.state.busy(),ready=session.state.ready();
-        heading.setText(session.title);if(!session.detail.contentEquals(message.getText()))message.setText(session.detail);
-        steps.setText(ready?"资源已就绪 · 可直接启动":phase==OfflineInstallState.Phase.CHECKING?"第 1 步 · 检查本地资源":
-            busy?"第 2 步 · 导入并校验资源":"第 1 步 · 选择配套的 .d2rpack 资源包");
-        progress.setIndeterminate(busy&&(session.total==0||phase==OfflineInstallState.Phase.CANCELLING));
-        progress.setProgress(session.total>0?(int)Math.min(1000,session.done*1000.0/session.total):0);progress.setVisibility(busy?View.VISIBLE:View.GONE);
-        long needed=session.requiredBytes>0?session.requiredBytes:session.payloadBytes()+OfflinePackageInstaller.RESERVE;
-        long available=getFilesDir().getUsableSpace();
-        amount.setText(session.payloadBytes()==0?(busy?"正在读取安装信息…":"安装信息不可用，请重新安装配套 APK。"):busy&&session.total>0?
-            String.format(Locale.SIMPLIFIED_CHINESE,"本阶段 %.1f%% · %s / %s",session.done*100.0/session.total,size(session.done),size(session.total)):
-            "资源 "+size(session.payloadBytes())+" · 可用空间 "+size(available)+(busy||ready?"":"\n首次导入需额外空间约 "+size(needed)));
-        amount.setTextColor(!busy&&!ready&&session.payloadBytes()>0&&available<needed?ERROR:MUTED);
-        choose.setEnabled((ready||session.canSelect())&&!picking&&!openingGame);
-        choose.setText(openingGame?"正在启动…":picking?"正在选择资源包…":ready?"启动游戏":busy?"正在处理，请稍候…":
-            phase==OfflineInstallState.Phase.FAILED||phase==OfflineInstallState.Phase.STOPPED?"重新选择资源包":"选择离线资源包");
-        configuration.setVisibility(ready?View.VISIBLE:View.GONE);
-        boolean importing=phase==OfflineInstallState.Phase.IMPORTING||phase==OfflineInstallState.Phase.CANCELLING||phase==OfflineInstallState.Phase.COMMITTING;
-        cancel.setVisibility(importing?View.VISIBLE:View.GONE);cancel.setEnabled(session.state.canCancel());
-        cancel.setText(phase==OfflineInstallState.Phase.CANCELLING?"正在停止…":phase==OfflineInstallState.Phase.COMMITTING?"正在完成安装，无法取消":"停止导入");
-        if(cancelDialog!=null&&!session.state.canCancel())cancelDialog.dismiss();
-        help.setText(ready?"游戏资源已安装，无需重新导入。启动失败时可在“启动设置”中更换图形驱动或关闭 MOD。\n更新请覆盖安装；卸载应用会删除游戏数据和存档。":
-            (session.payloadBytes()>0?"首次导入需额外可用空间约 "+size(needed)+"。\n":"")+
-            "选择配套 .d2rpack 文件，无需解压或移动目录。建议保持页面打开；切到后台不会主动取消，但系统回收应用后需要重新选择资源包。\n已校验文件会复用。导入完成后可删除下载的资源包；卸载应用会删除游戏数据和存档。");
-        if(busy&&resumed)getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    private void setEnabled(View v,boolean enabled){v.setEnabled(enabled);if(v instanceof android.view.ViewGroup){android.view.ViewGroup g=(android.view.ViewGroup)v;for(int i=0;i<g.getChildCount();i++)setEnabled(g.getChildAt(i),enabled);}}
+    private String size(long bytes){return bytes>=1_000_000_000L?String.format(Locale.getDefault(),"%.2f GB",bytes/1e9):String.format(Locale.getDefault(),"%.1f MB",bytes/1e6);}
+    private void renderStart(){if(choose==null)return;boolean blocked=saves.locked()||picking||openingGame||GameSessionGate.guestStarted();
+        choose.setEnabled(!blocked&&(session.state.ready()||session.canSelect()));
+        choose.setText(openingGame?t("Starting"):picking?t("Picking"):session.state.ready()?t("Start"):t("PickPackage"));}
+    private void render(){if(steppedAside||heading==null||isFinishing())return;boolean busy=session.state.busy(),ready=session.state.ready();
+        heading.setText(ready?t("ResourceReady"):session.title);message.setText(ready?t("ReadyHint"):session.detail);
+        progress.setIndeterminate(busy&&session.total==0);progress.setVisibility(busy?View.VISIBLE:View.GONE);progress.setProgress(session.total>0?(int)Math.min(1000,session.done*1000.0/session.total):0);
+        amount.setText(busy&&session.total>0?f("Progress",session.done*100.0/session.total,size(session.done),size(session.total)):f("Space",size(session.payloadBytes()),size(getFilesDir().getUsableSpace())));
+        cancel.setVisibility(session.state.canCancel()?View.VISIBLE:View.GONE);cancel.setEnabled(session.state.canCancel());
+        if(cancelDialog!=null&&!session.state.canCancel())cancelDialog.dismiss();renderStart();renderSaves();
     }
-    @Override public void onStart(){super.onStart();session.attach(observer);}
-    @Override public void onResume(){super.onResume();resumed=true;bindDriver();refreshMod();render();}
+    private void updateAwake(){if(resumed&&(session.state.busy()||saves.working()))getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);}
+    private void confirmCancel(){if(!session.state.canCancel()||cancelDialog!=null)return;cancelDialog=new AlertDialog.Builder(this).setTitle(t("StopTitle")).setMessage(t("StopBody"))
+        .setNegativeButton(t("Continue"),null).setPositiveButton(t("Stop"),(d,w)->session.cancel()).create();cancelDialog.setOnDismissListener(d->cancelDialog=null);cancelDialog.show();}
+    @Override public void onStart(){super.onStart();if(!steppedAside){session.attach(observer);saves.attach(saveObserver);}}
+    @Override public void onResume(){super.onResume();if(steppedAside)return;resumed=true;bindSettings();render();if(modValid)saves.refreshBackup(scope());if(GameSessionGate.guestStarted())showFeedback(t("GameRunning"),true);}
     @Override public void onPause(){resumed=false;getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);super.onPause();}
-    @Override public void onStop(){session.detach(observer);super.onStop();}
-    @Override public void onDestroy(){if(cancelDialog!=null)cancelDialog.dismiss();if(modDialog!=null)modDialog.dismiss();super.onDestroy();}
-    @Override protected void onSaveInstanceState(Bundle state){
-        state.putBoolean("picking",picking);state.putBoolean("settingsExpanded",settingsExpanded);state.putBoolean("helpExpanded",helpExpanded);
-        state.putString("feedback",feedback.getText().toString());state.putBoolean("feedbackError",feedback.getCurrentTextColor()==ERROR);super.onSaveInstanceState(state);
-    }
-    @Override protected void onActivityResult(int request,int result,Intent data) {
-        super.onActivityResult(request,result,data);if(request!=PICK_PACKAGE)return;picking=false;
-        if(result==RESULT_OK&&data!=null&&data.getData()!=null){showFeedback("",false);session.start(data.getData());}
-        else showFeedback("未选择资源包，可随时重新选择。",false);render();
-    }
-    @Override public void onBackPressed(){
-        if(session.state.canCancel())confirmCancel();
-        else if(session.state.busy())Toast.makeText(this,"正在处理资源，请稍候。可按主屏幕键暂时离开。",Toast.LENGTH_SHORT).show();
-        else super.onBackPressed();
-    }
+    @Override public void onStop(){if(!steppedAside){session.detach(observer);saves.detach(saveObserver);}super.onStop();}
+    @Override public void onDestroy(){if(cancelDialog!=null)cancelDialog.dismiss();if(choiceDialog!=null)choiceDialog.dismiss();if(previewDialog!=null)previewDialog.dismiss();super.onDestroy();}
+    @Override protected void onSaveInstanceState(Bundle state){if(!steppedAside){state.putBoolean("picking",picking);state.putString("feedback",feedback.getText().toString());state.putBoolean("feedbackError",feedback.getCurrentTextColor()==ERROR);}super.onSaveInstanceState(state);}
+    @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(steppedAside)return;
+        if(request==PICK_PACKAGE){picking=false;if(result==RESULT_OK&&data!=null&&data.getData()!=null)session.start(data.getData());render();}
+        else if(request==EXPORT_SAVE||request==IMPORT_SAVE){if(result!=RESULT_OK||data==null||data.getData()==null)saves.cancel();else if(request==EXPORT_SAVE)saves.export(data.getData());else saves.read(data.getData());}}
+    @Override public void onBackPressed(){if(steppedAside)return;if(session.state.canCancel())confirmCancel();else if(saves.locked()||session.state.busy())Toast.makeText(this,t("Busy"),Toast.LENGTH_SHORT).show();else super.onBackPressed();}
 }

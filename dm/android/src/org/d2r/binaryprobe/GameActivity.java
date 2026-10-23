@@ -64,7 +64,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final HandlerThread surfaceThread=new HandlerThread("game-surface");
     private Handler surfaceWorker;
-    private boolean nativeLaunched, destroyed;
+    private boolean nativeLaunched, destroyed,ownsGuest;
     private volatile boolean inputReady;
     private volatile int surfaceGeneration;
     private SurfaceView game;
@@ -119,6 +119,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        /* 存档传输期间不可挂载客体；一个进程不重复启动 native 状态。
+         * Never mount a guest during save transfer or restart native state within one process. */
+        ownsGuest=GameSessionGate.beginGuest();
+        if(!ownsGuest){android.widget.Toast.makeText(this,new LauncherStrings(getResources().getConfiguration().getLocales().get(0)).text("dmLaunchGameRunning"),android.widget.Toast.LENGTH_LONG).show();finish();return;}
         registerDebugOrientation();
         strings=new GameUiStrings(getResources().getConfiguration().getLocales().get(0));
         new GameHaptics(this);
@@ -174,7 +178,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         status.setText(t("正在准备游戏文件"));root.addView(status,new FrameLayout.LayoutParams(-1,-1));setContentView(root);
         initializeUpdates();
         new Thread(() -> {
-            try { prepareModules();GraphicsDriverSettings.configure(this);ui.post(() -> {prepared=true;configureAndStart();}); }
+            try { SaveTransferSession.recover(this);prepareModules();GraphicsDriverSettings.configure(this);ui.post(() -> {prepared=true;configureAndStart();}); }
             catch(Exception e){ui.post(() -> fail(t("游戏文件准备失败"),e));}
         },"game-files").start();
     }
@@ -577,10 +581,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if(configured){nativeControllerCancel(0);nativeActions(0,0,0,0,0);}
         if(touchControls!=null)touchControls.cancel();
     }syncTouchOverlay();}
-    @Override public void onResume(){super.onResume();resumed=true;fpsSampler.reset();nativeKeyboardReady(true);nativeUpdateForeground();if(configured)nativeAudioInterruption(false);if(configured)nativeLifecycle(2);configureAndStart();}
-    @Override public void onPause(){resumed=false;clearControllers();if(configured){nativeLifecycle(0);nativeLifecycle(1);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;controllerButtons=0;if(touchControls!=null)touchControls.cancel();syncTouchOverlay();if(configured){nativeActions(0,0,0,0,0);nativeControllerCancel(0);}if(configured&&surfaceReady)publishSurface();super.onPause();}
+    @Override public void onResume(){super.onResume();if(!ownsGuest)return;resumed=true;fpsSampler.reset();nativeKeyboardReady(true);nativeUpdateForeground();if(configured)nativeAudioInterruption(false);if(configured)nativeLifecycle(2);configureAndStart();}
+    @Override public void onPause(){if(!ownsGuest){super.onPause();return;}resumed=false;clearControllers();if(configured){nativeLifecycle(0);nativeLifecycle(1);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}fpsSampler.reset();displayedFps=Double.NaN;if(fps!=null)fps.setText("FPS —");inputReady=false;actionButtons=0;controllerButtons=0;if(touchControls!=null)touchControls.cancel();syncTouchOverlay();if(configured){nativeActions(0,0,0,0,0);nativeControllerCancel(0);}if(configured&&surfaceReady)publishSurface();super.onPause();}
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}
-    @Override public void onDestroy(){GraphicsDriverSettings.confirmStarted(this);if(debugOrientation!=null){try{unregisterReceiver(debugOrientation);}catch(RuntimeException ignored){}debugOrientation=null;}if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
+    @Override public void onDestroy(){if(!ownsGuest){super.onDestroy();return;}GameSessionGate.guestDestroyed();GraphicsDriverSettings.confirmStarted(this);if(debugOrientation!=null){try{unregisterReceiver(debugOrientation);}catch(RuntimeException ignored){}debugOrientation=null;}if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
 }

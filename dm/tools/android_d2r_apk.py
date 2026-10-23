@@ -422,8 +422,8 @@ def main(argv=None):
     parser.add_argument("--debuggable", action="store_true",
                         help="Diagnostics only: same identity and signature as the release but debuggable, so run-as can read "
                              "app logs; installs over the release with adb install -r")
-    parser.add_argument("--version-code", type=int, default=5, help="Offline release versionCode")
-    parser.add_argument("--version-name", default="1.1.2-94012", help="Offline release versionName")
+    parser.add_argument("--version-code", type=int, default=6, help="Offline release versionCode")
+    parser.add_argument("--version-name", default="1.2.0-94012", help="Offline release versionName")
     parser.add_argument("--validate-only", action="store_true", help="Check prepared inputs without creating output or invoking SDK tools")
     args = parser.parse_args(argv)
     release = args.offline_manifest is not None
@@ -547,7 +547,12 @@ def main(argv=None):
     classes = sorted((out / "classes").rglob("*.class"))
     if not classes:
         raise ValueError("Java compilation emitted no classes")
-    run(tool("d8"), "--min-api", "29", "--lib", android, "--output", out / "dex", *classes)
+    # 将类放进一个输入归档，避免 Windows 批处理命令长度限制。
+    # Use one input archive to avoid the Windows batch command-length limit.
+    with ZipFile(out / "dex-input.jar", "w") as archive:
+        for source in classes:
+            archive.write(source, source.relative_to(out / "classes").as_posix())
+    run(tool("d8"), "--min-api", "29", "--lib", android, "--output", out / "dex", out / "dex-input.jar")
     if not (out / "dex/classes.dex").is_file():
         raise ValueError("D8 emitted no classes.dex")
     if release:

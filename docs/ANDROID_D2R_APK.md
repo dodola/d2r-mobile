@@ -125,7 +125,7 @@ Extra inputs for the offline mode:
 - `--keystore-properties`: `key=value` file with `storeFile`, `alias`, `storePassword`, `keyPassword`. The passwords
   reach `apksigner` through the environment (`env:`), so they never appear in `commands.json`. An offline release is
   never debug-signed. `--expect-cert-sha256` makes the build fail if the signer differs.
-- `--version-code`, `--version-name` (default `5`, `1.1.2-94012`); `--update-url` is optional and empty by default.
+- `--version-code`, `--version-name` (default `6`, `1.2.0-94012`); `--update-url` is optional and empty by default.
 - `--debuggable` (diagnostics only): same identity and signature but debuggable, so `run-as` can read
   `files/d2r-mobile/diagnostics/game-startup.log`; installs over the release with `adb install -r`, keeping the
   imported game data. Never distribute it.
