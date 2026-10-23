@@ -422,8 +422,8 @@ def main(argv=None):
     parser.add_argument("--debuggable", action="store_true",
                         help="Diagnostics only: same identity and signature as the release but debuggable, so run-as can read "
                              "app logs; installs over the release with adb install -r")
-    parser.add_argument("--version-code", type=int, default=7, help="Offline release versionCode")
-    parser.add_argument("--version-name", default="1.2.1-94012", help="Offline release versionName")
+    parser.add_argument("--version-code", type=int, default=10, help="Offline release versionCode")
+    parser.add_argument("--version-name", default="1.2.4-94012", help="Offline release versionName")
     parser.add_argument("--validate-only", action="store_true", help="Check prepared inputs without creating output or invoking SDK tools")
     args = parser.parse_args(argv)
     release = args.offline_manifest is not None

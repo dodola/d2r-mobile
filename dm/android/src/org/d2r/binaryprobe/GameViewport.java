@@ -4,7 +4,7 @@ import android.content.Context;
 import android.view.View;
 import android.widget.FrameLayout;
 
-/** Keep the original 16:9 image and every input surface in the same rectangle. */
+/** Keep the adaptive game image and all input surfaces in the same rectangle. */
 final class GameViewport extends FrameLayout {
     GameViewport(Context context){super(context);}
     @Override protected void onMeasure(int widthSpec,int heightSpec) {

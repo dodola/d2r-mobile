@@ -46,6 +46,8 @@ public final class TouchControlsView extends View {
     private BooleanSupplier touchActivation;
     private int accessibilityFocus=View.NO_ID;
     private final float density;
+    private int layoutWidth,layoutHeight;
+    private float safeLeft=-1,safeRight=-1;
     public TouchControlsView(Context context,BooleanSupplier ready,GameUiStrings strings){super(context);this.ready=ready;this.strings=strings;density=getResources().getDisplayMetrics().density;hudRenderer=new D2rHudRenderer(context.getAssets());controlArt=new D2rControlArt(density);worldRenderer=new D2rWorldRenderer(context.getAssets());
         updateLanguageDescription();setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);setVisibility(VISIBLE);}
     private void updateLanguageDescription(){setContentDescription(strings.text("触摸操控：左侧摇杆移动，右侧技能按钮拖动瞄准，底部药水"));}
@@ -77,7 +79,13 @@ public final class TouchControlsView extends View {
             left=Math.max(0,insets.getDisplayCutout().getSafeInsetLeft()-location[0])/density;
             right=Math.max(0,location[0]+getWidth()-(screen.x-insets.getDisplayCutout().getSafeInsetRight()))/density;
         }
-        nativeResize(getWidth()/density,getHeight()/density,left,right);frame=nativeFrame();}
+        if(layoutWidth==getWidth()&&layoutHeight==getHeight()&&safeLeft==left&&safeRight==right)return;
+        layoutWidth=getWidth();layoutHeight=getHeight();safeLeft=left;safeRight=right;
+        nativeResize(getWidth()/density,getHeight()/density,left,right);frame=nativeFrame();
+        android.util.Log.i("D2RDisplay","controls="+getWidth()+"x"+getHeight()+" density="+density+" safeDp="+left+","+right);}
+    @Override public WindowInsets onApplyWindowInsets(WindowInsets insets){
+        WindowInsets applied=super.onApplyWindowInsets(insets);post(this::resize);return applied;
+    }
     @Override protected void onLayout(boolean changed,int left,int top,int right,int bottom){
         super.onLayout(changed,left,top,right,bottom);if(changed)resize();
     }

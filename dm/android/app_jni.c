@@ -1,10 +1,12 @@
 #include "../host/dm.h"
+#include "../host/front.h"
 #include "services_platform.h"
 #include "services_sdk.h"
 #include "services_fs.h"
 #include "romfs_image.h"
 #include "input_backend.h"
 #include "render_scale.h"
+#include "render_budget.h"
 #include "touch_controls_android.h"
 #include "d2r_host_modules.h"
 #include "d2r_mod_loader.h"
@@ -1059,9 +1061,16 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeSurface(JNIEn
     pthread_mutex_unlock(&state_lock);
     dm_android_platform_status status; dm_android_platform_get_status(&status);
     int window_error=status.bound?dm_android_platform_update_window(&w):0;
+    if(next) {
+        uint64_t res=dm_android_display_resolution((unsigned)width,(unsigned)height,0);
+        LOG("ANDROID_DISPLAY surface=%dx%d default_handheld=%ux%u density=%.3f normalized_input=1 HID_panel=1280x720",
+            width,height,(unsigned)res,(unsigned)(res>>32),(double)density);
+    }
     pthread_mutex_unlock(&focus_lock);
     if (old) ANativeWindow_release(old);
     if (next && !atomic_load(&input_bound)) {
+        /* HID panel units are fixed by the guest, independent of render size.
+         * Both Java input layers normalize against the adaptive SurfaceView. */
         dm_android_input_config input={.source="Android.SurfaceView.MotionEvent",.panel_width=1280,.panel_height=720,
             .source_ready=input_source_ready,.logical_npad_style=1,.logical_npad_id=0};
         int rc=dm_android_input_bind(&input);if(rc)return rc;atomic_store(&input_bound,1);

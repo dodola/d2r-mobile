@@ -2,10 +2,14 @@
 #include "../touch_controls_android.h"
 #include "../input_backend.h"
 #include "../../host/dm.h"
+#include <math.h>
 
 struct dm_flags g_flag;
 uint64_t g_t0_ns;
 static unsigned checks,flow_calls;
+static int safe_left_units,safe_right_units;
+void dm_ui_safe_left(int units){safe_left_units=units;}
+void dm_ui_safe_right(int units){safe_right_units=units;}
 #define CHECK(x) do {++checks;if(!(x))die("touch bridge fallback fixture line=%d",__LINE__);}while(0)
 static int ready(void *opaque){(void)opaque;return 1;}
 static int read_state(void *opaque,dm_android_touch_game_state *state){(void)opaque;(void)state;return 0;}
@@ -50,6 +54,57 @@ int main(void){
     unsigned before=flow_calls;CHECK(!dm_android_touch_event(&id,&x,&y,1,0));CHECK(flow_calls==before);
     dm_android_touch_bind_game_bridge(read_state,dispatch,NULL);CHECK(snapshot().controls.layout.target[DM_TC_PORTAL].r>0);
     fake.navigation=1;dm_android_touch_set_game_state(&fake);CHECK(snapshot().controls.navigation_mode);
+    /* A navigation button owns its contact: emit Npad only, never a second
+     * raw guest touchscreen press which could select/skip a dialogue too. */
+    CHECK(!dm_android_input_initialize_touch());
+    for(int target=DM_TC_MAIN;target<=DM_TC_SKILL4;++target){
+        s=snapshot();id=target+10;
+        x=s.controls.layout.target[target].x/s.controls.layout.width;
+        y=s.controls.layout.target[target].y/s.controls.layout.height;
+        CHECK(!dm_android_touch_event(&id,&x,&y,1,0));
+        CHECK(snapshot().controls.finger[0].target==target);
+        uint64_t touch[0x290/8];
+        CHECK(dm_android_input_read_touch(touch,1)==1 && touch[1]==0);
+        CHECK(!dm_android_input_read_npad(&pad,0,1) && pad.buttons==s.controls.layout.target[target].button);
+        CHECK(!dm_android_touch_event(&id,&x,&y,1,0));
+        CHECK(!dm_android_input_read_npad(&pad,0,1) && !pad.buttons);
+        CHECK(dm_android_input_read_touch(touch,1)==1 && touch[1]==0);
+        CHECK(!dm_android_touch_release(id,x,y));
+        CHECK(!dm_android_touch_event(NULL,NULL,NULL,0,0));
+        CHECK(!dm_android_input_read_npad(&pad,0,1) && !pad.buttons);
+        CHECK(dm_android_input_read_touch(touch,1)==1 && touch[1]==0);
+    }
+    /* Wide output and a cutout on either side must share the exact drawing /
+     * normalized hit geometry, without stretching button radii. A resize also
+     * releases a held button before replacing its target positions. */
+    fake.navigation=0;fake.panel_bits=0;fake.belt_open=0;dm_android_touch_set_game_state(&fake);
+    float radius=0;
+    for(int side=0;side<3;side++){
+        float left=side==1?48:0,right=side==2?48:0;
+        dm_android_touch_resize(side?1000:800,450,left,right);s=snapshot();
+        CHECK(safe_left_units==(int)roundf(left*2160/450));
+        CHECK(safe_right_units==(int)roundf(right*2160/450));
+        if(side)CHECK(s.controls.layout.target[DM_TC_MAIN].r==radius);
+        radius=s.controls.layout.target[DM_TC_MAIN].r;
+        CHECK(s.controls.layout.joy_x-s.controls.layout.joy_radius>=left);
+        for(int target=DM_TC_MAIN;target<=DM_TC_SKILL4;target++){
+            dm_tc_target t=s.controls.layout.target[target];
+            CHECK(t.x-t.r>=left && t.x+t.r<=s.controls.layout.width-right);
+            CHECK(t.y-t.r>=0 && t.y+t.r<=s.controls.layout.height);
+            x=t.x/s.controls.layout.width;y=t.y/s.controls.layout.height;
+            CHECK(dm_android_touch_hit(x,y)==target);
+            id=30+target;CHECK(!dm_android_touch_event(&id,&x,&y,1,0));
+            CHECK(snapshot().controls.finger[0].target==target);
+            CHECK(!dm_android_input_read_npad(&pad,0,1));
+            if(target==DM_TC_MAIN)CHECK(pad.buttons==t.button);
+            CHECK(!dm_android_touch_event(NULL,NULL,NULL,0,0));
+        }
+        id=50;x=s.controls.layout.target[DM_TC_MAIN].x/s.controls.layout.width;
+        y=s.controls.layout.target[DM_TC_MAIN].y/s.controls.layout.height;
+        CHECK(!dm_android_touch_event(&id,&x,&y,1,0));
+        dm_android_touch_resize(960,450,0,0);
+        CHECK(!dm_android_input_read_npad(&pad,0,1) && !pad.buttons);
+    }
     dm_android_touch_bind_game_bridge(read_state,NULL,NULL);CHECK(safe(snapshot()));CHECK(!snapshot().controls.navigation_mode);
     printf("ANDROID_TOUCH_BRIDGE_FALLBACK_OK checks=%u safe_legacy=1 full_rebind=1 unbind_cancels=1 private_flow_retired=1\n",checks);
     return 0;

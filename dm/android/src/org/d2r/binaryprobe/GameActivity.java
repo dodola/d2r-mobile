@@ -134,6 +134,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         android.util.Log.i("D2RAudio", "shared output; other apps may keep playing");
         surfaceThread.start();surfaceWorker=new Handler(surfaceThread.getLooper());
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        WindowManager.LayoutParams windowParams=getWindow().getAttributes();
+        windowParams.layoutInDisplayCutoutMode=WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        getWindow().setAttributes(windowParams);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
         FrameLayout root=new FrameLayout(this);root.setBackgroundColor(0xff0d0d0f);

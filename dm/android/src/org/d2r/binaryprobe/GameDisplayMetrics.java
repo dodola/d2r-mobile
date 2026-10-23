@@ -5,8 +5,9 @@ final class GameDisplayMetrics {
     static int[] fitGame(int availableWidth,int availableHeight) {
         if(availableWidth<=0||availableHeight<=0)return new int[]{0,0};
         int width=availableWidth,height=availableHeight;
-        if((long)width*9>(long)height*16)width=(int)((long)height*16/9);
-        else height=(int)((long)width*9/16);
+        // The guest renders wide screens at their own aspect ratio. Keep the
+        // 16:9 minimum only for narrow windows, where its panels cannot fit.
+        if((long)width*9<(long)height*16)height=(int)((long)width*9/16);
         return new int[]{Math.max(1,width),Math.max(1,height)};
     }
 

@@ -73,6 +73,57 @@ static void initialize(aout *a, void *guest) {
     pthread_create(&a->notify_th, NULL, event_notify, a);
 }
 
+/* Exercise the production render callback, including chunk and guest-buffer
+ * boundaries. Expected PCM is independent of the mixer implementation. */
+static int render_layout_checks(aout *a, void *guest) {
+    static const struct { int16_t in[6], out[2]; } cases[] = {
+        {{10000, 0, 0, 0, 0, 0}, {7070, 0}},
+        {{0, 10000, 0, 0, 0, 0}, {0, 7070}},
+        {{0, 0, 10000, 0, 0, 0}, {5000, 5000}},
+        {{0, 0, -10000, 0, 0, 0}, {-5000, -5000}},
+        {{0, 0, 0, 30000, 0, 0}, {0, 0}},
+        {{0, 0, 0, 0, 10000, 0}, {5000, 0}},
+        {{0, 0, 0, 0, 0, 10000}, {0, 5000}},
+        {{32767, 32767, 32767, 0, 32767, 32767}, {32767, 32767}},
+        {{-32768, -32768, -32768, 0, -32768, -32768}, {-32768, -32768}}
+    };
+    enum { FRAMES = AUDIO_MIX_FRAMES * 2 + 7, MISSING = 9 };
+    int16_t pcm[FRAMES * 6], rendered[(FRAMES + MISSING) * 2 + 2];
+    for (unsigned i = 0; i < FRAMES; ++i)
+        memcpy(pcm + i * 6, cases[i % (sizeof cases / sizeof *cases)].in, 12);
+    for (unsigned i = 0; i < sizeof rendered / sizeof *rendered; ++i) rendered[i] = 12345;
+    gbuf buffers[2];
+    h_au_SetBuf(&buffers[0], pcm, 3 * 12, 3 * 12);
+    h_au_SetBuf(&buffers[1], pcm + 3 * 6, (FRAMES - 3) * 12, (FRAMES - 3) * 12);
+    if (!h_au_Append(guest, &buffers[0]) || !h_au_Append(guest, &buffers[1])) return 0;
+    uint64_t copied = atomic_load(&g_game_bytes), underrun = atomic_load(&g_underrun);
+    if (h_au_Ch(guest) != 6) return 0;
+    audio_render(NULL, a, rendered + 1, 2);
+    if (h_au_Released(guest) || a->pos != 2 * 12) return 0;
+    audio_render(NULL, a, rendered + 1 + 4, FRAMES - 2 + MISSING);
+    if (h_au_Released(guest) != &buffers[0] || h_au_Released(guest) != &buffers[1] || h_au_Released(guest)) return 0;
+    if (atomic_load(&g_game_bytes) - copied != FRAMES * 12 || atomic_load(&g_underrun) - underrun != MISSING) return 0;
+    if (rendered[0] != 12345 || rendered[(FRAMES + MISSING) * 2 + 1] != 12345) return 0;
+    for (unsigned i = 0; i < FRAMES + MISSING; ++i) {
+        for (unsigned side = 0; side < 2; ++side) {
+            int16_t expected = i < FRAMES ? cases[i % (sizeof cases / sizeof *cases)].out[side] : 0;
+            if (rendered[1 + i * 2 + side] != expected) return 0;
+        }
+    }
+    /* Mono and stereo remain byte-exact, with the same queue accounting. */
+    for (int channels = 1; channels <= 2; ++channels) {
+        a->ch = channels;
+        int16_t input[4] = {1234, -5678, 32767, -32768}, output[6] = {12345, 0, 0, 0, 0, 12345};
+        gbuf buffer;
+        h_au_SetBuf(&buffer, input, sizeof input, sizeof input);
+        if (!h_au_Append(guest, &buffer)) return 0;
+        audio_render(NULL, a, output + 1, 4 / channels);
+        if (memcmp(input, output + 1, sizeof input) || output[0] != 12345 || output[5] != 12345 || h_au_Released(guest) != &buffer) return 0;
+    }
+    a->ch = CHANNELS;
+    return 1;
+}
+
 int main(void) {
     uint8_t guest[64], scratch[FRAME_BYTES * 2], payload[FRAME_BYTES * 2];
     aout *output = calloc(1, sizeof *output);
@@ -104,10 +155,12 @@ int main(void) {
     if (!h_au_Append(guest, &buffer)) return 12;
     dm_audio_suspend(1); memset(scratch, 1, sizeof scratch);
     audio_render(NULL, output, scratch, 1);
-    for (unsigned i = 0; i < FRAME_BYTES; ++i) if (scratch[i]) return 13;
+    for (unsigned i = 0; i < 4; ++i) if (scratch[i]) return 13;
     if (h_au_Released(guest) || output->pos != FRAME_BYTES) return 14;
     dm_audio_suspend(0); audio_render(NULL, output, scratch, 1);
-    if (memcmp(scratch, payload, FRAME_BYTES) || h_au_Released(guest) != &buffer) return 15;
+    int16_t mixed[2]; memcpy(mixed, scratch, sizeof mixed);
+    if (mixed[0] != 32767 || mixed[1] != 32767 || h_au_Released(guest) != &buffer) return 15;
+    if (!render_layout_checks(output, guest)) return 16;
     test t = {.guest = guest, .output = output};
     t.buffers = calloc(NBUF, sizeof *t.buffers); t.data = calloc(NBUF, sizeof *t.data); t.sizes = calloc(NBUF, sizeof *t.sizes);
     if (!t.buffers || !t.data || !t.sizes) return 11;

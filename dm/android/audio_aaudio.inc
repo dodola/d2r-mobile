@@ -1,6 +1,7 @@
 /* Android implementation of nn::audio AudioOut, included by hle_audio.c.
  * AAudio owns the render clock. There is no timer/null-sink success fallback.
- * The callback copies the original interleaved PCM16 channel layout unchanged.
+ * Guest 5.1 PCM is downmixed to stereo so index-based Android channel layouts
+ * cannot discard the centre (NPC dialogue). Mono/stereo pass through unchanged.
  * Explicit mute/background mute still uses a real started AAudio stream.
  * SDK SystemEvent creation stays on the calling guest thread; the ordinary
  * notifier only signals the already-bound host kernel write handle.
@@ -19,11 +20,13 @@ typedef struct { void *ptr; uint64_t cap, size; } gbuf;
 #define QMAX 64
 #define RELMAX QMAX
 #define AOMAX 8
+#define AUDIO_MIX_FRAMES 256
 
 typedef struct {
     pthread_mutex_t m, control;
     void *event;
     int ch, muted;
+    int16_t mixbuf[AUDIO_MIX_FRAMES * 6];
     _Atomic int state, closing;
     gbuf *q[QMAX], *rel[RELMAX];
     _Atomic uint32_t q_head, q_tail, rel_head, rel_tail;
@@ -108,10 +111,23 @@ static aaudio_data_callback_result_t audio_render(AAudioStream *stream, void *ct
     (void)stream;
     aout *a = ctx;
     if (frames <= 0) return AAUDIO_CALLBACK_RESULT_CONTINUE;
-    uint64_t size = (uint64_t)(uint32_t)frames * 2u * (unsigned)a->ch;
+    unsigned output_ch = a->ch == 6 ? 2u : (unsigned)a->ch;
+    uint64_t size = (uint64_t)(uint32_t)frames * 2u * output_ch;
     atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_device_frames, (uint32_t)frames, memory_order_relaxed);
-    pull(a, data, size);
+    if (a->ch == 6) {
+        /* Keep the guest queue in six-channel bytes and the device clock in
+         * frames. No allocation, locking or logging on the render thread. */
+        unsigned left = (unsigned)frames;
+        int16_t *dst = data;
+        while (left) {
+            unsigned count = left < AUDIO_MIX_FRAMES ? left : AUDIO_MIX_FRAMES;
+            pull(a, (uint8_t *)a->mixbuf, (uint64_t)count * 6u * sizeof(int16_t));
+            downmix51(a->mixbuf, dst, count);
+            dst += count * 2u;
+            left -= count;
+        }
+    } else pull(a, data, size);
     if (a->muted || atomic_load_explicit(&g_suspended, memory_order_relaxed)) memset(data, 0, (size_t)size);
     else {
         const int16_t *samples = data;
@@ -131,6 +147,7 @@ static void audio_error(AAudioStream *stream, void *ctx, aaudio_result_t error) 
 
 static int stream_open(aout *a) {
     int result = AAUDIO_ERROR_UNAVAILABLE;
+    int output_ch = a->ch == 6 ? 2 : a->ch;
     for (int attempt = 0; attempt < 2; ++attempt) {
         AAudioStreamBuilder *builder = NULL;
         result = AAudio_createStreamBuilder(&builder);
@@ -138,7 +155,7 @@ static int stream_open(aout *a) {
         AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
         AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
         AAudioStreamBuilder_setSampleRate(builder, RATE);
-        AAudioStreamBuilder_setChannelCount(builder, a->ch);
+        AAudioStreamBuilder_setChannelCount(builder, output_ch);
         AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
         AAudioStreamBuilder_setUsage(builder, AAUDIO_USAGE_GAME);
         AAudioStreamBuilder_setContentType(builder, AAUDIO_CONTENT_TYPE_MUSIC);
@@ -148,14 +165,14 @@ static int stream_open(aout *a) {
         result = AAudioStreamBuilder_openStream(builder, &a->stream);
         AAudioStreamBuilder_delete(builder);
         if (result != AAUDIO_OK) { a->stream = NULL; continue; }
-        if (AAudioStream_getSampleRate(a->stream) != RATE || AAudioStream_getChannelCount(a->stream) != a->ch ||
+        if (AAudioStream_getSampleRate(a->stream) != RATE || AAudioStream_getChannelCount(a->stream) != output_ch ||
             AAudioStream_getFormat(a->stream) != AAUDIO_FORMAT_PCM_I16) {
             AAudioStream_close(a->stream); a->stream = NULL; return AAUDIO_ERROR_INVALID_FORMAT;
         }
         int burst = AAudioStream_getFramesPerBurst(a->stream);
         if (burst > 0 && burst <= INT_MAX / 2) AAudioStream_setBufferSizeInFrames(a->stream, burst * 2);
-        LOG("AAudio opened PCM16 %d Hz %d channels device=%d burst=%d performance=%d", RATE, a->ch,
-            AAudioStream_getDeviceId(a->stream), burst, AAudioStream_getPerformanceMode(a->stream));
+        LOG("AAudio opened PCM16 %d Hz guest_channels=%d device_channels=%d downmix=%s device=%d burst=%d performance=%d", RATE, a->ch,
+            output_ch, a->ch == 6 ? "5.1-to-stereo" : "none", AAudioStream_getDeviceId(a->stream), burst, AAudioStream_getPerformanceMode(a->stream));
         return AAUDIO_OK;
     }
     return result;
@@ -292,7 +309,7 @@ HLE_FORCE("_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE", "close actual AAudio st
 }
 HLE_FORCE("_ZN2nn5audio16GetAudioOutStateEPKNS0_8AudioOutE", "original logical AudioOut state", int, h_au_State, const void *g) { return atomic_load_explicit(&ao(g)->state, memory_order_acquire); }
 HLE_FORCE("_ZN2nn5audio21GetAudioOutSampleRateEPKNS0_8AudioOutE", "actual verified 48 kHz stream format", int, h_au_Rate, const void *g) { (void)ao(g); return RATE; }
-HLE_FORCE("_ZN2nn5audio23GetAudioOutChannelCountEPKNS0_8AudioOutE", "unchanged original interleaved channels", int, h_au_Ch, const void *g) { return ao(g)->ch; }
+HLE_FORCE("_ZN2nn5audio23GetAudioOutChannelCountEPKNS0_8AudioOutE", "original guest channels before device downmix", int, h_au_Ch, const void *g) { return ao(g)->ch; }
 HLE_FORCE("_ZN2nn5audio23GetAudioOutSampleFormatEPKNS0_8AudioOutE", "actual PCM16 stream format", int, h_au_Fmt, const void *g) { (void)ao(g); return FMT_PCM16; }
 HLE_FORCE("_ZN2nn5audio21SetAudioOutBufferInfoEPNS0_14AudioOutBufferEPvmm", "original guest buffer descriptor layout", void, h_au_SetBuf, gbuf *b, void *p, uint64_t cap, uint64_t size) { b->ptr = p; b->cap = cap; b->size = size; }
 HLE_FORCE("_ZN2nn5audio28GetAudioOutBufferDataPointerEPKNS0_14AudioOutBufferE", "original PCM data pointer", void *, h_au_BufPtr, const gbuf *b) { return b->ptr; }
@@ -356,10 +373,11 @@ int dm_android_audio_probe_channels(int channels, dm_android_audio_metrics *out)
     int16_t *pcm = malloc(FRAMES * (unsigned)channels * BUFFERS * sizeof *pcm);
     if (!pcm) return ENOMEM;
     gbuf buffers[BUFFERS]; int result = 0;
-    /* Low-volume triangle wave, real nonzero PCM without an extra math lib. */
+    /* Six-channel probe exercises centre-only dialogue, not just front L/R. */
     for (int i = 0; i < FRAMES * BUFFERS; ++i) {
         int phase = i % 120, sample = phase < 60 ? phase * 40 - 1200 : 3600 - phase * 40;
-        for (int channel = 0; channel < channels; ++channel) pcm[i * channels + channel] = (int16_t)sample;
+        for (int channel = 0; channel < channels; ++channel)
+            pcm[i * channels + channel] = (int16_t)(channels == 6 && channel != 2 ? 0 : sample);
     }
     dm_android_audio_metrics before, after;
     dm_android_audio_snapshot(&before);

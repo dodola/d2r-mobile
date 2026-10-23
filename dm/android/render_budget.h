@@ -2,6 +2,19 @@
 #include <math.h>
 #include <stdint.h>
 
+/* Match the actual landscape viewport without raising the existing vertical
+ * workload. Width is aligned to eight pixels like the shared iOS profile.
+ * Narrow windows retain the guest UI's 16:9 minimum in a fitted viewport. */
+static inline uint64_t dm_android_display_resolution(unsigned w,unsigned h,int docked) {
+    unsigned height=docked?900u:720u;
+    uint64_t width=docked?1600u:1280u;
+    if(w && h && (uint64_t)w*9>(uint64_t)h*16) {
+        width=(((uint64_t)w*height+(uint64_t)h*4)/((uint64_t)h*8))*8;
+        if(width>8192)width=8192;
+    }
+    return ((uint64_t)height<<32)|width;
+}
+
 /* vickwv ef8b1ff/312c2f8: vertical output tiers and absolute world pixels. */
 static inline uint64_t dm_android_tier_resolution(unsigned w,unsigned h,int tier) {
     if(!w||!h||tier<0||tier>2)return 0;

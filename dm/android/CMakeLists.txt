@@ -110,6 +110,17 @@ add_executable(dm_android_input_probe input_probe.c)
 target_compile_options(dm_android_input_probe PRIVATE -Wall -Wextra -Werror -ffixed-x18)
 target_link_libraries(dm_android_input_probe PRIVATE dm_android_core)
 target_link_options(dm_android_input_probe PRIVATE -Wl,-z,max-page-size=16384)
+
+# Isolated PCM/queue probes; neither adds test hooks to the game APK.
+add_executable(dm_android_audio_device_probe EXCLUDE_FROM_ALL tests/t_audio_device.c)
+target_compile_definitions(dm_android_audio_device_probe PRIVATE _GNU_SOURCE)
+target_compile_options(dm_android_audio_device_probe PRIVATE -Wall -Wextra -Werror -Wno-format -Wno-unused-function -ffixed-x18)
+target_link_libraries(dm_android_audio_device_probe PRIVATE aaudio)
+add_executable(dm_android_audio_queue_probe EXCLUDE_FROM_ALL audio_queue_test.c)
+target_compile_definitions(dm_android_audio_queue_probe PRIVATE _GNU_SOURCE)
+target_compile_options(dm_android_audio_queue_probe PRIVATE -Wall -Wextra -Werror -Wno-format -Wno-unused-function -ffixed-x18)
+target_link_libraries(dm_android_audio_queue_probe PRIVATE aaudio)
+
 add_executable(dm_android_controller_back_probe EXCLUDE_FROM_ALL tests/t_controller_back.c)
 target_compile_options(dm_android_controller_back_probe PRIVATE -Wall -Wextra -Werror -ffixed-x18 -UNDEBUG)
 target_link_libraries(dm_android_controller_back_probe PRIVATE dm_android_core)
@@ -117,6 +128,9 @@ target_link_options(dm_android_controller_back_probe PRIVATE -Wl,-z,max-page-siz
 
 # Verify legacy touch controls stay usable until a complete private bridge binds.
 add_executable(dm_android_touch_bridge_fallback_probe EXCLUDE_FROM_ALL tests/t_touch_bridge_fallback.c)
+add_executable(dm_android_display_geometry_probe EXCLUDE_FROM_ALL tests/t_display_geometry.c)
+target_compile_options(dm_android_display_geometry_probe PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(dm_android_display_geometry_probe PRIVATE m)
 target_compile_options(dm_android_touch_bridge_fallback_probe PRIVATE -Wall -Wextra -Werror -ffixed-x18)
 target_link_libraries(dm_android_touch_bridge_fallback_probe PRIVATE dm_android_core)
 

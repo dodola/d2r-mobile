@@ -306,7 +306,13 @@ static void tick(void) {
         if(pulse_epoch!=controls.pulse_epoch){pulse_epoch=controls.pulse_epoch;pulse_samples=input.npad_samples;pulse_start=now;pulse_seen=0;}
         if(!pulse_seen && input.npad_samples>pulse_samples)pulse_seen=now;
         double hold=fmax(0.12,controls.pulse_hold_s);
-        if((pulse_seen && now-pulse_seen>=hold && input.npad_samples-pulse_samples>=3 && (!dm_cursor_pending || !dm_cursor_pending())) || now-pulse_start>2.0+hold) {
+        /* Direct navigation-button taps use a negative hold as a one-sample
+         * pulse.  A/B must be released before a dialog can consume the next
+         * menu layer; otherwise one finger tap can select two layers. */
+        int one_sample = controls.navigation_mode && controls.pulse_hold_s < 0;
+        if((one_sample && input.npad_samples>pulse_samples) ||
+           (!one_sample && pulse_seen && now-pulse_seen>=hold && input.npad_samples-pulse_samples>=3 && (!dm_cursor_pending || !dm_cursor_pending())) ||
+           now-pulse_start>2.0+hold) {
             dm_tc_pulse_end(&controls,pulse_epoch);pulse_samples=input.npad_samples;pulse_start=now;
         }
     }else if(dm_tc_pulse_pending(&controls) && (input.npad_samples-pulse_samples>=2 || now-pulse_start>0.5))dm_tc_pulse_resume(&controls);
@@ -317,10 +323,23 @@ static void tick(void) {
 void dm_android_touch_resize(float w,float h,float left,float right) {
     if(!isfinite(w)||!isfinite(h)||w<=0||h<=0)return;
     pthread_mutex_lock(&lock);dm_tc_set_tall_scale(1);dm_tc_set_safe_insets(left,right);
+    /* Keep the game's top-corner HUD inside the same cutout safe area as
+     * our controls. The title adapter consumes layout units (2160 high). */
+    extern void dm_ui_safe_left(int units) __attribute__((weak));
+    extern void dm_ui_safe_right(int units) __attribute__((weak));
+    if(dm_ui_safe_left)dm_ui_safe_left(isfinite(left)&&left>0?(int)fminf(800,roundf(left*2160/h)):0);
+    if(dm_ui_safe_right)dm_ui_safe_right(isfinite(right)&&right>0?(int)fminf(800,roundf(right*2160/h)):0);
     if(ready){cancel();dm_tc_resize(&controls,w,h);}else{dm_tc_init(&controls,w,h);ready=1;}
     apply_layout_setting();
     controls.mouse_click_mode=flow_callback!=NULL;
-    restrict_layout();pthread_mutex_unlock(&lock);
+    restrict_layout();
+    const dm_tc_layout *l=&controls.layout;
+    LOG("ANDROID_CONTROLS_LAYOUT viewport=%.3fx%.3f safe=%.3f,%.3f main=%.3f,%.3f,r%.3f joy=%.3f,%.3f,r%.3f belt1=%.3f,%.3f",
+        (double)w,(double)h,(double)left,(double)right,
+        (double)l->target[DM_TC_MAIN].x,(double)l->target[DM_TC_MAIN].y,(double)l->target[DM_TC_MAIN].r,
+        (double)l->joy_x,(double)l->joy_y,(double)l->joy_radius,
+        (double)l->target[DM_TC_BELT1].x,(double)l->target[DM_TC_BELT1].y);
+    pthread_mutex_unlock(&lock);
 }
 JNIEXPORT void JNICALL Java_org_d2r_binaryprobe_TouchControlsView_nativeResize(JNIEnv *env,jclass cls,jfloat w,jfloat h,jfloat left,jfloat right) {
     (void)env;(void)cls;dm_android_touch_resize(w,h,left,right);

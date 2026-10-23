@@ -239,12 +239,18 @@ void dm_backtrace(uint64_t fp) {
     }
 }
 uint64_t front_game_res(int docked) {
+    /* Surface loss during background save must not hand newly created guest
+     * threads a different aspect ratio. Retain the last valid viewport. */
+    static _Atomic uint64_t last_viewport;
+    dm_android_window_state window;dm_android_platform_get_window(&window);
+    uint64_t viewport=(uint64_t)window.height<<32|window.width;
+    if(window.width && window.height)atomic_store(&last_viewport,viewport);
+    else {viewport=atomic_load(&last_viewport);window.width=(uint32_t)viewport;window.height=(uint32_t)(viewport>>32);}
     const char *e=getenv("DM_RESOLUTION_TIER");
     if(e&&e[0]>='0'&&e[0]<='2'&&!e[1]){
-        dm_android_window_state window;dm_android_platform_get_window(&window);
         uint64_t size=dm_android_tier_resolution(window.width,window.height,e[0]-'0');
         if(size)return size;
     }
-    return ((uint64_t)(docked ? 900 : 720) << 32) | (docked ? 1600 : 1280);
+    return dm_android_display_resolution(window.width,window.height,docked);
 }
 __attribute__((weak)) uint64_t dm_game_res(int docked) { return front_game_res(docked); }
