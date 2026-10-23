@@ -806,6 +806,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-async-commit");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_ASYNC_COMMIT","1",1);
     unsetenv("DM_BC_PASSTHROUGH");unsetenv("DM_YIELD_BACKOFF");unsetenv("DM_TEXTURE_UPLOAD_BATCH");
+    unsetenv("DM_DISABLE_NAN_MINMAX");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-nan-minmax");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_NAN_MINMAX","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-bc-passthrough");
     if(access(driver_option,F_OK)==0)setenv("DM_BC_PASSTHROUGH","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-bc-passthrough");
@@ -891,6 +894,7 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_GUEST_WAIT_DIAG");
     marker_to_env("diagnostics/guest-wait-diag","DM_GUEST_WAIT_DIAG","1");
     unsetenv("DM_WSI_DIAG");
+    unsetenv("DM_PRESENT_PREROTATE");marker_to_env("diagnostics/present-prerotate.txt","DM_PRESENT_PREROTATE",NULL);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/wsi-diag");
     if(access(driver_option,F_OK)==0)setenv("DM_WSI_DIAG","1",1);
     unsetenv("DM_DRAW_TIMING");

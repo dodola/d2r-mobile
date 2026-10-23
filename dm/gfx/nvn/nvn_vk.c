@@ -10,6 +10,7 @@
 #include <android/native_window.h>
 #include <sys/system_properties.h>
 #include "nvn_vk_slot_policy.h"
+#include "nvn_vk_nan_minmax.h"
 #include "nvn_obj.h"
 #include "nvn_vk_attachment_plan.h"
 #include "nvn_vk_coverage.h"
@@ -38,7 +39,7 @@
 #include "../../android/nvn_platform_backend.h"
 
 void dm_guest_write_prepare(void *address,size_t length);
-static int g_bc_passthrough,g_texture_upload_batch;
+static int g_bc_passthrough,g_texture_upload_batch,g_nan_minmax;
 
 #define LIMIT_POOLS 512
 #define LIMIT_OBJECTS 4096
@@ -299,7 +300,8 @@ static struct {
     uint8_t *shader_index; size_t index_bytes;uint32_t shader_index_version;int shader_code_identity; char shader_root[1024]; ANativeWindow *window;int vi_crop[4];
     ShaderEntry *shader_entries;size_t shader_entry_capacity;ShaderLookup shader_lookup[SHADER_LOOKUP];
     VkSurfaceKHR surface; VkSwapchainKHR swapchain; VkImage *swap_images; VkImageLayout *swap_layouts;
-    uint32_t nswap; VkFormat swap_format; VkExtent2D swap_extent; int display_hz;
+    uint32_t nswap; VkFormat swap_format; VkExtent2D swap_extent,swap_window_extent; int display_hz;
+    int present_prerotate,swap_recheck;uint32_t swap_rotation;VkSurfaceTransformFlagBitsKHR swap_transform;
     VTexture present_encoding_bridge;
     _Atomic uint64_t fence,completed,present_count,frame; uint64_t draws,pass_count,uploads,pool_adds;
     int trace_frame,trace_ui,capture_feedback;_Atomic int window_origin,depth_mode;
@@ -677,6 +679,9 @@ static void backend_init(void) {
     G.profile=nvn_vk_gpu_profile_make(&G.properties,&driver_properties,&G.subgroup);
     G.quirks=nvn_vk_quirk_registry_resolve(&G.profile);
     G.pipeline_cache_key=nvn_vk_pipeline_cache_key_make(&G.properties,&G.profile,&G.quirks);
+    g_nan_minmax=getenv("DM_DISABLE_NAN_MINMAX")==NULL;
+    nvn_vk_pipeline_cache_key_nan_minmax(&G.pipeline_cache_key,g_nan_minmax);
+    fprintf(stderr,"[nvn-vulkan] NAN_MINMAX enabled=%d shader_abi=%u\n",g_nan_minmax,G.pipeline_cache_key.shader_abi);
     if(private_driver && !strcmp(private_driver,"turnip") && driver_properties.driverID!=VK_DRIVER_ID_MESA_TURNIP)die("requested private driver was not loaded",driver_properties.driverID);
     fprintf(stderr,"[nvn-vulkan] driver id=%u name=%s info=%s\n",driver_properties.driverID,driver_properties.driverName,driver_properties.driverInfo);
     G.depth_input_experiment=getenv("DM_DEPTH_INPUT_EXPERIMENT")!=NULL;
@@ -833,6 +838,10 @@ static void backend_init(void) {
     G.event_trace=getenv("DM_EVENT_TRACE")!=NULL;
     G.current_submission=&G.submission_slot;
     char slot_soc[PROP_VALUE_MAX]={0};__system_property_get("ro.soc.model",slot_soc);
+    /* SM8750 + Turnip 的方向补偿会短暂转置，默认在应用内预旋转；标记 0 可回退。
+     * SM8750 + Turnip orientation compensation intermittently transposes frames; pre-rotate by default, with marker 0 rollback. */
+    G.present_prerotate=getenv("DM_PRESENT_PREROTATE")?atoi(getenv("DM_PRESENT_PREROTATE"))!=0:
+        (driver_properties.driverID==VK_DRIVER_ID_MESA_TURNIP&&!strcmp(slot_soc,"SM8750"));
     unsigned slot_enable=(getenv("DM_SLOT_PUBLICATION")?NVN_SLOT_PUBLICATION:0)|(getenv("DM_UNIFORM_VERSIONS")?NVN_SLOT_UNIFORMS:0)|(getenv("DM_BUFFER_VERSIONS")?NVN_SLOT_BUFFERS:0);
     unsigned slot_disable=(getenv("DM_DISABLE_SLOT_PUBLICATION")?NVN_SLOT_PUBLICATION:0)|(getenv("DM_DISABLE_UNIFORM_VERSIONS")?NVN_SLOT_UNIFORMS:0)|(getenv("DM_DISABLE_BUFFER_VERSIONS")?NVN_SLOT_BUFFERS:0);
     NvnSlotPolicy slot_policy=nvn_vk_slot_policy(slot_soc,G.properties.deviceName,driver_properties.driverID==VK_DRIVER_ID_QUALCOMM_PROPRIETARY&&(!private_driver||!*private_driver),getenv("DM_RENDER_SLOTS"),slot_enable,slot_disable);
@@ -2385,15 +2394,22 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         bytes=dm_storage_bias_apply(bytes,&size,resources,s->h.nb,&s->storage_bias);if(!bytes)die("storage index compensation module bounds",0);
         if(s->storage_bias.mask)fprintf(stderr,"[nvn-vulkan] STORAGE_BIAS_MODULE shader=%s mask=%#llx bytes=%zu\n",s->key,(unsigned long long)s->storage_bias.mask,size);
     }
-    const char *dump=getenv("DM_ADAPTED_SHADER_DIR");
-    if(dump&&!warm){char path[1200];if(snprintf(path,sizeof(path),"%s/%s.spv",dump,s->key)>=(int)sizeof path)die("adapted shader dump path",0);
-        FILE *out=fopen(path,"wb");if(!out||fwrite(bytes,1,size,out)!=size)die("adapted shader dump",size);fclose(out);}
     {const char *ov=getenv("DM_SHADER_OVERRIDE_DIR");
         if(ov&&!warm){char opath[1200];FILE *of;
             if(snprintf(opath,sizeof opath,"%s/%s.spv",ov,s->key)<(int)sizeof opath&&(of=fopen(opath,"rb"))){
                 long on=(fseek(of,0,SEEK_END)==0)?ftell(of):-1;uint8_t *ob=(on>20&&on%4==0&&fseek(of,0,SEEK_SET)==0)?malloc((size_t)on):NULL;
                 if(ob&&fread(ob,1,(size_t)on,of)==(size_t)on){free(bytes);bytes=ob;size=(size_t)on;fprintf(stderr,"[nvn-vulkan] SHADER_OVERRIDE shader=%s bytes=%ld\n",s->key,on);}else free(ob);
                 fclose(of);}}}
+    /* 预热、正常加载和诊断覆盖统一应用修正，后续派生模块继承这些字节。
+     * Apply the same fix to warm-up, demand loads and diagnostic overrides; derived modules inherit these bytes. */
+    if(g_nan_minmax){
+        NvnVkNanMinmaxStats fix;
+        if(size%4||!nvn_vk_nan_minmax((uint32_t *)bytes,size/4,&fix))die("NaN minmax SPIR-V structure",size);
+        fprintf(stderr,"[nvn-vulkan] NAN_MINMAX_SHADER key=%s stage=%u warm=%d min=%zu max=%zu clamp=%zu\n",key,stage,warm,fix.min,fix.max,fix.clamp);
+    }
+    const char *dump=getenv("DM_ADAPTED_SHADER_DIR");
+    if(dump&&!warm){char path[1200];if(snprintf(path,sizeof(path),"%s/%s.spv",dump,s->key)>=(int)sizeof path)die("adapted shader dump path",0);
+        FILE *out=fopen(path,"wb");if(!out||fwrite(bytes,1,size,out)!=size)die("adapted shader dump",size);fclose(out);}
     VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=size,.pCode=(uint32_t *)bytes};
     CHECK(vkCreateShaderModule(G.device,&mi,NULL,&s->module));
     if(stage==0){
@@ -4588,6 +4604,7 @@ void mtl_sub_index(const uint64_t *handles,int n) {
     for(int i=0;i<n&&G.attachment_index_valid;i++)attachment_index_walk((const uint8_t *)(uintptr_t)handles[i],0);
 }
 
+#include "nvn_vk_present_rotate.h"
 static void swapchain_destroy_locked(void);
 void dm_vk_set_window(void *native) {
     mtl_init();pthread_mutex_lock(&G.lock);async_drain_locked();CHECK(cpu_work_queue_idle(G.queue));
@@ -4595,8 +4612,10 @@ void dm_vk_set_window(void *native) {
      * Retain its Vulkan surface instead of disconnecting and reconnecting the
      * producer. Invalidate only the swapchain if this window changed size. */
     if(native && G.window==native){
-        if(G.swapchain && ((uint32_t)ANativeWindow_getWidth(G.window)!=G.swap_extent.width ||
-                          (uint32_t)ANativeWindow_getHeight(G.window)!=G.swap_extent.height)){
+        VkSurfaceCapabilitiesKHR caps;int transform_changed=G.swapchain&&G.present_prerotate&&
+            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(G.physical,G.surface,&caps)==VK_SUCCESS&&caps.currentTransform!=G.swap_transform;
+        if(G.swapchain && (transform_changed||(uint32_t)ANativeWindow_getWidth(G.window)!=G.swap_window_extent.width ||
+                          (uint32_t)ANativeWindow_getHeight(G.window)!=G.swap_window_extent.height)){
             swapchain_destroy_locked();
         }
         pthread_mutex_unlock(&G.lock);return;
@@ -4646,12 +4665,24 @@ static void swapchain_make(VkFormat source_format) {
     fprintf(stderr,"[nvn-vulkan] PRESENT_ENCODING source_format=%u swap_format=%u colorspace=%u bridge=%d\n",source_format,chosen.format,chosen.colorSpace,present_srgb(source_format)!=present_srgb(chosen.format));
     G.swap_format=chosen.format;G.swap_extent=caps.currentExtent;
     if(G.swap_extent.width==UINT32_MAX)G.swap_extent=(VkExtent2D){(uint32_t)ANativeWindow_getWidth(G.window),(uint32_t)ANativeWindow_getHeight(G.window)};
+    G.swap_window_extent=G.swap_extent;G.swap_rotation=0;
+    G.swap_transform=caps.supportedTransforms&VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR?VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR:caps.currentTransform;
+    int rotated=G.present_prerotate&&(caps.supportedUsageFlags&VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)&&
+        (caps.currentTransform==VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR||caps.currentTransform==VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR||
+         caps.currentTransform==VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR||caps.currentTransform==VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR);
+    if(rotated){
+        G.swap_transform=caps.currentTransform;
+        G.swap_rotation=caps.currentTransform==VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR?1u:caps.currentTransform==VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR?2u:caps.currentTransform==VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR?3u:0u;
+        if(G.swap_rotation&1)G.swap_extent=(VkExtent2D){G.swap_extent.height,G.swap_extent.width};
+    }
+    fprintf(stderr,"[nvn-vulkan] PRESENT_PREROTATE requested=%d active=%d transform=%#x rotation=%u window=%ux%u swap=%ux%u usage=%#x\n",
+        G.present_prerotate,rotated,G.swap_transform,G.swap_rotation,G.swap_window_extent.width,G.swap_window_extent.height,G.swap_extent.width,G.swap_extent.height,caps.supportedUsageFlags);
     uint32_t count=caps.minImageCount+1;if(caps.maxImageCount && count>caps.maxImageCount)count=caps.maxImageCount;
     VkCompositeAlphaFlagBitsKHR alpha=VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;if(!(caps.supportedCompositeAlpha&alpha))alpha=VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
     if(!(caps.supportedCompositeAlpha&alpha))die("surface composite alpha",caps.supportedCompositeAlpha);
     VkSwapchainCreateInfoKHR i={.sType=VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,.surface=G.surface,.minImageCount=count,
       .imageFormat=chosen.format,.imageColorSpace=chosen.colorSpace,.imageExtent=G.swap_extent,.imageArrayLayers=1,
-      .imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT,.imageSharingMode=VK_SHARING_MODE_EXCLUSIVE,.preTransform=caps.supportedTransforms&VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR?VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR:caps.currentTransform,
+      .imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|(G.swap_rotation?VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT:0),.imageSharingMode=VK_SHARING_MODE_EXCLUSIVE,.preTransform=G.swap_transform,
       .compositeAlpha=alpha,.presentMode=VK_PRESENT_MODE_FIFO_KHR,.clipped=VK_TRUE};CHECK(vkCreateSwapchainKHR(G.device,&i,NULL,&G.swapchain));
     CHECK(vkGetSwapchainImagesKHR(G.device,G.swapchain,&G.nswap,NULL));if(!G.nswap)die("swapchain has no images",0);
     free(G.swap_images);free(G.swap_layouts);
@@ -4663,11 +4694,29 @@ static void swapchain_make(VkFormat source_format) {
     for(uint32_t k=0;k<G.nswap;k++)CHECK(vkCreateSemaphore(G.device,&sem_info,NULL,&G.swap_finished[k]));
 }
 static void swapchain_destroy_locked(void) {
+    present_rotate_destroy();
+    /* 预旋转采样桥接图像；先清视图缓存，避免新图像复用旧 Vulkan 句柄而命中旧视图。
+     * Pre-rotation samples the bridge image; drop cached views before a replacement can reuse its Vulkan handle. */
+    resource_cache_clear(&G.submission_slot2);
     if(G.present_encoding_bridge.image)vkDestroyImage(G.device,G.present_encoding_bridge.image,NULL);
     memory_release(G.present_encoding_bridge.memory,G.present_encoding_bridge.allocation_size,DM_VK_MEMORY_PRESENT);
     memset(&G.present_encoding_bridge,0,sizeof G.present_encoding_bridge);
     for(uint32_t k=0;k<G.nswap&&k<16;k++)if(G.swap_finished[k]){vkDestroySemaphore(G.device,G.swap_finished[k],NULL);G.swap_finished[k]=VK_NULL_HANDLE;}
     if(G.swapchain)vkDestroySwapchainKHR(G.device,G.swapchain,NULL);G.swapchain=VK_NULL_HANDLE;G.nswap=0;
+}
+/* 180 度翻转可能不触发 Surface 尺寸回调；SUBOPTIMAL 后在下一次录制前核对方向。
+ * A 180-degree rotation may not notify a Surface resize; recheck after SUBOPTIMAL before recording the next present. */
+static void present_refresh_transform(void) {
+    pthread_mutex_lock(&G.lock);
+    if(G.swapchain&&G.present_prerotate&&G.swap_recheck){
+        VkSurfaceCapabilitiesKHR caps;CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(G.physical,G.surface,&caps));
+        if(caps.currentTransform!=G.swap_transform||
+           (caps.currentExtent.width!=UINT32_MAX&&(caps.currentExtent.width!=G.swap_window_extent.width||caps.currentExtent.height!=G.swap_window_extent.height))){
+            async_drain_locked();CHECK(cpu_work_queue_idle(G.queue));swapchain_destroy_locked();
+        }
+        G.swap_recheck=0;
+    }
+    pthread_mutex_unlock(&G.lock);
 }
 static VTexture *present_encoded_source(VTexture *source) {
     if(present_srgb(source->format)==present_srgb(G.swap_format))return source;
@@ -4678,13 +4727,13 @@ static VTexture *present_encoded_source(VTexture *source) {
         (present_srgb(G.swap_format)?VK_FORMAT_B8G8R8A8_SRGB:VK_FORMAT_B8G8R8A8_UNORM);
     VTexture *t=&G.present_encoding_bridge;
     if(t->image&&(t->width!=source->width||t->height!=source->height||t->format!=format)){
-        CHECK(cpu_work_queue_idle(G.queue));vkDestroyImage(G.device,t->image,NULL);memory_release(t->memory,t->allocation_size,DM_VK_MEMORY_PRESENT);memset(t,0,sizeof(*t));
+        CHECK(cpu_work_queue_idle(G.queue));resource_cache_clear(&S);vkDestroyImage(G.device,t->image,NULL);memory_release(t->memory,t->allocation_size,DM_VK_MEMORY_PRESENT);memset(t,0,sizeof(*t));
     }
     if(!t->image){
         t->width=source->width;t->height=source->height;t->depth=1;t->format=format;t->source.d.levels=1;t->source.L.layers=1;
         VkImageCreateInfo ci={.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,.imageType=VK_IMAGE_TYPE_2D,.format=format,
             .extent={t->width,t->height,1},.mipLevels=1,.arrayLayers=1,.samples=VK_SAMPLE_COUNT_1_BIT,
-            .tiling=VK_IMAGE_TILING_OPTIMAL,.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
+            .tiling=VK_IMAGE_TILING_OPTIMAL,.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
         CHECK(vkCreateImage(G.device,&ci,NULL,&t->image));VkMemoryRequirements r;vkGetImageMemoryRequirements(G.device,t->image,&r);
         VkMemoryAllocateInfo ai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=r.size,.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
         t->allocation_size=r.size;t->memory=memory_allocate(&ai,DM_VK_MEMORY_PRESENT);CHECK(vkBindImageMemory(G.device,t->image,t->memory,0));
@@ -4703,7 +4752,7 @@ void dm_vk_set_layer_crop(int x,int y,int width,int height) {
 uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     if(present_cpu_depth++==0)present_cpu_started=dm_android_nvn_thread_cpu_ns();
     uint64_t present_started=dm_android_nvn_clock_ns();G.seg_index=0;
-    (void)period;if(!G.window)die("original game present requires Surface",0);sub_begin_ctx(&G.submission_slot2);
+    (void)period;if(!G.window)die("original game present requires Surface",0);present_refresh_transform();sub_begin_ctx(&G.submission_slot2);
     VTexture *t=texture_get(source,0);if(aspect(t->format)!=VK_IMAGE_ASPECT_COLOR_BIT)die("present depth texture",t->format);
     swapchain_make(t->format);
     if(G.present_count<2 || G.trace_frame)fprintf(stderr,"[nvn-vulkan] PRESENT_FORMAT frame=%llu source=%llu source_mem=%p source_format=%u swap_format=%u source_extent=%u,%u swap_extent=%u,%u\n",(unsigned long long)G.present_count+1,(unsigned long long)source->serial,source->mem,t->format,G.swap_format,t->width,t->height,G.swap_extent.width,G.swap_extent.height);
@@ -4719,13 +4768,20 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     uint32_t index=0;VkResult acquired=vkAcquireNextImageKHR(G.device,G.swapchain,UINT64_MAX,available,VK_NULL_HANDLE,&index);
     dm_android_nvn_work_wait_end(acquire_wait);G.pres_acq_ns+=dm_android_nvn_clock_ns()-present_started;
     if(acquired!=VK_SUCCESS && acquired!=VK_SUBOPTIMAL_KHR)die("swapchain acquisition",acquired);
+    if(acquired==VK_SUBOPTIMAL_KHR)G.swap_recheck=1;
     if(G.wsi_diag)wsi_diag_note(0,acquired);
     VkSemaphore finished=G.swap_finished[index];
     texture_transition(t,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkPipelineStageFlags wait_stage=G.swap_rotation?VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT:VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkImageLayout destination_layout=G.swap_rotation?VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    VkAccessFlags destination_access=G.swap_rotation?VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT:VK_ACCESS_TRANSFER_WRITE_BIT;
     VkImageMemoryBarrier barrier={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,.oldLayout=G.swap_layouts[index],
-       .newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
-       .dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,.image=G.swap_images[index],.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
-    vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,NULL,0,NULL,1,&barrier);
+       .newLayout=destination_layout,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+       .dstAccessMask=destination_access,.image=G.swap_images[index],.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
+    /* 布局转换的源阶段必须衔接提交中获取信号量的等待，不能提前改写仍在呈现的图像。
+     * Chain the layout transition to the submit's acquire wait; do not modify an image still being presented.
+     * 上游修复依据 / Upstream fix: jhaizhou-ops/d2r-mobile 43a14d3. */
+    vkCmdPipelineBarrier(S.command,wait_stage,wait_stage,0,0,NULL,0,NULL,1,&barrier);
     int x=0,y=0,w=t->width,h=t->height;if(crop && crop[2]>0 && crop[3]>0){x=crop[0];y=crop[1];w=crop[2];h=crop[3];}
     if(G.vi_crop[2]>0 && G.vi_crop[3]>0) {
         int right=x+w,bottom=y+h;
@@ -4745,12 +4801,13 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     VkFilter present_filter=src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST;
     /* Upscaling 1280x720 to the panel by about 2x: cubic keeps text and edges sharper than bilinear. */
     if(G.present_cubic&&(src_format.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_CUBIC_BIT_EXT))present_filter=VK_FILTER_CUBIC_EXT;
-    vkCmdBlitImage(S.command,encoded->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,G.swap_images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,present_filter);
-    barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=0;
-    vkCmdPipelineBarrier(S.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,NULL,0,NULL,1,&barrier);
+    if(G.swap_rotation)present_rotate_draw(encoded,index,x,y,w,h,flip_y);
+    else vkCmdBlitImage(S.command,encoded->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,G.swap_images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,present_filter);
+    barrier.oldLayout=destination_layout;barrier.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.srcAccessMask=destination_access;barrier.dstAccessMask=0;
+    vkCmdPipelineBarrier(S.command,wait_stage,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,NULL,0,NULL,1,&barrier);
     G.swap_layouts[index]=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;CHECK(vkEndCommandBuffer(S.command));
-    VkPipelineStageFlags wait_stage=VK_PIPELINE_STAGE_TRANSFER_BIT;VkSubmitInfo si={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.waitSemaphoreCount=1,
+    VkSubmitInfo si={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.waitSemaphoreCount=1,
       .pWaitSemaphores=&available,.pWaitDstStageMask=&wait_stage,.commandBufferCount=1,.pCommandBuffers=&S.command,
       .signalSemaphoreCount=1,.pSignalSemaphores=&finished};
     VkFence fence=S.gpu_fence;
@@ -4760,6 +4817,7 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
     uint64_t present_wait=dm_android_nvn_work_wait_begin(DM_NVN_WAIT_PRESENT);
     VkResult presented=vkQueuePresentKHR(G.queue,&pi);dm_android_nvn_work_wait_end(present_wait);
     if(presented!=VK_SUCCESS && presented!=VK_SUBOPTIMAL_KHR)die("queue present",presented);
+    if(presented==VK_SUBOPTIMAL_KHR)G.swap_recheck=1;
     if(G.wsi_diag)wsi_diag_note(1,presented);
     int async_present=G.async_enabled&&!capture.b&&!G.trace_frame&&!S.ntrace_captures;
     if(async_present)S.present_available=available;

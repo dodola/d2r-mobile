@@ -18,7 +18,10 @@
 
 #define NVN_VK_PIPELINE_CACHE_KEY_VERSION 2u
 /* Bump when shader rewriting or pipeline interpretation changes incompatibly. */
-#define NVN_VK_PIPELINE_SHADER_ABI 3u
+#define NVN_VK_PIPELINE_SHADER_ABI 4u
+/* NaN 语义开关也属于着色器身份，隔离驱动缓存和预热清单。
+ * The NaN semantic switch is part of shader identity, separating driver caches and warm-up manifests. */
+#define NVN_VK_PIPELINE_SHADER_NAN_MINMAX (1u << 16)
 
 typedef struct {
     uint32_t version;
@@ -77,6 +80,11 @@ static inline NvnVkPipelineCacheKey nvn_vk_pipeline_cache_key_make(
 static inline int nvn_vk_pipeline_cache_key_equal(
     const NvnVkPipelineCacheKey *a, const NvnVkPipelineCacheKey *b) {
     return a && b && memcmp(a, b, sizeof *a) == 0;
+}
+
+static inline void nvn_vk_pipeline_cache_key_nan_minmax(NvnVkPipelineCacheKey *key,int enabled) {
+    key->shader_abi=(key->shader_abi&~NVN_VK_PIPELINE_SHADER_NAN_MINMAX)|
+        (enabled?NVN_VK_PIPELINE_SHADER_NAN_MINMAX:0u);
 }
 
 #endif

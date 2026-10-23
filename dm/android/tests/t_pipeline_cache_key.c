@@ -28,6 +28,15 @@ int main(void) {
     NvnVkPipelineCacheKey a = nvn_vk_pipeline_cache_key_make(&properties, &profile, &registry);
     NvnVkPipelineCacheKey b = nvn_vk_pipeline_cache_key_make(&properties, &profile, &registry);
     assert(nvn_vk_pipeline_cache_key_equal(&a, &b));
+    /* NaN 开关隔离两套缓存，重复设置保持幂等。
+     * The NaN switch separates caches, and repeated setting is idempotent. */
+    nvn_vk_pipeline_cache_key_nan_minmax(&b,1);
+    assert(!nvn_vk_pipeline_cache_key_equal(&a,&b));
+    NvnVkPipelineCacheKey enabled=b;
+    nvn_vk_pipeline_cache_key_nan_minmax(&b,1);
+    assert(nvn_vk_pipeline_cache_key_equal(&enabled,&b));
+    nvn_vk_pipeline_cache_key_nan_minmax(&b,0);
+    assert(nvn_vk_pipeline_cache_key_equal(&a,&b));
     assert(a.quirk_flags & NVN_VK_QUIRK_LOWER_SKIN_UBO);
     assert(a.quirk_flags & NVN_VK_QUIRK_LOWER_COMPUTE_BALLOT);
 
