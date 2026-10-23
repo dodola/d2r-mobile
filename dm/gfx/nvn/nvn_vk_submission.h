@@ -19,8 +19,24 @@ typedef enum {
     SUBMISSION_GPU_DONE, SUBMISSION_PUBLISHED, SUBMISSION_RETIRED
 } SubmissionPhase;
 
+#include "nvn_vk_uniform_arena.h"
+#define UNIFORM_SOURCES 4096
 typedef struct {
-    SubmissionPhase phase;
+    Range range;uint64_t serial,epoch,stamp;int writes;VkDescriptorBufferInfo info;
+} UniformSource;
+#define READ_CACHE_ENTRIES 128
+typedef struct {
+    Range range;uint64_t serial,stamp,epoch;VBuffer buffer;UniformSource current;
+} ReadPersistent;
+typedef struct {
+    NvnUniformArena uniform_arena;
+    UniformSource uniform_sources[UNIFORM_SOURCES];
+    NvnUniformArena read_arena;
+    UniformSource read_sources[UNIFORM_SOURCES];
+    ReadPersistent read_cache[READ_CACHE_ENTRIES];
+    uint64_t read_cache_bytes;
+    Range read_writer_ranges[2*LIMIT_BINDINGS];unsigned read_writer_count;
+    _Atomic SubmissionPhase phase;
     int slot_index; /* Render slot (0..3); -1 for the present slot. */
     uint64_t epoch,ticket;
     pthread_t recorder;
@@ -51,6 +67,12 @@ typedef struct {
     unsigned depth_input_guard_active,depth_input,pass_depth_input;
     uint64_t wb_stage_total;
     int wb_staged;
+    /* 独立发布的数据与测量随槽退役，发布线程不修改全局帧统计。
+     * Publication data and measurements retire with the slot; the worker never mutates global frame statistics.
+     */
+    size_t publication_copy_count;
+    uint64_t publication_raw_bytes,publication_wait_ns,publication_cpu_ns;
+    int publication_overlap;
     struct { uint32_t stages,access; } pend[4];
     NvnVkCommandState command_state;
     uint64_t null_bindings[6];

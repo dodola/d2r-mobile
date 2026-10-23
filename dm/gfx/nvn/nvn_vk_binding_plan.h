@@ -11,7 +11,8 @@ typedef PoolUploadRange Range;
 
 typedef struct {
     Range range;
-    uint64_t pool_serial,offset;
+    uint64_t pool_serial,offset,arena_epoch;
+    VkBuffer buffer;
     uint32_t pool_slot,bias;
 } BindingBuffer;
 typedef struct {

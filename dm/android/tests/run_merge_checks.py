@@ -25,6 +25,12 @@ def main():
     hooks = 'dm/gfx/tests/t_dirty_host_hooks.c'
     core = 'dm/gfx/nvn/nvn_dirty.c'
     tests = [
+        ('nan-minmax', ['dm/gfx/tests/t_nan_minmax.c'], [], [[]]),
+        ('slot-policy', ['dm/gfx/tests/t_slot_policy.c'], [], [[]]),
+        ('snapshot-patch', ['dm/gfx/tests/t_snapshot_patch.c', core, hooks], ['-D__ANDROID__'], [[]]),
+        ('slot-pages', ['dm/gfx/tests/t_slot_pages.c'], [], [[]]),
+        ('uniform-arena', ['dm/gfx/tests/t_uniform_arena.c'], [], [[]]),
+        ('publication-queue', ['dm/gfx/tests/t_publication_queue.c'], [], [[]]),
         ('pace', ['dm/gfx/tests/t_pace.c'], [], [[]]),
         ('present', ['dm/android/tests/t_present_policy.c'], [], [[]]),
         ('dirty-race', ['dm/gfx/tests/t_dirty_race.c', hooks], ['-D__ANDROID__'], [[]]),

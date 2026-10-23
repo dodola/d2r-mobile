@@ -806,6 +806,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-async-commit");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_ASYNC_COMMIT","1",1);
     unsetenv("DM_BC_PASSTHROUGH");unsetenv("DM_YIELD_BACKOFF");unsetenv("DM_TEXTURE_UPLOAD_BATCH");
+    unsetenv("DM_DISABLE_NAN_MINMAX");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-nan-minmax");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_NAN_MINMAX","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-bc-passthrough");
     if(access(driver_option,F_OK)==0)setenv("DM_BC_PASSTHROUGH","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-bc-passthrough");
@@ -891,6 +894,7 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_GUEST_WAIT_DIAG");
     marker_to_env("diagnostics/guest-wait-diag","DM_GUEST_WAIT_DIAG","1");
     unsetenv("DM_WSI_DIAG");
+    unsetenv("DM_PRESENT_PREROTATE");marker_to_env("diagnostics/present-prerotate.txt","DM_PRESENT_PREROTATE",NULL);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/wsi-diag");
     if(access(driver_option,F_OK)==0)setenv("DM_WSI_DIAG","1",1);
     unsetenv("DM_DRAW_TIMING");
@@ -937,6 +941,25 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_DIAG_DUMP_FRAME");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/dump-frame.txt");
     {FILE *df=fopen(driver_option,"r");if(df){char dv[24]={0};size_t dn=fread(dv,1,23,df);fclose(df);if(dn)setenv("DM_DIAG_DUMP_FRAME",dv,1);}}
+    /* 独立发布实验开关，默认关闭以便单槽回退对比。
+     * Independent publication experiment, off by default for single-slot rollback comparisons.
+     */
+    unsetenv("DM_SLOT_PUBLICATION");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-slot-publication");
+    if(access(driver_option,F_OK)==0)setenv("DM_SLOT_PUBLICATION","1",1);
+    unsetenv("DM_UNIFORM_VERSIONS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-uniform-versions");
+    if(access(driver_option,F_OK)==0)setenv("DM_UNIFORM_VERSIONS","1",1);
+    unsetenv("DM_BUFFER_VERSIONS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-buffer-versions");
+    if(access(driver_option,F_OK)==0)setenv("DM_BUFFER_VERSIONS","1",1);
+    unsetenv("DM_DISABLE_SLOT_PUBLICATION");unsetenv("DM_DISABLE_UNIFORM_VERSIONS");unsetenv("DM_DISABLE_BUFFER_VERSIONS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-slot-publication");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SLOT_PUBLICATION","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-uniform-versions");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_UNIFORM_VERSIONS","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-buffer-versions");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_BUFFER_VERSIONS","1",1);
     unsetenv("DM_RENDER_SLOTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/render-slots.txt");
     {FILE *rf=fopen(driver_option,"r");if(rf){char rv[8]={0};size_t rn=fread(rv,1,7,rf);fclose(rf);if(rn)setenv("DM_RENDER_SLOTS",rv,1);}}
