@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 启动器的金铜色原生控件与弹窗；不改变游戏 Activity 的主题。
+     Brass native controls and dialogs for the launcher; the game Activity theme is unchanged. -->
+<resources>
+    <style name="D2RLauncherTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#CDA875</item>
+        <item name="android:colorControlActivated">#CDA875</item>
+        <item name="android:colorControlHighlight">#30CDA875</item>
+        <item name="android:textColorPrimary">#EEE7DB</item>
+        <item name="android:textColorSecondary">#B0AAA0</item>
+        <item name="android:windowBackground">#101315</item>
+        <item name="android:alertDialogTheme">@style/D2RLauncherDialog</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+    <style name="D2RLauncherDialog" parent="android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#CDA875</item>
+        <item name="android:colorControlActivated">#CDA875</item>
+        <item name="android:colorControlHighlight">#30CDA875</item>
+        <item name="android:textColorPrimary">#EEE7DB</item>
+        <item name="android:textColorSecondary">#B0AAA0</item>
+        <item name="android:windowBackground">@drawable/launcher_dialog</item>
+        <item name="android:backgroundDimAmount">0.7</item>
+    </style>
+</resources>

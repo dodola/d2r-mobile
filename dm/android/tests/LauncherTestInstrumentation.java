@@ -32,7 +32,8 @@ public final class LauncherTestInstrumentation extends Instrumentation {
     private void recreate(Integer orientation)throws Exception {ActivityMonitor m=addMonitor(InstallerActivity.class.getName(),null,false);
         main(()->{if(orientation==null)activity.recreate();else activity.setRequestedOrientation(orientation);});
         Activity next=waitForMonitorWithTimeout(m,15000);removeMonitor(m);check(next instanceof InstallerActivity,"activity recreated");activity=(InstallerActivity)next;waitForIdleSync();}
-    private void select(String valueField,int index){main(()->((android.view.View)((TextView)field(valueField)).getParent()).performClick());
+    private void select(String valueField,int index)throws Exception {main(()->{android.view.View row=(android.view.View)field(valueField);while(!row.isClickable())row=(android.view.View)row.getParent();row.performClick();});
+        if(valueField.equals("qualityValue"))screenshot("launcher-choice");
         main(()->{AlertDialog d=(AlertDialog)field("choiceDialog");check(d!=null,"choice dialog opens");ListView list=d.getListView();list.performItemClick(null,index,list.getAdapter().getItemId(index));});}
     @Override public void onCreate(Bundle b){super.onCreate(b);start();}
     @Override public void onStart(){Bundle result=new Bundle();try{

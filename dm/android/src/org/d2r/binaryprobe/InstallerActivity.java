@@ -18,7 +18,7 @@ import java.util.*;
 
 public final class InstallerActivity extends Activity {
     private static final int PICK_PACKAGE=917,EXPORT_SAVE=918,IMPORT_SAVE=919;
-    private static final int GOLD=0xffd4b17b,MUTED=0xffa9a49b,INK=0xff101114,TEXT=0xffeee8dd,ERROR=0xffffb5a7;
+    private static final int GOLD=LauncherStyle.GOLD,MUTED=LauncherStyle.MUTED,INK=LauncherStyle.INK,TEXT=LauncherStyle.IVORY,ERROR=0xffffb5a7;
     private OfflineInstallSession session;
     private SaveTransferSession saves;
     private LauncherSettingsStore store;
@@ -37,37 +37,48 @@ public final class InstallerActivity extends Activity {
     private String f(String key,Object... args){return strings.format("dmLaunch"+key,args);}
     private int dp(int n){return Math.round(n*getResources().getDisplayMetrics().density);}
     private TextView text(String value,int size,int color,boolean bold){
-        TextView v=new TextView(this);v.setText(value);v.setTextColor(color);v.setTextSize(size);v.setLineSpacing(dp(3),1);
+        TextView v=new TextView(this);v.setText(value);v.setTextColor(LauncherStyle.colors(color,0xff77756f));v.setTextSize(size);v.setLineSpacing(dp(3),1);
         if(bold)v.setTypeface(Typeface.DEFAULT,Typeface.BOLD);return v;
     }
     private LinearLayout column(){LinearLayout v=new LinearLayout(this);v.setOrientation(LinearLayout.VERTICAL);return v;}
     private void add(LinearLayout parent,View v,int top){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2);p.topMargin=dp(top);parent.addView(v,p);}
     private GradientDrawable background(int color,int border,int radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));if(border!=0)d.setStroke(dp(1),border);return d;}
-    private LinearLayout card(String title){LinearLayout c=column();c.setPadding(dp(20),dp(20),dp(20),dp(20));c.setBackground(background(0xff1b1c20,0xff39342c,18));
-        TextView h=text(title,19,GOLD,true);h.setAccessibilityHeading(true);add(c,h,0);return c;}
+    private LauncherStyle.Glyph glyph(int kind,int size,int color){return new LauncherStyle.Glyph(kind,dp(size),LauncherStyle.colors(color,0xff77756f));}
+    private ImageView icon(int kind,int size,int color){ImageView image=new ImageView(this);image.setImageDrawable(glyph(kind,size,color));image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);return image;}
+    private void buttonIcon(Button button,int kind,boolean primary){button.setCompoundDrawablesRelativeWithIntrinsicBounds(glyph(kind,20,primary?INK:GOLD),null,null,null);button.setCompoundDrawablePadding(dp(8));}
+    private LinearLayout card(String title,int kind){LinearLayout c=column();c.setPadding(dp(18),dp(18),dp(18),dp(18));
+        c.setBackground(LauncherStyle.surface(0xeb24292e,0xf014191e,0x887b6850,dp(14)));c.setElevation(dp(3));
+        LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.addView(icon(kind,22,GOLD),new LinearLayout.LayoutParams(dp(22),dp(22)));
+        TextView h=text(title,19,TEXT,false);h.setTypeface(Typeface.create("serif",Typeface.NORMAL));h.setAccessibilityHeading(true);
+        LinearLayout.LayoutParams hp=new LinearLayout.LayoutParams(0,-2,1);hp.leftMargin=dp(10);header.addView(h,hp);add(c,header,0);
+        View rule=new View(this);rule.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,new int[]{0x99826a49,0x107c6b54}));
+        LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,dp(1));rp.topMargin=dp(14);c.addView(rule,rp);return c;}
     private Button button(String label,boolean primary){Button b=new Button(this);b.setText(label);b.setTextSize(16);b.setAllCaps(false);b.setMinHeight(dp(52));
-        b.setPadding(dp(12),dp(8),dp(12),dp(8));b.setTextColor(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{}},new int[]{MUTED,primary?INK:TEXT}));
-        b.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{android.R.attr.state_pressed},new int[]{}},new int[]{0xff343438,primary?0xffedcd9b:0xff49433a,primary?GOLD:0xff302e2a}));return b;}
-    private TextView row(LinearLayout parent,String title,Runnable action){LinearLayout r=column();r.setPadding(dp(4),dp(12),dp(4),dp(12));r.setMinimumHeight(dp(64));
-        add(r,text(title,14,MUTED,false),0);TextView value=text("",17,TEXT,true);add(r,value,4);r.setFocusable(true);r.setClickable(true);
-        android.util.TypedValue attr=new android.util.TypedValue();getTheme().resolveAttribute(android.R.attr.selectableItemBackground,attr,true);r.setBackgroundResource(attr.resourceId);
-        r.setOnClickListener(v->action.run());add(parent,r,4);return value;}
-    @Override public void onCreate(Bundle state){super.onCreate(state);
+        b.setPadding(dp(14),dp(10),dp(14),dp(10));b.setTextColor(LauncherStyle.colors(primary?INK:TEXT,0xff85837c));b.setTextSize(primary?17:14);b.setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL));
+        b.setBackgroundTintList(null);b.setBackground(LauncherStyle.control(primary,dp(9)));b.setElevation(primary?dp(4):0);b.setStateListAnimator(null);return b;}
+    private TextView row(LinearLayout parent,String title,int kind,Runnable action){LinearLayout r=new LinearLayout(this);r.setGravity(Gravity.CENTER_VERTICAL);r.setPadding(dp(12),dp(10),dp(12),dp(10));r.setMinimumHeight(dp(72));
+        r.addView(icon(kind,22,GOLD),new LinearLayout.LayoutParams(dp(22),dp(22)));LinearLayout labels=column();LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,-2,1);lp.leftMargin=dp(12);lp.rightMargin=dp(8);r.addView(labels,lp);
+        add(labels,text(title,12,MUTED,false),0);TextView value=text("",16,TEXT,true);add(labels,value,3);
+        r.addView(icon(LauncherStyle.CHEVRON,16,GOLD),new LinearLayout.LayoutParams(dp(16),dp(16)));r.setFocusable(true);r.setClickable(true);r.setScreenReaderFocusable(true);r.setBackground(LauncherStyle.row(dp(10)));
+        r.setOnClickListener(v->action.run());add(parent,r,7);return value;}
+    @Override public void onCreate(Bundle state){int theme=getResources().getIdentifier("D2RLauncherTheme","style",getPackageName());if(theme!=0)setTheme(theme);super.onCreate(state);
         strings=new LauncherStrings(getResources().getConfiguration().getLocales().get(0));
         if(GameSessionGate.guestRunning()){
             steppedAside=true;startActivity(new Intent(this,GameActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));finish();return;
         }
         session=OfflineInstallSession.get(this);saves=SaveTransferSession.get(this);store=new LauncherSettingsStore(getFilesDir());
         picking=state!=null&&state.getBoolean("picking");
-        getWindow().setStatusBarColor(INK);getWindow().setNavigationBarColor(INK);
-        LinearLayout screen=column();screen.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,new int[]{0xff222029,INK,0xff1b1712}));
+        getWindow().setStatusBarColor(0xff131b23);getWindow().setNavigationBarColor(INK);
+        LinearLayout screen=column();screen.setBackground(new LauncherStyle.Backdrop());
         screen.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());return i;});
-        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);screen.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-        LinearLayout center=column();center.setGravity(Gravity.CENTER_HORIZONTAL);center.setPadding(dp(20),dp(28),dp(20),dp(28));scroll.addView(center);
+        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);scroll.setClipToPadding(false);scroll.setVerticalScrollBarEnabled(false);screen.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        LinearLayout center=column();center.setGravity(Gravity.CENTER_HORIZONTAL);center.setPadding(dp(20),dp(22),dp(20),dp(24));scroll.addView(center);
         LinearLayout content=column();center.addView(content,new LinearLayout.LayoutParams(-1,-2));
-        add(content,text("D2R MOBILE",14,GOLD,true),0);TextView title=text(t("Title"),30,TEXT,true);title.setAccessibilityHeading(true);add(content,title,10);
-        add(content,text(t("Subtitle"),15,MUTED,false),8);
-        body=column();add(content,body,24);resourceCard=card(t("Resources"));optionsColumn=column();
+        LinearLayout brand=new LinearLayout(this);brand.setGravity(Gravity.CENTER_VERTICAL);brand.addView(icon(LauncherStyle.CREST,30,GOLD),new LinearLayout.LayoutParams(dp(30),dp(30)));
+        TextView wordmark=text("D2R MOBILE",15,GOLD,true);wordmark.setLetterSpacing(.18f);LinearLayout.LayoutParams wp=new LinearLayout.LayoutParams(-2,-2);wp.leftMargin=dp(10);brand.addView(wordmark,wp);add(content,brand,0);
+        TextView title=text(t("Title"),28,TEXT,false);title.setTypeface(Typeface.create("serif",Typeface.NORMAL));title.setAccessibilityHeading(true);add(content,title,12);
+        add(content,text(t("Subtitle"),13,MUTED,false),4);
+        body=column();add(content,body,20);resourceCard=card(t("Resources"),LauncherStyle.PACKAGE);optionsColumn=column();
         body.addView(resourceCard,new LinearLayout.LayoutParams(-1,-2));body.addView(optionsColumn,new LinearLayout.LayoutParams(-1,-2));
         center.addOnLayoutChangeListener((v,l,tp,r,b,ol,ot,or,ob)->{
             int w=Math.min(dp(960),Math.max(0,r-l-center.getPaddingLeft()-center.getPaddingRight()));
@@ -76,29 +87,31 @@ public final class InstallerActivity extends Activity {
                 LinearLayout.LayoutParams a=new LinearLayout.LayoutParams(wide?0:-1,-2,wide?0.9f:0),o=new LinearLayout.LayoutParams(wide?0:-1,-2,wide?1.1f:0);
                 o.leftMargin=wide?dp(18):0;o.topMargin=wide?0:dp(18);resourceCard.setLayoutParams(a);optionsColumn.setLayoutParams(o);}
         });
-        heading=text(session.title,22,TEXT,true);heading.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);add(resourceCard,heading,20);
-        message=text(t("ResourceHint"),15,MUTED,false);add(resourceCard,message,10);
+        heading=text(session.title,18,TEXT,true);heading.setCompoundDrawablePadding(dp(8));heading.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);add(resourceCard,heading,16);
+        message=text(t("ResourceHint"),14,MUTED,false);add(resourceCard,message,10);
         progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);progress.setMax(1000);progress.setProgressTintList(ColorStateList.valueOf(GOLD));progress.setIndeterminateTintList(ColorStateList.valueOf(GOLD));add(resourceCard,progress,16);
-        amount=text("",13,MUTED,false);add(resourceCard,amount,12);
+        amount=text("",12,MUTED,false);amount.setPadding(dp(10),dp(8),dp(10),dp(8));amount.setBackground(background(0x8010171b,0x305b625b,6));add(resourceCard,amount,14);
         choose=button(t("PickPackage"),true);choose.setOnClickListener(v->{if(session.state.ready())openGame();else pickPackage();});
         cancel=button(t("Stop"),false);cancel.setOnClickListener(v->confirmCancel());add(resourceCard,cancel,4);
-        Button help=button(t("Help"),false);help.setOnClickListener(v->new AlertDialog.Builder(this).setTitle(t("Help")).setMessage(t("HelpBody")).setPositiveButton(android.R.string.ok,null).show());add(resourceCard,help,16);
-        LinearLayout graphics=card(t("Display"));optionsColumn.addView(graphics,new LinearLayout.LayoutParams(-1,-2));settings=column();add(graphics,settings,8);
-        qualityValue=row(settings,t("Quality"),this::chooseQuality);driverValue=row(settings,t("Driver"),this::chooseDriver);
-        fps=new Switch(this);fps.setText(t("Fps"));fps.setContentDescription(t("FpsHint"));fps.setTextSize(16);fps.setTextColor(TEXT);fps.setMinHeight(dp(56));fps.setThumbTintList(ColorStateList.valueOf(GOLD));add(settings,fps,4);
+        Button help=button(t("Help"),false);buttonIcon(help,LauncherStyle.HELP,false);help.setOnClickListener(v->new AlertDialog.Builder(this).setTitle(t("Help")).setMessage(t("HelpBody")).setPositiveButton(android.R.string.ok,null).show());add(resourceCard,help,16);
+        LinearLayout graphics=card(t("Display"),LauncherStyle.DISPLAY);optionsColumn.addView(graphics,new LinearLayout.LayoutParams(-1,-2));settings=column();add(graphics,settings,3);
+        qualityValue=row(settings,t("Quality"),LauncherStyle.QUALITY,this::chooseQuality);driverValue=row(settings,t("Driver"),LauncherStyle.DRIVER,this::chooseDriver);
+        fps=new Switch(this);fps.setText(t("Fps"));fps.setContentDescription(t("FpsHint"));fps.setTextSize(15);fps.setTextColor(LauncherStyle.colors(TEXT,0xff77756f));fps.setMinHeight(dp(62));fps.setPadding(dp(12),dp(6),dp(12),dp(6));fps.setSwitchPadding(dp(12));fps.setBackground(LauncherStyle.row(dp(10)));
+        fps.setThumbTintList(new ColorStateList(new int[][]{{-android.R.attr.state_enabled},{android.R.attr.state_checked},{}},new int[]{0xff656665,0xffedc993,0xff9e9e95}));
+        fps.setTrackTintList(new ColorStateList(new int[][]{{-android.R.attr.state_enabled},{android.R.attr.state_checked},{}},new int[]{0xff323839,0xff7d6743,0xff3f494d}));add(settings,fps,7);
         fps.setOnCheckedChangeListener((v,on)->{if(binding)return;if(!canEdit()){bindSettings();return;}try{store.fps(on);showFeedback(t("Saved"),false);}catch(IOException e){settingsError(e);}bindSettings();});
-        modValue=row(settings,t("Mod"),this::chooseMod);
-        LinearLayout saveCard=card(t("Saves"));add(optionsColumn,saveCard,18);scopeView=text("",15,TEXT,true);add(saveCard,scopeView,14);
+        modValue=row(settings,t("Mod"),LauncherStyle.MOD,this::chooseMod);
+        LinearLayout saveCard=card(t("Saves"),LauncherStyle.SAVES);add(optionsColumn,saveCard,18);scopeView=text("",14,0xffc6c9b5,true);scopeView.setPadding(dp(10),dp(9),dp(10),dp(9));scopeView.setBackground(background(0x90171f20,0x405b6857,7));add(saveCard,scopeView,14);
         add(saveCard,text(t("SaveScopeHint"),13,MUTED,false),6);
-        LinearLayout actions=new LinearLayout(this);exportSave=button(t("Export"),false);importSave=button(t("Import"),false);
+        LinearLayout actions=new LinearLayout(this);exportSave=button(t("Export"),false);importSave=button(t("Import"),false);buttonIcon(exportSave,LauncherStyle.EXPORT,false);buttonIcon(importSave,LauncherStyle.IMPORT,false);
         LinearLayout.LayoutParams left=new LinearLayout.LayoutParams(0,-2,1),right=new LinearLayout.LayoutParams(0,-2,1);right.leftMargin=dp(8);actions.addView(exportSave,left);actions.addView(importSave,right);add(saveCard,actions,14);
         exportSave.setOnClickListener(v->pickSave(false));importSave.setOnClickListener(v->pickSave(true));
-        exportBackup=button(t("ExportBackup"),false);exportBackup.setOnClickListener(v->pickBackup());add(saveCard,exportBackup,6);
+        exportBackup=button(t("ExportBackup"),false);buttonIcon(exportBackup,LauncherStyle.BACKUP,false);exportBackup.setOnClickListener(v->pickBackup());add(saveCard,exportBackup,8);
         saveProgress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);saveProgress.setIndeterminate(true);saveProgress.setIndeterminateTintList(ColorStateList.valueOf(GOLD));add(saveCard,saveProgress,12);
         saveStatus=text(t("SaveHint"),14,MUTED,false);saveStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);add(saveCard,saveStatus,10);
         feedback=text("",14,GOLD,false);feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);add(content,feedback,14);
         try{add(content,text(f("Version",getPackageManager().getPackageInfo(getPackageName(),0).versionName),12,MUTED,false),18);}catch(Exception ignored){}
-        LinearLayout dock=column();dock.setPadding(dp(20),dp(8),dp(20),dp(8));dock.setBackgroundColor(INK);add(dock,choose,0);screen.addView(dock,new LinearLayout.LayoutParams(-1,-2));
+        LinearLayout dock=column();dock.setPadding(dp(20),dp(12),dp(20),dp(12));dock.setBackground(LauncherStyle.surface(0xef1d2225,INK,0x505a5141,0));add(dock,choose,0);screen.addView(dock,new LinearLayout.LayoutParams(-1,-2));
         setContentView(screen);bindSettings();render();
         if(state!=null&&state.getString("feedback")!=null)showFeedback(state.getString("feedback"),state.getBoolean("feedbackError"));
     }
@@ -111,12 +124,12 @@ public final class InstallerActivity extends Activity {
     private String qualityName(String value){for(int i=0;i<LauncherSettingsStore.SCALES.length;i++)if(value.equals(LauncherSettingsStore.SCALES[i]))return qualityNames()[i];return f("QualityCustom",value);}
     private String[] qualityNames(){return new String[]{t("QualityAuto"),t("QualityFull"),t("QualityBalanced"),t("QualityFast")};}
     private void bindSettings(){if(steppedAside)return;binding=true;
-        try{qualityValue.setText(qualityName(store.scale())+"  ›");fps.setChecked(store.fps());}
+        try{qualityValue.setText(qualityName(store.scale()));fps.setChecked(store.fps());}
         catch(IOException e){qualityValue.setText(t("ConfigInvalid"));showFeedback(t("ConfigInvalid"),true);}
-        driverValue.setText(driverName(GraphicsDriverSettings.read(this))+"  ›");
+        driverValue.setText(driverName(GraphicsDriverSettings.read(this)));
         try{ModSelectionStore mods=new ModSelectionStore(getFilesDir());modId=mods.selected();modValid=modId.isEmpty()||mods.installed().contains(modId);}
         catch(IOException e){modValid=false;}
-        modValue.setText((modValid?(modId.isEmpty()?t("NoMod"):modId):t("ModMissing"))+"  ›");modValue.setTextColor(modValid?TEXT:ERROR);
+        modValue.setText(modValid?(modId.isEmpty()?t("NoMod"):modId):t("ModMissing"));modValue.setTextColor(LauncherStyle.colors(modValid?TEXT:ERROR,0xff77756f));
         scopeView.setText(modValid?f("Scope",scopeName(scope())):t("ModMissing"));binding=false;
     }
     private void choice(String title,String hint,String[] labels,int selected,java.util.function.IntConsumer apply){
@@ -172,9 +185,10 @@ public final class InstallerActivity extends Activity {
     private String size(long bytes){return bytes>=1_000_000_000L?String.format(Locale.getDefault(),"%.2f GB",bytes/1e9):String.format(Locale.getDefault(),"%.1f MB",bytes/1e6);}
     private void renderStart(){if(choose==null)return;boolean blocked=saves.locked()||picking||openingGame||GameSessionGate.guestStarted();
         choose.setEnabled(!blocked&&(session.state.ready()||session.canSelect()));
-        choose.setText(openingGame?t("Starting"):picking?t("Picking"):session.state.ready()?t("Start"):t("PickPackage"));}
+        choose.setText(openingGame?t("Starting"):picking?t("Picking"):session.state.ready()?t("Start"):t("PickPackage"));buttonIcon(choose,session.state.ready()?LauncherStyle.PLAY:LauncherStyle.PACKAGE,true);}
     private void render(){if(steppedAside||heading==null||isFinishing())return;boolean busy=session.state.busy(),ready=session.state.ready();
         heading.setText(ready?t("ResourceReady"):session.title);message.setText(ready?t("ReadyHint"):session.detail);
+        heading.setTextColor(ready?0xffc6d1b5:TEXT);heading.setCompoundDrawablesRelativeWithIntrinsicBounds(glyph(ready?LauncherStyle.CHECK:LauncherStyle.PACKAGE,20,ready?0xffb5c79f:GOLD),null,null,null);
         progress.setIndeterminate(busy&&session.total==0);progress.setVisibility(busy?View.VISIBLE:View.GONE);progress.setProgress(session.total>0?(int)Math.min(1000,session.done*1000.0/session.total):0);
         amount.setText(busy&&session.total>0?f("Progress",session.done*100.0/session.total,size(session.done),size(session.total)):f("Space",size(session.payloadBytes()),size(getFilesDir().getUsableSpace())));
         cancel.setVisibility(session.state.canCancel()?View.VISIBLE:View.GONE);cancel.setEnabled(session.state.canCancel());
