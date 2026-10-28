@@ -14,6 +14,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit
 from xml.sax.saxutils import escape
@@ -342,6 +343,28 @@ def validate_driver_libraries(root):
     return libraries
 
 
+def bundled_mods(packages, overlay, repo):
+    """Ship verified immutable MODs; selection and saves remain user-owned."""
+    sys.path.insert(0, str(repo / 'tools/android'))
+    from mod_package import verify_package
+    result = {}
+    ids = set()
+    base_hashes = {hashlib.sha1(d).hexdigest() for p,d in overlay.items() if p.endswith('/data/.build.config')}
+    for package in packages:
+        package = package.resolve()
+        metadata = verify_package(package)
+        mod_id = metadata['id']
+        if not re.fullmatch(r'[a-z0-9_-]{1,48}', mod_id) or mod_id in ids:
+            raise ValueError('invalid/duplicate bundled MOD ID')
+        if metadata['base_sha1'] not in base_hashes:
+            raise ValueError('bundled MOD requires a different touch overlay')
+        ids.add(mod_id)
+        for path in package.rglob('*'):
+            if path.is_file():
+                result['mods/'+mod_id+'/'+path.relative_to(package).as_posix()] = path.read_bytes()
+    return result
+
+
 def read_signing_properties(path):
     """keytool-style key=value file; returns keystore path, alias and the two passwords."""
     values = {}
@@ -413,6 +436,8 @@ def main(argv=None):
                         help="Absolute HTTPS update manifest URL; DM_UPDATE_URL is used when omitted")
     parser.add_argument("--pipeline-cache", type=Path,
                         help="Optional Turnip pipeline-cache seed directory (driver-keyed cache and pso_user.vkbin)")
+    parser.add_argument("--mod-package", type=Path, action="append", default=[],
+                        help="Bundle a verified optional MOD package (repeatable, offline releases only)")
     parser.add_argument("--offline-manifest", type=Path,
                         help=f"Offline release: pinned {OFFLINE_MANIFEST} written by build_offline_package.py. Builds the "
                              "installer-launched APK (requires --overlay-base, --overlay-item-notes, --driver-libs)")
@@ -422,8 +447,8 @@ def main(argv=None):
     parser.add_argument("--debuggable", action="store_true",
                         help="Diagnostics only: same identity and signature as the release but debuggable, so run-as can read "
                              "app logs; installs over the release with adb install -r")
-    parser.add_argument("--version-code", type=int, default=10, help="Offline release versionCode")
-    parser.add_argument("--version-name", default="1.2.4-94012", help="Offline release versionName")
+    parser.add_argument("--version-code", type=int, default=13, help="Offline release versionCode")
+    parser.add_argument("--version-name", default="1.2.7-94012", help="Offline release versionName")
     parser.add_argument("--validate-only", action="store_true", help="Check prepared inputs without creating output or invoking SDK tools")
     args = parser.parse_args(argv)
     release = args.offline_manifest is not None
@@ -441,10 +466,10 @@ def main(argv=None):
             parser.error("--offline-manifest requires --overlay-base, --overlay-item-notes and --driver-libs")
         if args.version_code < 1:
             parser.error("--version-code must be positive")
-    elif args.debuggable or any((args.overlay_base, args.overlay_item_notes, args.driver_libs)):
+    elif args.debuggable or args.mod_package or any((args.overlay_base, args.overlay_item_notes, args.driver_libs)):
         parser.error("--overlay-*/--driver-libs are only valid with --offline-manifest")
     native, images, assets = args.native.resolve(), args.images.resolve(), args.hud_assets.resolve()
-    extra_inputs = [p.resolve() for p in (args.offline_manifest, args.overlay_base, args.overlay_item_notes, args.driver_libs) if p]
+    extra_inputs = [p.resolve() for p in (args.offline_manifest, args.overlay_base, args.overlay_item_notes, args.driver_libs, *args.mod_package) if p]
     if (out == repo or repo in out.parents or any(out == p or out in p.parents or p in out.parents for p in (native, images, assets, *extra_inputs)) or
             (out.exists() and (not out.is_dir() or any(out.iterdir())))):
         parser.error("Use a fresh output directory outside the checkout and all input directories")
@@ -453,6 +478,7 @@ def main(argv=None):
     if release:
         offline_manifest, offline_report = validate_offline_manifest(args.offline_manifest.resolve(), report["module_manifest"])
         overlay = validate_overlay(args.overlay_base.resolve(), args.overlay_item_notes.resolve())
+        overlay.update(bundled_mods(args.mod_package, overlay, repo))
         driver_libraries = validate_driver_libraries(args.driver_libs.resolve())
         report.update({"offline_manifest": offline_report, "overlay": {n: sha(d) for n, d in overlay.items()},
                        "driver_libraries": {n: sha(d) for n, d in driver_libraries.items()}})

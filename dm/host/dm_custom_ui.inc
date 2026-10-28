@@ -68,7 +68,7 @@ void dm_custom_ui_pump(unsigned long long root) {
         else if(ev&DM_BTN_UP)selected=custom_next_visible(selected,-1);
         snprintf(name,sizeof name,"TouchCustom_%s",k_keys[selected]);cw=custom_find(o,sp,selected==0?k_lang_box[LANG_N-1]:selected==K_RENDER_MODE?"TouchCustom_render_mode_3":name);
         snprintf(name,sizeof name,"TouchCustom_%s_Text",k_keys[selected]);tw=custom_find(o,sp,name);
-        if((ev&DM_BTN_A) && cw && (selected==K_MOD||selected==K_MAP_REVEAL)) {
+        if((ev&DM_BTN_A) && cw && (selected==K_MOD||selected==K_MAP_REVEAL||selected==K_DEBUG)) {
             if(o->action)o->action(o->opaque,cw);
         } else if((ev&DM_BTN_A) && cw && seen[selected].w==cw && seen[selected].gen==o->generation) {
             if(selected==K_RENDER_MODE) {
@@ -113,14 +113,14 @@ void dm_custom_ui_pump(unsigned long long root) {
     }
     for(int i=0;i<NK;i++) {
         if(!custom_key_visible(i)){seen[i].w=seen[i].z=0;continue;}
-        if(i==K_MOD||i==K_MAP_REVEAL) {
+        if(i==K_MOD||i==K_MAP_REVEAL||i==K_DEBUG) {
 #if defined(DM_ANDROID_HOST) && DM_ANDROID_HOST
             snprintf(name,sizeof name,"TouchCustom_%s",k_keys[i]);uint64_t w=custom_find(o,sp,name);
             if(!custom_visible(o,w))continue;
             int pressed=o->clicked&&o->clicked(o->opaque,w);
             if(pressed&&!custom_visible(o,cm)&&o->action)o->action(o->opaque,w);
             int pd=atomic_load(&g_pend[K_MOD]),shown=pd>=0?pd:atomic_load(&g_val[K_MOD]);char text[256];
-            if(!dm_android_custom_status)continue;dm_android_custom_status(i==K_MOD,shown,text,sizeof text);
+            if(!dm_android_custom_status)continue;dm_android_custom_status(i==K_DEBUG?2:i==K_MOD,shown,text,sizeof text);
             snprintf(name,sizeof name,"TouchCustom_%s_Text",k_keys[i]);
             if(o->text)o->text(o->opaque,custom_find(o,sp,name),text);
 #endif

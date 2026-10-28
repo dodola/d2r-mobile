@@ -10,6 +10,10 @@ static dm_android_window_state window={.focus=1};
 static uint32_t held;
 static int rift, calls, drops, pickup_calls, warps, fail_drop, full_bag, merge_item;
 static int stats[16];
+static int catalog_calls;
+static int catalog_item(uint64_t g,uint64_t p,int kind,uint32_t index,uint32_t base) {
+    assert(g && p && kind>=0 && index<2048);(void)base;catalog_calls++;return 1;
+}
 static unsigned serial, checks;
 static uint8_t game_mem[0x19100], player_mem[512], path_mem[64], room_mem[64], extra_mem[160], level_mem[512];
 static uint8_t table_mem[0x1600], rows_mem[0x1c0*2], item_mem[512], item_path[64];
@@ -65,7 +69,18 @@ int main(void){
     ptr(item_mem,0x38,item_path);u32(item_mem,8,77);u32(item_path,0x10,40);u32(item_path,0x14,50);
     stats[7]=12800;stats[9]=25600;stats[12]=10;
     poll_tick(1);CHECK(dbg.ready);cmd("status");state("ok");CHECK(calls==0);
-    const char *bad[]={"give", "give toolong", "give BAD", "give r30 -1", "give r30 1", "give r30 3", "give r30 8", "give r30 2 0", "give r30 2 17", "give r30 2 9999999999999999999999999999999", "give r30 2 1 inv extra", "give r30 inv 2", "scene 0", "scene 137", "scene 199", "scene -1", "scene 40 suffix", "heal extra", "gold -1", "gold 100001", "gold 0x10", "gold 1 suffix", "nope"};
+    CHECK(!dm_android_debug_requested());CHECK(dm_android_debug_next_boot(1));CHECK(dm_android_debug_requested());CHECK(dm_android_debug_next_boot(0));CHECK(!dm_android_debug_requested());
+    CHECK(dm_android_debug_submit("status"));CHECK(!dm_android_debug_submit("heal"));
+    scene.navigation=1;poll_tick(1);CHECK(ui.command[0]);CHECK(catalog_calls==0);
+    scene.navigation=0;poll_tick(1);state("ok");CHECK(!ui.command[0]);
+    CHECK(dm_android_debug_submit("catalog 1 0"));poll_tick(1);state("ok");CHECK(catalog_calls==1);
+    CHECK(dm_android_debug_submit("catalog 2 20507"));poll_tick(1);state("rejected");CHECK(catalog_calls==1);
+    CHECK(dm_android_debug_submit("catalog 0 2048"));poll_tick(1);state("rejected");CHECK(catalog_calls==1);
+    CHECK(dm_android_debug_submit("catalog 1 0"));scene.world_epoch++;poll_tick(1);
+    state("cancelled");CHECK(catalog_calls==1 && !ui.command[0]);
+    CHECK(dm_android_debug_submit("heal"));scene.navigation=1;clock_ns+=31000000000ull;poll_tick(1);
+    state("cancelled");CHECK(!ui.command[0]);scene.navigation=0;poll_tick(1);
+    const char *bad[]={"give", "give toolong", "give BAD", "give r30 -1", "give r30 1", "give r30 3", "give r30 8", "give r30 2 0", "give r30 2 17", "give r30 2 9999999999999999999999999999999", "give r30 2 1 inv extra", "give r30 inv 2", "scene 0", "scene 137", "scene 199", "scene -1", "scene 40 suffix", "heal extra", "gold -1", "gold 100001", "gold 0x10", "gold 1 suffix", "gold add 0", "gold add 1000001", "gold add x", "points", "points skill", "points skill 0", "points skill 1001", "points gold 5", "points stat x", "nope"};
     for(unsigned i=0;i<sizeof bad/sizeof *bad;i++){int d=drops,w=warps;cmd(bad[i]);state("rejected");CHECK(d==drops && w==warps);}
     cmd("give r30 2 2 inventory");state("ok");CHECK(dbg.made==2 && dbg.picked==2 && pickup_calls==2);
     uint32_t flag;memcpy(&flag,game_mem+0x19050,4);CHECK(!flag);
@@ -84,6 +99,10 @@ int main(void){
     cmd("gold 123");state("io_error");CHECK(stats[14]==100000);
     before=warps;cmd("scene lut");state("io_error");CHECK(warps==before && !dbg.target);
     CHECK(!rmdir(status_temp));poll_tick(1);CHECK(dbg.ready);
+    cmd("gold add 100000");state("ok");CHECK(stats[14]==200000);
+    cmd("points skill 10");state("ok");CHECK(stats[5]==10);cmd("points stat 100");state("ok");CHECK(stats[4]==100);
+    stats[4]=9950;cmd("points stat 100");state("rejected");CHECK(stats[4]==9950);stats[4]=0;stats[5]=0;
+    stats[14]=9950000;cmd("gold add 100000");state("rejected");CHECK(stats[14]==9950000);stats[14]=100000;
     for(int i=0;i<7;i++){
         if(i==0)scene.navigation=1;if(i==1)window.focus=3;if(i==2)u32(player_mem,0xc,17);if(i==3)module.base[0x2d5ff51]=1;
         if(i==4)held=1;if(i==5)rift=1;if(i==6)ptr(path_mem,0x20,NULL);

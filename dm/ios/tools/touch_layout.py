@@ -953,7 +953,11 @@ def _chronicle_killboard(s):
         if s.count(a) != 1: raise SystemExit('touch_layout：编年史页签条 %s 不是原样（原版布局变了？）' % a)
         s = s.replace(a, b); n += 1
     end = s.rstrip().rstrip('}').rstrip(); assert end.endswith(']'); at = len(end) - 1
-    return s[:at].rstrip() + ',\n        ' + json.dumps(_kb_board(), ensure_ascii=False) + '\n    ' + s[at:], n + 1
+    s = s[:at].rstrip() + ',\n        ' + json.dumps(_kb_board(), ensure_ascii=False) + '\n    ' + s[at:]
+    if os.environ.get('DM_PLATFORM') == 'android':
+        import debug_layout
+        s = debug_layout.inject(s)
+    return s, n + 1
 # 下拉列表（编年史排序、选项页各下拉共用）：每行高 40，大字号（40）下几行字叠在一起——行高改 56
 # Dropdown list (shared by the chronicle sort and the dropdowns on the options pages): each row is 40 high, and at the large font size (40) several lines of text overlap -- row height changed to 56
 def _dropdown_rows(s):
@@ -1027,7 +1031,7 @@ PRESENT = {
     # After adding 「一键重开」(Quick Restart) the five / four buttons are spaced evenly between the original first and last: center spacing 180 for the version with chronicle, 150 for the classic version
     'controller/pauselayoutgardenhd.json': _pause_no_help({'Settings': (428, 293), 'Exit': (728, 473), 'Chronicle': (1028, 833), 'MessageLog': (278, 1013)}, hide=('Help', 'LootFilter'), restart_y=653),
     'controller/pauselayouthd.json': _pause_no_help({'Settings': (578, 428), 'Exit': (878, 578), 'MessageLog': (428, 878)}, hide=('Help',), restart_y=728),
-    'helpbuttonpanelhd.json': lambda s: offscreen(s, types=(), names=('Help',)),
+    'helpbuttonpanelhd.json': lambda s: __import__('debug_layout').hud(s) if os.environ.get('DM_PLATFORM') == 'android' else offscreen(s, types=(), names=('Help',)),
     'controller/buttonbindingmodalhd.json': _bind_touch,
     'youdiedmodalhd.json': lambda s: offscreen(s, types=(), names=('SubText',)),   # 死亡画面第二行「按 ＋ 继续。」（＋ = 手柄键图标）：下面就有「继续」按钮，这句不要（点一下能完成的提示直接去掉） | Second line of the death screen 「按 ＋ 继续。」(Press + to continue.) (+ = controller key icon): there is a 「继续」(Continue) button right below, so this sentence is dropped (hints for something done with one tap are removed outright)
     'controller/controlleroverlayhd.json': _overlay_touch,
@@ -1182,7 +1186,7 @@ def _custom_key(key): return 'dmCustom' + ''.join(w.capitalize() for w in key.sp
 # Android deliberately has no platform cloud-sync implementation. Keep the
 # shared key table and its indices unchanged, but omit the iCloud row from the
 # Android layout. The default (iOS/macOS) keeps the complete row list.
-_ANDROID_KEYS = ('show_fps', 'render_mode', 'clear_merge', 'store_elide', 'mod', 'map_reveal')
+_ANDROID_KEYS = ('show_fps', 'render_mode', 'clear_merge', 'store_elide', 'mod', 'map_reveal', 'debug')
 
 def _custom_keys(platform=None):
     platform = (platform or os.environ.get('DM_PLATFORM', 'ios')).strip().lower()
@@ -1276,10 +1280,10 @@ def _custom_q3d_row(y, setting="q3d"):
         out += text(nm + '_Label', yy + 10, 100, key, False) + text(nm + '_Hint', yy + 100, 70, key + 'Hint', True) + box(nm, yy + 15)
     return out
 def _custom_android_row(y, key, label):
-    if key in ('mod', 'map_reveal'):
+    if key in ('mod', 'map_reveal', 'debug'):
         row = _custom_toggle_row(y, key, label)
         start = row.index('        { "type": "ToggleButtonWidget"')
-        action = _btn('TouchCustom_' + key, y + 25, '@dmCustom' + ('ModNext' if key == 'mod' else 'MapRevealAction'),
+        action = _btn('TouchCustom_' + key, y + 25, '@dmCustom' + ('ModNext' if key == 'mod' else 'DebugAction' if key == 'debug' else 'MapRevealAction'),
                       'PanelManager:ClosePanel:TouchCustom_' + key, x=1010, anchor=False)
         return row[:start] + action
     if key == 'render_mode':

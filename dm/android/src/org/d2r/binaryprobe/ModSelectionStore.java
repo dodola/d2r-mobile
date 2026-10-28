@@ -16,10 +16,23 @@ final class ModSelectionStore {
     private void ensure() throws IOException {
         if(Files.isSymbolicLink(directory.toPath())||(!directory.isDirectory()&&!directory.mkdirs()))throw new IOException("MOD directory unavailable");
     }
+    private boolean compatible(File child)throws IOException {
+        File files=directory.getParentFile().getParentFile();
+        String variant=new LauncherSettingsStore(files).itemNotes()?"romfs-overlay-variants/item_notes":"romfs-overlay";
+        File config=new File(directory.getParentFile(),variant+"/data/.build.config");
+        if(!config.isFile())return false;
+        try {
+            java.security.MessageDigest sha=java.security.MessageDigest.getInstance("SHA-1");
+            byte[] digest=sha.digest(Files.readAllBytes(config.toPath()));StringBuilder hex=new StringBuilder();
+            for(byte b:digest)hex.append(String.format(java.util.Locale.ROOT,"%02x",b&255));
+            String manifest=LauncherSettingsStore.read(new File(child.getCanonicalFile(),"package.txt"));
+            return manifest.startsWith("d2r-mod-v1\nbuild db0507f36b84200ac05f75d76ed5026f\nbase "+hex+"\n");
+        }catch(java.security.NoSuchAlgorithmException e){throw new IOException(e);}
+    }
     ArrayList<String> installed() throws IOException {
         ensure();ArrayList<String> ids=new ArrayList<>();File[] children=directory.listFiles();
         if(children==null)throw new IOException("Cannot list MOD packages");
-        for(File child:children)if(valid(child.getName())&&!Files.isSymbolicLink(child.toPath())&&child.isDirectory()&&new File(child,"package.txt").isFile())ids.add(child.getName());
+        for(File child:children)if(valid(child.getName())&&!Files.isSymbolicLink(child.toPath())&&child.isDirectory()&&new File(child,"package.txt").isFile()&&compatible(child))ids.add(child.getName());
         Collections.sort(ids);return ids;
     }
     String selected() throws IOException {

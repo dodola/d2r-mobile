@@ -23,6 +23,13 @@ public final class LauncherSaveTest {
             for(String path:paths){z.putNextEntry(new ZipEntry(path));if(!path.endsWith("/"))z.write("synthetic-save".getBytes(StandardCharsets.UTF_8));z.closeEntry();}}
         return b.toByteArray();
     }
+    private static byte[] character(String name,int version,boolean valid)throws IOException {
+        byte[] b=new byte[400];b[0]=0x55;b[1]=(byte)0xaa;b[2]=0x55;b[3]=(byte)0xaa;b[4]=(byte)version;b[8]=(byte)(b.length&255);b[9]=(byte)(b.length>>8);
+        byte[] n=name.getBytes(StandardCharsets.UTF_8);System.arraycopy(n,0,b,299,n.length);
+        long sum=0;for(int i=0;i<b.length;i++){long v=(i>=12&&i<16)?0:b[i]&255;sum=((((sum<<1)|(sum>>>31))&0xffffffffL)+v)&0xffffffffL;}
+        if(!valid)sum^=1;for(int i=0;i<4;i++)b[12+i]=(byte)(sum>>>(8*i));
+        return b;
+    }
     public static void main(String[] args)throws Exception {
         File root=Files.createTempDirectory("launcher-synthetic-").toFile();
         try{
@@ -56,6 +63,25 @@ public final class LauncherSaveTest {
             SaveArchive.recover(crashed,SYNC);check(read(new File(crashed,"hero.d2s")).equals("committed"),"retain published generation after crash");
             rejects(()->SaveArchive.unzip(new ByteArrayInputStream(new byte[]{1,2,3}),new File(root,"bad"),"base"),"non-ZIP rejected");
             rejects(()->SaveArchive.unzip(new ByteArrayInputStream(archive()),new File(root,"empty"),"base"),"empty ZIP rejected");
+            check(SaveArchive.target(root,"debug").getPath().replace(File.separatorChar,'/').endsWith("d2r-mobile/debug/save"),"debug scope maps to the debug save");
+            check(SaveArchive.plainScope("debug-mod-demo").equals("mod-demo")&&SaveArchive.plainScope("debug").equals("base")&&SaveArchive.plainScope("base").equals("base"),"debug twin of scope");
+            rejects(()->SaveArchive.target(root,"debug-demo"),"malformed debug scope rejected");
+            check(SaveArchive.characterName("Mage-Frost",null).equals("Mage_Frost")&&SaveArchive.characterName("Ice__Bolt!!",null).equals("Ice_Bolt")
+                &&SaveArchive.characterName("法师Ab",null).equals("Ab")&&SaveArchive.characterName("_x_",null).equals("Hero")&&SaveArchive.characterName("A_b_c",null).equals("A_bc"),"character name rules");
+            byte[] cn=character("法师-春饼暴",0x69,true);
+            File live=dir(root,"live-d2s");put(live,"Hero/Hero.d2s","existing");
+            check(SaveArchive.characterName("法",live,1).equals("Sorceress")&&SaveArchive.characterName("法",null,9).equals("Hero")&&SaveArchive.characterName("法",dir(root,"taken"),7).equals("Warlock"),"class fallback");
+            put(new File(root,"taken"),"Warlock/Warlock.d2s","x");check(SaveArchive.characterName("法",new File(root,"taken"),7).equals("WarlockA"),"class fallback made unique");
+            File one=new File(root,"d2s-one");SaveArchive.Summary imported=SaveArchive.unzip(new ByteArrayInputStream(cn),one,"base",live);
+            check(imported.files==2&&imported.characters==1,"bare d2s becomes one character");
+            check(new File(one,"Amazon/Amazon.d2s").isFile()&&new File(one,"Amazon/Amazon.d2s.meta").isFile(),"invalid name replaced by the class name");
+            byte[] renamed=Files.readAllBytes(new File(one,"Amazon/Amazon.d2s").toPath());
+            check(new String(renamed,299,6,StandardCharsets.US_ASCII).equals("Amazon")&&renamed[305]==0,"name rewritten in header");
+            check(SaveArchive.d2sChecksum(renamed)==((renamed[12]&255L)|(renamed[13]&255L)<<8|(renamed[14]&255L)<<16|(renamed[15]&255L)<<24),"checksum recomputed");
+            File keep=new File(root,"d2s-keep");SaveArchive.unzip(new ByteArrayInputStream(character("Blizzard",0x69,true)),keep,"base",null);
+            check(new File(keep,"Blizzard/Blizzard.d2s").isFile(),"valid name kept");
+            rejects(()->SaveArchive.unzip(new ByteArrayInputStream(character("Blizzard",0x61,true)),new File(root,"d2s-version"),"base"),"other version rejected");
+            rejects(()->SaveArchive.unzip(new ByteArrayInputStream(character("Blizzard",0x69,false)),new File(root,"d2s-sum"),"base"),"bad checksum rejected");
             String[] bad={"../escape","/absolute","a/../../escape","a\\b","C:/drive","a//b","./relative","bad\u0001name","../"};
             for(int i=0;i<bad.length;i++){final String path=bad[i];final File stage=new File(root,"path"+i);
                 rejects(()->SaveArchive.unzip(new ByteArrayInputStream(archive(path)),stage,"base"),"path rejected "+path);check(!stage.exists(),"rejected archive cleaned");}

@@ -1,6 +1,7 @@
 /* Android 自定义页的持久化与状态；沿用画质、附件优化和 MOD 的既有文件格式。
  * Android Custom persistence/status, using the existing quality, attachment and MOD formats. */
 #include "render_scale.h"
+#include "d2r_mod_loader.h"
 #include "d2r_map_reveal.h"
 #include "../host/dm_i18n.h"
 #include <dirent.h>
@@ -20,12 +21,21 @@ static int mod_compare(const void *a,const void *b){return strcmp(a,b);}
 void dm_android_custom_settings_init(const char *dir) {
     if(!dir)return;strlcpy(settings_root,dir,sizeof settings_root);mod_count=1;memset(mod_ids,0,sizeof mod_ids);
     char path[1200];struct stat root_stat;snprintf(path,sizeof path,"%s/mods",dir);if(lstat(path,&root_stat)||!S_ISDIR(root_stat.st_mode))return;DIR *d=opendir(path);if(!d)return;
+    char overlay[1200],line[256];int notes=1;
+    snprintf(path,sizeof path,"%s/sw_custom.txt",dir);FILE *cfg=fopen(path,"r");
+    while(cfg&&fgets(line,sizeof line,cfg))if(!strncmp(line,"item_notes=",11))notes=atoi(line+11)!=0;
+    if(cfg)fclose(cfg);
+    snprintf(overlay,sizeof overlay,"%s/%s",dir,notes?"romfs-overlay-variants/item_notes":"romfs-overlay");
+    snprintf(path,sizeof path,"%s/data/.build.config",overlay);
+    if(access(path,R_OK))snprintf(overlay,sizeof overlay,"%s/romfs-overlay",dir);
     struct dirent *entry;while((entry=readdir(d))&&mod_count<128) {
         if(!valid_mod_id(entry->d_name))continue;
         struct stat st;snprintf(path,sizeof path,"%s/mods/%s",dir,entry->d_name);
         if(lstat(path,&st)||!S_ISDIR(st.st_mode))continue;
         snprintf(path,sizeof path,"%s/mods/%s/package.txt",dir,entry->d_name);
         if(lstat(path,&st)||!S_ISREG(st.st_mode))continue;
+        snprintf(path,sizeof path,"%s/mods/%s",dir,entry->d_name);
+        if(!dm_android_mod_matches_overlay(path,overlay))continue;
         strlcpy(mod_ids[mod_count++],entry->d_name,sizeof mod_ids[0]);
     }
     closedir(d);qsort(mod_ids+1,mod_count-1,sizeof mod_ids[0],mod_compare);
@@ -73,6 +83,11 @@ int dm_android_custom_settings_apply(int mode,int clear,int store,int mod) {
     settings_error=rc!=0;return rc==0;
 }
 void dm_android_custom_status(int mod,int selected,char *out,size_t capacity) {
+    #ifdef DM_ANDROID_DEBUG_CONSOLE
+    if(mod==2){snprintf(out,capacity,"调试模式：%s · 重启后生效，使用独立存档",dm_android_debug_requested()?"已开启":"已关闭");return;}
+#else
+    if(mod==2){snprintf(out,capacity,"当前版本不包含调试功能");return;}
+#endif
     if(settings_error){snprintf(out,capacity,"%s",dm_ui("dmCustomSaveError"));return;}
     if(mod){snprintf(out,capacity,dm_ui("dmCustomModStatus"),selected>=0&&selected<mod_count&&selected?mod_ids[selected]:dm_ui("dmCustomModNone"));return;}
     dm_android_map_status s;dm_android_map_status_get(&s);

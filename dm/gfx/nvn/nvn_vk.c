@@ -43,6 +43,8 @@ static int g_bc_passthrough,g_texture_upload_batch,g_nan_minmax;
 
 #define LIMIT_POOLS 512
 #define LIMIT_OBJECTS 4096
+/* Resident images: Act V towns/areas keep more than 4096 textures alive. */
+#define LIMIT_TEXTURES 16384
 #define LIMIT_BINDINGS 64
 #define LIMIT_WRITES 4096
 #define LIMIT_PSOS 2048
@@ -261,8 +263,8 @@ static struct {
     PoolUpload pool_uploads[UPLOAD_BUCKETS][UPLOAD_WAYS];uint64_t upload_age;
     int disable_dirty_uploads,enable_writeback_prepare,enable_writeback_coalesce,event_trace;
     uint64_t profile_pool_uploaded_bytes,profile_pool_reused_ranges,profile_pool_reused_bytes;
-    VShader shaders[LIMIT_OBJECTS]; int nshader; VTexture textures[LIMIT_OBJECTS]; int ntexture;
-    uint32_t texture_used,texture_free_count,texture_free[LIMIT_OBJECTS],texture_table[2*LIMIT_OBJECTS];
+    VShader shaders[LIMIT_OBJECTS]; int nshader; VTexture textures[LIMIT_TEXTURES]; int ntexture;
+    uint32_t texture_used,texture_free_count,texture_free[LIMIT_TEXTURES],texture_table[2*LIMIT_TEXTURES];
     uint64_t texture_incarnation,registry_revision,pool_revision,binding_revision[6],ssbo_revision[6],texbind_revision[6],driver_revision[6][2];DriverCacheEntry driver_cache[6][2];
     int disable_binding_plans,plan_precise_state,enable_command_cache;
     int force_vertex_split;
@@ -1869,8 +1871,8 @@ static void texture_transition_levels(VTexture *t,uint32_t base,uint32_t count,V
  * an old image. The serial table is used only to acquire a new reference. */
 static uint32_t texture_table_slot(uint64_t serial,int *found) {
     uint64_t hash=serial;hash^=hash>>30;hash*=0xbf58476d1ce4e5b9ULL;hash^=hash>>27;
-    uint32_t first=UINT32_MAX,slot=(uint32_t)hash&(2*LIMIT_OBJECTS-1);
-    for(unsigned n=0;n<2*LIMIT_OBJECTS;n++,slot=(slot+1)&(2*LIMIT_OBJECTS-1)){
+    uint32_t first=UINT32_MAX,slot=(uint32_t)hash&(2*LIMIT_TEXTURES-1);
+    for(unsigned n=0;n<2*LIMIT_TEXTURES;n++,slot=(slot+1)&(2*LIMIT_TEXTURES-1)){
         uint32_t entry=G.texture_table[slot];
         if(!entry){*found=0;return first==UINT32_MAX?slot:first;}
         if(entry==UINT32_MAX){if(first==UINT32_MAX)first=slot;continue;}
@@ -1907,10 +1909,10 @@ static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) 
     int layered=source->d.target==NVN_TEXTURE_TARGET_2D_ARRAY || source->d.target==NVN_TEXTURE_TARGET_1D_ARRAY;
     int volume=source->d.target==NVN_TEXTURE_TARGET_3D;
     int cube=source->d.target==NVN_TEXTURE_TARGET_CUBEMAP || source->d.target==NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
-    if(G.ntexture==LIMIT_OBJECTS || (source->d.target!=NVN_TEXTURE_TARGET_2D && !one && !layered && !cube && !volume) || source->d.samples>1)
+    if(G.ntexture==LIMIT_TEXTURES || (source->d.target!=NVN_TEXTURE_TARGET_2D && !one && !layered && !cube && !volume) || source->d.samples>1)
         die("texture target/layers/MSAA",source->d.target);
     uint32_t resident_slot=G.texture_free_count?G.texture_free[--G.texture_free_count]:G.texture_used++;
-    if(resident_slot>=LIMIT_OBJECTS)die("texture registry slot",resident_slot);
+    if(resident_slot>=LIMIT_TEXTURES)die("texture registry slot",resident_slot);
     t=&G.textures[resident_slot];memset(t,0,sizeof(*t));t->serial=source->serial;t->incarnation=++G.texture_incarnation;
     G.ntexture++;G.texture_table[registry_slot]=resident_slot+1;t->source=*source;t->version=1;
     t->width=source->d.width; t->height=one?1:source->d.height;t->depth=volume?source->d.depth:1;t->layout=VK_IMAGE_LAYOUT_UNDEFINED;

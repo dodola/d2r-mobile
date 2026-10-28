@@ -41,7 +41,8 @@ public final class LauncherTestInstrumentation extends Instrumentation {
         for(String path:new String[]{"d2r-mobile","export-check","backup-check","backup-export-check","incoming","import.zip","export.zip","backup-export.zip","invalid.zip"})SaveArchive.delete(file(path));
         put("game.romfs","r");put("d2r-mobile/shaders/shader_index.bin","s");
         put("d2r-mobile/save/hero/hero.d2s","original-character");put("d2r-mobile/save/other/other.d2s","other-character");
-        put("d2r-mobile/mods/demo/package.txt","synthetic MOD");
+        put("d2r-mobile/romfs-overlay-variants/item_notes/data/.build.config","abc");
+        put("d2r-mobile/mods/demo/package.txt","d2r-mod-v1\nbuild db0507f36b84200ac05f75d76ed5026f\nbase a9993e364706816aba3e25717850c26c9cd0d89d\n");
         activity=(InstallerActivity)startActivitySync(new Intent(getTargetContext(),InstallerActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         OfflineInstallSession resources=OfflineInstallSession.get(getTargetContext());SaveTransferSession saves=SaveTransferSession.get(getTargetContext());
         until(()->resources.state.ready(),"synthetic resource install ready");

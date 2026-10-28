@@ -26,6 +26,14 @@
 JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeShowFps(JNIEnv *env,jclass cls) {
     (void)env;(void)cls;int dm_custom_get(const char *);return dm_custom_get("show_fps")!=0;
 }
+JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeDebugUiOpen(JNIEnv *env,jclass cls) {
+    (void)env;(void)cls;
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+    return dm_android_debug_ui_is_open()!=0;
+#else
+    return JNI_FALSE;
+#endif
+}
 JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeFrontendTouch(JNIEnv *env,jclass cls,jint phase,jfloat x,jfloat y) {
     (void)env;(void)cls;
 #ifdef DM_ANDROID_D2R_UI
@@ -584,7 +592,11 @@ static void *game_thread(void *unused) {
     custom_locale=dm_android_custom_startup_locale();
 #endif
     error=dm_android_mod_configure(port_root,overlay,sizeof overlay,save,sizeof save);
-    if(error)die("Android MOD package invalid or base overlay differs, error=%d; clear mods/active.txt to recover",error);
+    if(error) {
+        LOG("ANDROID_MOD_REJECT error=%d selection_preserved=1 saves_mounted=0",error);
+        phase_set("MOD 与当前资源不兼容或已损坏，请返回启动器重新选择 MOD");
+        atomic_store(&returned,1);return NULL;
+    }
     if(overlay[0])setenv("DM_ROMFS_OVERLAY",overlay,1);else unsetenv("DM_ROMFS_OVERLAY");
     if (dm_android_fs_ensure_directory(save) || dm_android_fs_ensure_directory(temp) || dm_android_fs_ensure_directory(profile)) die("Android private directories");
     setenv("DM_SAVE",save,1);

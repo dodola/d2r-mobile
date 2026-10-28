@@ -58,8 +58,8 @@ final class SaveTransferSession {
     };
     static void recover(Context c)throws IOException {
         File files=c.getFilesDir(),base=SaveArchive.target(files,"base");
-        SaveArchive.recover(base,SYNC);
-        for(String mod:new ModSelectionStore(files).installed())SaveArchive.recover(SaveArchive.target(files,"mod-"+mod),SYNC);
+        SaveArchive.recover(base,SYNC);SaveArchive.recover(SaveArchive.target(files,"debug"),SYNC);
+        for(String mod:new ModSelectionStore(files).installed()){SaveArchive.recover(SaveArchive.target(files,"mod-"+mod),SYNC);SaveArchive.recover(SaveArchive.target(files,"debug-mod-"+mod),SYNC);}
     }
     void read(Uri uri){if(phase!=Phase.PICKING)return;phase=Phase.READING;messageKey="dmLaunchReading";changed();final String targetScope=scope;
         worker.execute(()->{File unpack=null;
@@ -67,7 +67,7 @@ final class SaveTransferSession {
                 recover(context);File parent=new File(context.getFilesDir().getCanonicalFile(),"d2r-mobile/save-transfer");LauncherSettingsStore.directory(parent);
                 unpack=java.nio.file.Files.createTempDirectory(parent.toPath(),"import-").toFile();java.nio.file.Files.delete(unpack.toPath());
                 try(InputStream in=context.getContentResolver().openInputStream(uri)){
-                    if(in==null)throw new IOException("Document unavailable");SaveArchive.unzip(in,unpack,targetScope);}
+                    if(in==null)throw new IOException("Document unavailable");SaveArchive.unzip(in,unpack,targetScope,SaveArchive.target(context.getFilesDir(),targetScope));}
                 SaveArchive.Summary preview=SaveArchive.preview(SaveArchive.target(context.getFilesDir(),targetScope),unpack);File ready=unpack;
                 ui.post(()->{staging=ready;summary=preview;phase=Phase.PREVIEW;changed();});
             }catch(Exception e){if(unpack!=null)try{SaveArchive.delete(unpack);}catch(IOException cleanup){e.addSuppressed(cleanup);}fail("dmLaunchImportFailed",e);}

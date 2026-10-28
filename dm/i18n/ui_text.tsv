@@ -474,3 +474,5 @@ dmLaunchConfigInvalid	设置读取失败，请重新选择参数。	Could not re
 dmLaunchSaveScopeHint	导入仅影响上方当前模式，不同 MOD 的备份不能混用。	Imports affect only the mode above. Backups from different MODs cannot be mixed.	La importación solo afecta al modo indicado. No mezcles copias de distintos MOD.		Импорт затрагивает только выбранный режим. Нельзя смешивать копии разных MOD.	Android launcher; InstallerActivity / SaveTransferSession
 dmLaunchMore	说明	Details	Detalles		Подробнее	Android launcher; InstallerActivity / SaveTransferSession
 dmLaunchExportBackup	导出上次自动备份	Export previous automatic backup	Exportar copia automática anterior		Экспорт предыдущей автоматической копии	Android launcher save backups
+dmCustomDebug	调试模式（独立存档）	Debug mode (separate saves)	Modo debug		Режим отладки	Android debug
+dmCustomDebugAction	开启 / 关闭	Enable / disable	Activar / desactivar		Вкл. / выкл.	Android debug

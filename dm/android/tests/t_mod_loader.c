@@ -35,7 +35,7 @@ int main(int argc,char **argv){
     reset(overlay,save,1);CHECK(!dm_android_mod_configure(root,overlay,sizeof overlay,save,sizeof save));CHECK(strstr(save,"/sample/debug-save"));
     const char *invalid[]={"../sample\n","sample\nextra\n","sample","SAMPLE\n","sample/other\n"};
     for(unsigned i=0;i<sizeof invalid/sizeof *invalid;i++){write_file(active,invalid[i]);reset(overlay,save,0);CHECK(dm_android_mod_configure(root,overlay,sizeof overlay,save,sizeof save)==EINVAL);CHECK(!strcmp(overlay,base));}
-    write_file(active,"sample\n");manifest("0000000000000000000000000000000000000000",actual,actual);reset(overlay,save,0);CHECK(dm_android_mod_configure(root,overlay,sizeof overlay,save,sizeof save)==EINVAL);manifest(actual,actual,actual);
+    write_file(active,"sample\n");CHECK(dm_android_mod_matches_overlay(package,base));manifest("0000000000000000000000000000000000000000",actual,actual);CHECK(!dm_android_mod_matches_overlay(package,base));reset(overlay,save,0);CHECK(dm_android_mod_configure(root,overlay,sizeof overlay,save,sizeof save)==EINVAL);manifest(actual,actual,actual);
     CHECK(mod_path(p,sizeof p,data,"00-00000008.data"));write_file(p,"bad");CHECK(dm_android_mod_configure(root,overlay,sizeof overlay,save,sizeof save)==EINVAL);write_file(p,"abc");
     CHECK(!unlink(p));CHECK(!symlink("/etc/passwd",p));CHECK(dm_android_mod_configure(root,overlay,sizeof overlay,save,sizeof save)==EINVAL);CHECK(!unlink(p));write_file(p,"abc");
     char small[5]="base";CHECK(dm_android_mod_configure(root,small,sizeof small,save,sizeof save)!=0);

@@ -11,9 +11,15 @@ public final class ModSelectionStoreTest {
         ModSelectionStore store=new ModSelectionStore(files);
         check(store.selected().isEmpty());check(store.installed().isEmpty());
         File mods=new File(files,"d2r-mobile/mods"),sample=new File(mods,"sample");check(sample.mkdir());
-        Files.write(new File(sample,"package.txt").toPath(),"prepared fixture\n".getBytes(StandardCharsets.US_ASCII));
+        Files.write(new File(sample,"package.txt").toPath(),"d2r-mod-v1\nbuild db0507f36b84200ac05f75d76ed5026f\nbase a9993e364706816aba3e25717850c26c9cd0d89d\n".getBytes(StandardCharsets.US_ASCII));
+        File config=new File(files,"d2r-mobile/romfs-overlay-variants/item_notes/data/.build.config");
+        check(config.getParentFile().mkdirs());Files.write(config.toPath(),"abc".getBytes(StandardCharsets.US_ASCII));
         File incomplete=new File(mods,"incomplete");check(incomplete.mkdir());
         check(store.installed().size()==1&&store.installed().get(0).equals("sample"));
+        Files.write(config.toPath(),"changed".getBytes(StandardCharsets.US_ASCII));check(store.installed().isEmpty());
+        try{store.select("sample");throw new AssertionError("incompatible MOD accepted");}catch(IOException expected){checks++;}
+        Files.write(config.toPath(),"abc".getBytes(StandardCharsets.US_ASCII));
+        LauncherSettingsStore settings=new LauncherSettingsStore(files);check(!settings.debug());settings.debug(true);check(settings.debug());settings.debug(false);check(!settings.debug());
         store.select("sample");check(store.selected().equals("sample"));
         check(new String(Files.readAllBytes(new File(mods,"active.txt").toPath()),StandardCharsets.US_ASCII).equals("sample\n"));
         for(String id:new String[]{"../sample","MIXED","missing","a;b","sample\n"}){

@@ -52,6 +52,18 @@ final class LauncherSettingsStore {
         if(index<0||index>=SCALES.length)throw new IOException("Invalid quality preset");
         write(new File(root(),"diagnostics/render-scale.txt"),SCALES[index]+"\n");
     }
+    boolean debug()throws IOException {File marker=new File(root(),"debug/enable");read(marker);return marker.isFile();}
+    void debug(boolean on)throws IOException {
+        File marker=new File(root(),"debug/enable");
+        if(on)write(marker,"1\n");
+        else {directory(marker.getParentFile());read(marker);Files.deleteIfExists(marker.toPath());}
+    }
+    boolean itemNotes()throws IOException {
+        boolean on=true;
+        for(String line:read(new File(root(),"sw_custom.txt")).split("\n"))
+            if(line.startsWith("item_notes="))on=line.substring(11).trim().equals("1");
+        return on;
+    }
     boolean fps()throws IOException {
         boolean result=false;
         for(String line:read(new File(root(),"sw_custom.txt")).split("\n"))if(line.startsWith("show_fps="))result=line.substring(9).trim().equals("1");

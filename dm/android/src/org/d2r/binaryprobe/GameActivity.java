@@ -31,6 +31,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static native int nativeConfigure(String files, String locale,boolean touchRoute);
     private static native int nativeContentProfile(long romfsBytes,int[] addOnIndices);
     private static native int nativeTouch(int[] ids,float[] xs,float[] ys,boolean cancelled);
+    private static native boolean nativeDebugUiOpen();
     private static native boolean nativeFrontendTouch(int phase,float x,float y);
     private static native void nativeTouchActivity();
     private int frontendPointer=-1;
@@ -148,8 +149,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if(!touchMode) setTouchMode(true);
             // The SurfaceView owns this contact after DOWN even when the
             // overlay becomes visible. Forward the whole first gesture too.
+            if(frontendTouch(event))return true;
             if(touchControls!=null&&inGame&&touchControls.onTouchEvent(event))return true;
-            if(!inGame&&frontendTouch(event))return true;
             int action=event.getActionMasked(),skip=action==MotionEvent.ACTION_POINTER_UP?event.getActionIndex():-1;
             int count=(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL)?0:event.getPointerCount()-(skip>=0?1:0);
             if(count>16){nativeTouch(new int[0],new float[0],new float[0],true);return true;}
@@ -167,6 +168,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if(inGame&&gameInputReady()){setTouchMode(true);return true;}
             return false;
         });
+        // The overlay sits above the SurfaceView and consumes every in-game contact,
+        // so the native Debug entry must get first refusal here.
+        touchControls.setOnTouchListener((view,event) -> configured&&surfaceReady&&inputReady&&width>0&&height>0&&frontendTouch(event));
         viewport.addView(touchControls,new FrameLayout.LayoutParams(-1,-1));
         fps=new TextView(this);fps.setText("FPS —");fps.setTextColor(TouchControlsView.TEXT);
         fps.setTextSize(12);fps.setTypeface(Typeface.MONOSPACE);fps.setGravity(Gravity.CENTER);
@@ -496,7 +500,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         JSONArray list=new JSONObject(json).getJSONArray("files");File base=new File(getFilesDir(),"d2r-mobile");
         for(int i=0;i<list.length();i++){
             JSONObject entry=list.getJSONObject(i);String path=entry.getString("path"),hash=entry.getString("sha256");
-            if(!path.matches("romfs-overlay(-variants/item_notes)?/(ctrl_touch|touch_strings\\.tsv|dm_textbox_plain\\.tsv|features\\.txt|data/\\.build\\.config|data/00-00000007\\.data)")||
+            if(!(path.matches("romfs-overlay(-variants/item_notes)?/(ctrl_touch|touch_strings\\.tsv|dm_textbox_plain\\.tsv|features\\.txt|data/\\.build\\.config|data/00-00000007\\.data)")||
+                 path.matches("mods/[a-z0-9_-]{1,48}/(package\\.(txt|json)|overlay/data/(\\.build\\.config|[0-9]{2}-[0-9]{8}\\.data))"))||
                 !hash.matches("[0-9a-f]{64}"))throw new java.io.IOException(t("覆盖层清单无效"));
             File target=new File(base,path);long bytes=entry.getLong("bytes");
             if(target.isFile()&&target.length()==bytes&&digest(target).equals(hash))continue;
@@ -553,6 +558,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             JSONObject scene=s.optJSONObject("scene");boolean nextInGame=scene!=null&&scene.optInt("game",0)!=0;
             if(inGame!=nextInGame)cancelFrontendTouch();inGame=nextInGame;
             syncTouchOverlay();
+            if(touchControls!=null)touchControls.setVisibility(nativeDebugUiOpen()?View.GONE:View.VISIBLE);
             int fpsVisibility=showFps()?View.VISIBLE:View.GONE;
             if(fps.getVisibility()!=fpsVisibility){fps.setVisibility(fpsVisibility);fpsSampler.reset();displayedFps=Double.NaN;}
             long frame=s.getLong("presented_frames");

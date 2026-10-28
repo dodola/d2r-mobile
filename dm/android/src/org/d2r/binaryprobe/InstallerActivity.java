@@ -28,7 +28,7 @@ public final class InstallerActivity extends Activity {
     private TextView heading,message,amount,feedback,driverValue,qualityValue,modValue,scopeView,saveStatus;
     private ProgressBar progress,saveProgress;
     private Button choose,cancel,exportSave,importSave,exportBackup;
-    private Switch fps;
+    private Switch fps,debug;
     private LinearLayout settings,body,resourceCard,optionsColumn;
     private AlertDialog cancelDialog,choiceDialog,previewDialog;
     private boolean resumed,openingGame,picking,binding,modValid,steppedAside,wide,layoutBound;
@@ -100,6 +100,8 @@ public final class InstallerActivity extends Activity {
         fps.setThumbTintList(new ColorStateList(new int[][]{{-android.R.attr.state_enabled},{android.R.attr.state_checked},{}},new int[]{0xff656665,0xffedc993,0xff9e9e95}));
         fps.setTrackTintList(new ColorStateList(new int[][]{{-android.R.attr.state_enabled},{android.R.attr.state_checked},{}},new int[]{0xff323839,0xff7d6743,0xff3f494d}));add(settings,fps,7);
         fps.setOnCheckedChangeListener((v,on)->{if(binding)return;if(!canEdit()){bindSettings();return;}try{store.fps(on);showFeedback(t("Saved"),false);}catch(IOException e){settingsError(e);}bindSettings();});
+        debug=new Switch(this);debug.setText("Debug 调试模式（独立存档）");debug.setTextSize(15);debug.setTextColor(LauncherStyle.colors(TEXT,0xff77756f));debug.setMinHeight(dp(64));debug.setPadding(dp(12),dp(8),dp(12),dp(8));debug.setBackground(LauncherStyle.row(dp(10)));add(settings,debug,7);
+        debug.setOnCheckedChangeListener((v,on)->{if(binding)return;if(!canEdit()){bindSettings();return;}try{store.debug(on);showFeedback("调试设置已保存；启动游戏后左侧显示 DEBUG 入口，使用独立调试存档。",false);}catch(IOException e){settingsError(e);}bindSettings();});
         modValue=row(settings,t("Mod"),LauncherStyle.MOD,this::chooseMod);
         LinearLayout saveCard=card(t("Saves"),LauncherStyle.SAVES);add(optionsColumn,saveCard,18);scopeView=text("",14,0xffc6c9b5,true);scopeView.setPadding(dp(10),dp(9),dp(10),dp(9));scopeView.setBackground(background(0x90171f20,0x405b6857,7));add(saveCard,scopeView,14);
         add(saveCard,text(t("SaveScopeHint"),13,MUTED,false),6);
@@ -119,12 +121,14 @@ public final class InstallerActivity extends Activity {
         if(saves.locked()||session.state.busy()||picking||openingGame){showFeedback(t("Busy"),false);return false;}return true;}
     private void settingsError(Exception e){android.util.Log.w("D2RLauncher","settings",e);showFeedback(t("SettingsFailed"),true);}
     private String driverName(String mode){return t(GraphicsDriverPolicy.SYSTEM.equals(mode)?"System":GraphicsDriverPolicy.TURNIP.equals(mode)?"Turnip":"AutoDriver");}
-    private String scope(){return modId.isEmpty()?"base":"mod-"+modId;}
-    private String scopeName(String scope){return scope.equals("base")?t("Base"):scope.substring(4);}
+    private String scope(){String plain=modId.isEmpty()?"base":"mod-"+modId;boolean on;try{on=store.debug();}catch(IOException e){on=false;}
+        return on?(plain.equals("base")?"debug":"debug-"+plain):plain;}
+    private String scopeName(String scope){boolean debug=scope.equals("debug")||scope.startsWith("debug-");String plain=SaveArchive.plainScope(scope);
+        String name=plain.equals("base")?t("Base"):plain.substring(4);return debug?"Debug · "+name:name;}
     private String qualityName(String value){for(int i=0;i<LauncherSettingsStore.SCALES.length;i++)if(value.equals(LauncherSettingsStore.SCALES[i]))return qualityNames()[i];return f("QualityCustom",value);}
     private String[] qualityNames(){return new String[]{t("QualityAuto"),t("QualityFull"),t("QualityBalanced"),t("QualityFast")};}
     private void bindSettings(){if(steppedAside)return;binding=true;
-        try{qualityValue.setText(qualityName(store.scale()));fps.setChecked(store.fps());}
+        try{qualityValue.setText(qualityName(store.scale()));fps.setChecked(store.fps());debug.setChecked(store.debug());}
         catch(IOException e){qualityValue.setText(t("ConfigInvalid"));showFeedback(t("ConfigInvalid"),true);}
         driverValue.setText(driverName(GraphicsDriverSettings.read(this)));
         try{ModSelectionStore mods=new ModSelectionStore(getFilesDir());modId=mods.selected();modValid=modId.isEmpty()||mods.installed().contains(modId);}

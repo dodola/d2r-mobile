@@ -64,6 +64,16 @@ static int mod_archive(const char *name) {
     for(unsigned i=5;i<16;i++)if(i!=7 && (name[i]<'0'||name[i]>'9'))return 0;
     return 1;
 }
+int dm_android_mod_matches_overlay(const char *package,const char *overlay) {
+    char path[4096],line[256],expected[41],digest[41];uint64_t bytes=0;
+    if(!mod_path(path,sizeof path,package,"package.txt")||!mod_regular(path))return 0;
+    FILE *f=fopen(path,"r");if(!f)return 0;
+    int ok=mod_line(f,line,sizeof line)&&!strcmp(line,"d2r-mod-v1")&&
+        mod_line(f,line,sizeof line)&&!strcmp(line,"build db0507f36b84200ac05f75d76ed5026f")&&
+        mod_line(f,line,sizeof line)&&!strncmp(line,"base ",5)&&mod_digest(line+5);
+    if(ok)memcpy(expected,line+5,41);fclose(f);
+    return ok&&mod_path(path,sizeof path,overlay,"data/.build.config")&&mod_hash(path,digest,&bytes)&&!strcmp(expected,digest);
+}
 int dm_android_mod_configure(const char *root,char *overlay,size_t capacity,char *save,size_t save_capacity) {
     if(!root || !overlay || !save)return EINVAL;
     unsetenv("DM_ACTIVE_MOD");

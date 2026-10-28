@@ -7,6 +7,9 @@
 #include "d2r_map_reveal.h"
 #include "d2r_touch_flow_android.h"
 #include "d2r_touch_shell_android.h"
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+#include "d2r_debug_mode.h"
+#endif
 #include "input_backend.h"
 #include "../host/dm_cursor.h"
 #include "../host/dm_actions.h"
@@ -26,6 +29,9 @@ static uint8_t *main_base;
  * Front-end taps use the iOS mouse-message queue without duplicating touchscreen input. */
 int dm_android_d2r_frontend_touch(int phase,float x,float y) {
     if(!attached || phase<0 || phase>3 || !isfinite(x) || !isfinite(y))return 0;
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+    if(dm_uiscreen_ingame()&&dm_android_debug_ui_touch(phase,x,y))return 1;
+#endif
     if(phase!=3 && dm_uiscreen_ingame())return 0;
     dm_ui_touch(phase,x,y);return 1;
 }
@@ -69,6 +75,9 @@ int dm_android_d2r_ui_attach(module_t *main) {
 
 void dm_android_d2r_ui_message(const char *category,const char *action,const char *argument) {
     if(!attached)return;
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+    dm_android_debug_ui_message(category,action,argument);
+#endif
     dm_ui_on_uimsg(category,action,argument);
     { void dm_update_on_uimsg(const char *,const char *,const char *); dm_update_on_uimsg(category,action,argument); }
     if(!strcmp(category,"PanelManager")){dm_android_hud_message(action,argument);dm_android_world_overlay_message(action,argument);}
@@ -113,6 +122,9 @@ void dm_android_d2r_ui_tick(uint64_t game,uint64_t player,uint8_t *main) {
 void dm_android_d2r_ui_pump(dm_android_touch_game_state *state) {
     if(!attached || !state)return;
     dm_ui_frontend_pump();
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+    dm_android_debug_ui_pump(main_base);
+#endif
     if(dm_android_skill_flow_pump)dm_android_skill_flow_pump();
     dm_android_custom_scope(1);dm_actions_pump();dm_android_custom_scope(0);
     { void dm_padmode_request(int);dm_padmode_request(dm_android_input_controller_mode()); }

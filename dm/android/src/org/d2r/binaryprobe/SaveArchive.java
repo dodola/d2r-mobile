@@ -33,13 +33,18 @@ final class SaveArchive {
             }
         }
     }
+    /* Scopes: base, mod-<id>, and their Debug twins debug, debug-mod-<id> (the game uses separate Debug saves). */
     static File target(File files,String scope)throws IOException {
         File root=new File(files.getCanonicalFile(),"d2r-mobile");
-        if("base".equals(scope))return new File(root,"save");
-        if(!scope.startsWith("mod-")||!ModSelectionStore.valid(scope.substring(4)))throw new IOException("Invalid save scope");
-        File mod=new File(root,"mods/"+scope.substring(4));
-        regular(new File(mod,"package.txt"));return new File(mod,"save");
+        boolean debug=scope.equals("debug")||scope.startsWith("debug-mod-");
+        String plain=debug?(scope.equals("debug")?"base":scope.substring(6)):scope;
+        if("base".equals(plain))return debug?new File(root,"debug/save"):new File(root,"save");
+        if(!plain.startsWith("mod-")||!ModSelectionStore.valid(plain.substring(4)))throw new IOException("Invalid save scope");
+        File mod=new File(root,"mods/"+plain.substring(4));
+        regular(new File(mod,"package.txt"));return new File(mod,debug?"debug-save":"save");
     }
+    /* A Debug scope may exchange archives with its normal twin: the content is the same game data. */
+    static String plainScope(String scope){return scope.equals("debug")?"base":scope.startsWith("debug-")?scope.substring(6):scope;}
     static void plainPath(File file)throws IOException {
         for(Path p=file.toPath().toAbsolutePath();p!=null;p=p.getParent())
             if(Files.isSymbolicLink(p))throw new IOException("Symbolic link in save path: "+p);
@@ -81,8 +86,17 @@ final class SaveArchive {
                 zip.closeEntry();}
         }
     }
-    static Summary unzip(InputStream raw,File staging,String scope)throws IOException {
+    static Summary unzip(InputStream raw,File staging,String scope)throws IOException {return unzip(raw,staging,scope,null);}
+    /* A bare .d2s (magic 55 AA 55 AA) is accepted next to ZIP archives: it is laid out as <name>/<name>.d2s.
+     * 直接选 .d2s 也可导入，自动放成 <名>/<名>.d2s。 */
+    static Summary unzip(InputStream input,File staging,String scope,File live)throws IOException {
         plainPath(staging);if(staging.exists())throw new IOException("Staging already exists");Files.createDirectories(staging.toPath());
+        BufferedInputStream raw=new BufferedInputStream(input);raw.mark(8);byte[] head=new byte[4];int got=0;
+        while(got<4){int n=raw.read(head,got,4-got);if(n<0)break;got+=n;}raw.reset();
+        if(got==4&&(head[0]&255)==0x55&&(head[1]&255)==0xaa&&(head[2]&255)==0x55&&(head[3]&255)==0xaa){
+            try{d2s(raw,staging,live);Summary result=inspect(staging);if(result.files==0)throw new IOException("Archive contains no saves");return result;}
+            catch(IOException|RuntimeException ex){delete(staging);throw ex;}
+        }
         Set<String> names=new HashSet<>();Paths paths=new Paths();long total=0;int entries=0;byte[] buffer=new byte[65536];
         try(ZipInputStream zip=new ZipInputStream(new BufferedInputStream(raw))){ZipEntry e;
             while((e=zip.getNextEntry())!=null){if(++entries>MAX_FILES*2)throw new IOException("Too many ZIP entries");
@@ -94,7 +108,7 @@ final class SaveArchive {
                     ByteArrayOutputStream meta=new ByteArrayOutputStream();int n;
                     while((n=zip.read(buffer))!=-1){if(meta.size()+n>16384)throw new IOException("Oversized archive marker");meta.write(buffer,0,n);}
                     Matcher m=Pattern.compile("\"scope\"\\s*:\\s*\"([^\"]*)\"").matcher(new String(meta.toByteArray(),StandardCharsets.UTF_8));
-                    if(m.find()&&!scope.equals(m.group(1)))throw new IOException("Archive belongs to a different save scope");
+                    if(m.find()&&!plainScope(scope).equals(plainScope(m.group(1))))throw new IOException("Archive belongs to a different save scope");
                     zip.closeEntry();continue;
                 }
                 File file=new File(staging,name);plainPath(file);
@@ -105,6 +119,47 @@ final class SaveArchive {
             }
             Summary result=inspect(staging);if(result.files==0)throw new IOException("Archive contains no saves");return result;
         }catch(IOException|RuntimeException ex){delete(staging);throw ex;}
+    }
+    static final int D2S_NAME=299,D2S_NAME_BYTES=48;
+    static long d2sChecksum(byte[] b){
+        long sum=0;
+        for(int i=0;i<b.length;i++){int v=(i>=12&&i<16)?0:b[i]&255;sum=(((sum<<1)|(sum>>>31))&0xffffffffL)+v&0xffffffffL;}
+        return sum;
+    }
+    private static long le32(byte[] b,int at){return (b[at]&255L)|(b[at+1]&255L)<<8|(b[at+2]&255L)<<16|(b[at+3]&255L)<<24;}
+    /* Letters plus one inner underscore survive (a hyphen becomes the underscore); the game asks to rename other
+     * names, e.g. Chinese ones, and then stalls on this build.
+     * 只保留英文字母和一个中间下划线（连字符转为下划线）。 */
+    static final String[] CLASSES={"Amazon","Sorceress","Necromancer","Paladin","Barbarian","Druid","Assassin","Warlock"};
+    static String characterName(String original,File live){return characterName(original,live,-1);}
+    /* When nothing usable is left, the class name stands in (class byte at 0x18). */
+    static String characterName(String original,File live,int characterClass){
+        String letters=original.replace('-','_').replaceAll("[^A-Za-z_]","").replaceAll("_+","_").replaceAll("^_|_$","");
+        int bar=letters.indexOf('_');if(bar>=0)letters=letters.substring(0,bar+1)+letters.substring(bar+1).replace("_","");
+        if(letters.length()>15)letters=letters.substring(0,15).replaceAll("_$","");
+        if(letters.replace("_","").length()<2)letters=characterClass>=0&&characterClass<CLASSES.length?CLASSES[characterClass]:"Hero";
+        String name=letters;
+        for(int i=0;i<26*26&&live!=null&&new File(live,name).exists();i++){
+            String suffix=i<26?String.valueOf((char)('A'+i)):""+(char)('A'+(i/26-1))+(char)('A'+i%26);
+            name=letters.substring(0,Math.min(letters.length(),15-suffix.length()))+suffix;
+        }
+        return name;
+    }
+    private static void d2s(InputStream in,File staging,File live)throws IOException {
+        ByteArrayOutputStream all=new ByteArrayOutputStream();byte[] buffer=new byte[65536];int n;
+        while((n=in.read(buffer))!=-1){if(all.size()+n>MAX_FILE)throw new IOException("Character file too large");all.write(buffer,0,n);}
+        byte[] b=all.toByteArray();
+        if(b.length<D2S_NAME+D2S_NAME_BYTES||le32(b,4)!=0x69||le32(b,8)!=b.length||le32(b,12)!=d2sChecksum(b))throw new IOException("Invalid character file");
+        int end=D2S_NAME;while(end<D2S_NAME+D2S_NAME_BYTES&&b[end]!=0)end++;
+        String original=new String(b,D2S_NAME,end-D2S_NAME,StandardCharsets.UTF_8),name=characterName(original,live,b[0x18]&255);
+        if(!name.equals(original)){
+            Arrays.fill(b,D2S_NAME,D2S_NAME+D2S_NAME_BYTES,(byte)0);byte[] ascii=name.getBytes(StandardCharsets.US_ASCII);System.arraycopy(ascii,0,b,D2S_NAME,ascii.length);
+            long sum=d2sChecksum(b);for(int i=0;i<4;i++)b[12+i]=(byte)(sum>>>(8*i));
+        }
+        File dir=new File(staging,name);Files.createDirectories(dir.toPath());
+        try(FileOutputStream out=new FileOutputStream(new File(dir,name+".d2s"))){out.write(b);out.getFD().sync();}
+        try(FileOutputStream out=new FileOutputStream(new File(dir,name+".d2s.meta"))){
+            out.write(("{\"last_modified_time\":"+System.currentTimeMillis()+"000000}").getBytes(StandardCharsets.UTF_8));out.getFD().sync();}
     }
     static Summary preview(File live,File imported)throws IOException {
         Summary summary=inspect(imported),existing=inspect(live);Paths paths=new Paths();Set<String> exact=new HashSet<>(existing.paths);
@@ -119,7 +174,7 @@ final class SaveArchive {
     }
     private static File sibling(File live,String suffix){return new File(live.getParentFile(),live.getName()+suffix);}
     static File latestBackup(File files,String scope)throws IOException {
-        if(!scope.matches("base|mod-[a-z0-9_-]{1,48}"))throw new IOException("Invalid backup scope");
+        if(!scope.matches("(debug-)?(base|mod-[a-z0-9_-]{1,48})|debug"))throw new IOException("Invalid backup scope");
         File dir=new File(files.getCanonicalFile(),"d2r-mobile/save-backups");plainPath(dir);if(!dir.exists())return null;
         File[] list=dir.listFiles();if(list==null)throw new IOException("Cannot list backups");File latest=null;
         for(File f:list)if(f.getName().startsWith(scope+"-")&&f.getName().matches(Pattern.quote(scope)+"-[0-9]+-[a-f0-9-]{36}\\.zip")){

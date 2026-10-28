@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #define DEBUG_LINE 256
 #define D2R_BUILD_ID "db0507f36b84200ac05f75d76ed5026f"
@@ -25,6 +26,41 @@ static struct {
     uint64_t game, runs, world, token, next_poll, deadline;
     uint32_t player_id, target, area, tick, made, picked;
 } dbg;
+static pthread_mutex_t ui_lock=PTHREAD_MUTEX_INITIALIZER;
+static struct { char command[160],summary[256]; uint64_t token,request_token,expires; unsigned serial; int live; } ui;
+int dm_android_debug_active(void){return dbg.enabled && dbg.attached;}
+static void publish_ui(void) {
+    pthread_mutex_lock(&ui_lock);
+    ui.token=dbg.token;ui.live=dbg.enabled && dbg.attached && dbg.game && dbg.player_id && !dbg.target;
+    snprintf(ui.summary,sizeof ui.summary,"%s | area %u | %s: %.150s%s",
+        dbg.enabled?"DEBUG save":"NORMAL save",dbg.area,dbg.outcome,dbg.detail,ui.command[0]?" | queued":"");
+    pthread_mutex_unlock(&ui_lock);
+}
+void dm_android_debug_summary(char *text,size_t capacity) {
+    pthread_mutex_lock(&ui_lock);
+    snprintf(text,capacity,"%s",ui.summary[0]?ui.summary:dbg.enabled?"DEBUG save":"Debug disabled; enable for next launch");
+    pthread_mutex_unlock(&ui_lock);
+}
+int dm_android_debug_submit(const char *command) {
+    if(!command || !*command || strlen(command)>=sizeof ui.command)return 0;
+    pthread_mutex_lock(&ui_lock);
+    int ok=ui.live && !ui.command[0];
+    if(ok){strcpy(ui.command,command);ui.request_token=ui.token;ui.expires=now_ns()+30000000000ull;}
+    pthread_mutex_unlock(&ui_lock);return ok;
+}
+int dm_android_debug_requested(void) {
+    char marker[PATH_MAX];
+    return dbg.directory[0] && snprintf(marker,sizeof marker,"%s/enable",dbg.directory)<(int)sizeof marker && access(marker,F_OK)==0;
+}
+int dm_android_debug_next_boot(int enabled) {
+    char marker[PATH_MAX],temp[PATH_MAX];
+    if(!dbg.directory[0] || snprintf(marker,sizeof marker,"%s/enable",dbg.directory)>=(int)sizeof marker ||
+        snprintf(temp,sizeof temp,"%s/enable.tmp",dbg.directory)>=(int)sizeof temp)return 0;
+    if(!enabled)return !unlink(marker)||errno==ENOENT;
+    int fd=open(temp,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)return 0;
+    int ok=write(fd,"1\n",2)==2 && fsync(fd)==0;if(close(fd))ok=0;
+    if(ok)ok=!rename(temp,marker);if(!ok)unlink(temp);return ok;
+}
 
 static int path_join(char *out,size_t cap,const char *root,const char *leaf) {
     int n=snprintf(out,cap,"%s/%s",root,leaf);return n>0 && (size_t)n<cap;
@@ -36,12 +72,12 @@ int dm_android_d2r_debug_configure(const char *root,char *save,size_t capacity) 
         !path_join(marker,sizeof marker,dbg.directory,"enable")) return EINVAL;
     const char *env=getenv("DM_DEBUG_MODE");
     dbg.enabled=(env && !strcmp(env,"1")) || access(marker,F_OK)==0;
-    if (!dbg.enabled) return 0;
-    if (!path_join(save,capacity,dbg.directory,"save") ||
-        !path_join(dbg.inbox,sizeof dbg.inbox,dbg.directory,"commands.txt") ||
+    if (!path_join(dbg.inbox,sizeof dbg.inbox,dbg.directory,"commands.txt") ||
         !path_join(dbg.claimed,sizeof dbg.claimed,dbg.directory,"processing.txt") ||
         !path_join(dbg.status,sizeof dbg.status,dbg.directory,"status.json")) return ENAMETOOLONG;
     if (mkdir(dbg.directory,0700) && errno!=EEXIST) return errno;
+    if (!dbg.enabled) return 0;
+    if (!path_join(save,capacity,dbg.directory,"save"))return ENAMETOOLONG;
     dbg.token=now_ns();
     return 0;
 }
@@ -96,6 +132,7 @@ int dm_android_d2r_debug_attach(module_t *main) {
     }
     receipt();return dbg.attached;
 }
+enum { GOLD_LIMIT=9999999,POINT_LIMIT=10000 };
 static int number(const char *s,uint32_t limit,uint32_t *out) {
     if (!s || !*s)return 0;
     uint32_t n=0;
@@ -184,6 +221,7 @@ static int pickup(uint64_t game,uint64_t player,uint64_t item) {
     uint64_t current=dm_diag_srv_item(id);
     return current==item && field(current,0xc,&mode,4) && mode!=3;
 }
+static int catalog_item(uint64_t,uint64_t,int,uint32_t,uint32_t);
 static void execute(uint64_t game,uint64_t player,char *text) {
     char *argv[9],*save=NULL;int argc=0;
     for(char *t=strtok_r(text," \t\r\n",&save);t;t=strtok_r(NULL," \t\r\n",&save)){
@@ -198,6 +236,16 @@ static void execute(uint64_t game,uint64_t player,char *text) {
     if(token!=dbg.token || !dbg.ready){result("rejected","stale run or game not ready");return;}
     char *cmd=argv[2];
     if(!strcmp(cmd,"status") && argc==3){result("ok","status sampled");return;}
+    if(!strcmp(cmd,"catalog")) {
+        uint32_t kind=0,index=0;
+        if(argc!=5 || !number(argv[3],1,&kind) || !number(argv[4],2047,&index)){
+            result("rejected","catalog: kind 0=set/1=unique, record");return;
+        }
+        result("executing","creating catalogue item through original server generator");
+        if(!receipt()){result("io_error","receipt failed before catalogue generation");return;}
+        int ok=catalog_item(game,player,(int)kind,index,0);dbg.made=ok?1:0;dbg.picked=0;
+        result(ok?"ok":"failed",ok?"catalogue item dropped on the ground":"item unavailable or no free ground spot");return;
+    }
     if(!strcmp(cmd,"give")) {
         uint32_t code=0,q=2,n=1;int inv=0,end=argc;
         if(end>4 && (!strcmp(argv[end-1],"inventory") || !strcmp(argv[end-1],"inv"))){inv=1;end--;}
@@ -210,7 +258,7 @@ static void execute(uint64_t game,uint64_t player,char *text) {
         if(!receipt()){result("io_error","receipt failed before item generation");return;}
         for(uint32_t i=0;i<n;i++){uint64_t u=drop(game,player,code,(int)q);if(u){dbg.made++;if(inv && pickup(game,player,u))dbg.picked++;}}
         result(dbg.made==n && (!inv || dbg.picked==n)?"ok":dbg.made?"partial":"failed",
-            "made is spawn count; picked is observed item relocation; inspect actual quality in game");return;
+            "item dropped on the ground");return;
     }
     if(!strcmp(cmd,"scene") || !strcmp(cmd,"warp")) {
         uint32_t level=0;uint8_t version=0;
@@ -232,10 +280,32 @@ static void execute(uint64_t game,uint64_t player,char *text) {
         set_stat(player,6,hp);set_stat(player,8,mp);
         result(get_stat(player,6)==hp && get_stat(player,8)==mp?"ok":"failed","server values checked; UI update requires device validation");return;
     }
+    if(!strcmp(cmd,"points") && argc==5 && (!strcmp(argv[3],"skill")||!strcmp(argv[3],"stat"))){
+        /* Unused points: stat 5 = skill points, stat 4 = attribute points. */
+        int skill=!strcmp(argv[3],"skill"),id=skill?5:4;uint32_t amount=0;
+        int have=get_stat(player,id);
+        if(!number(argv[4],1000,&amount) || !amount || have<0 || have>(int)(POINT_LIMIT-amount)){
+            result("rejected","points: skill|stat, 1..1000, total unused points must stay below 10000");return;
+        }
+        result("executing",skill?"adding skill points":"adding attribute points");
+        if(!receipt()){result("io_error","receipt failed before adding points");return;}
+        set_stat(player,id,have+(int)amount);
+        result(get_stat(player,id)==have+(int)amount?"ok":"failed","unused points read back on server");return;
+    }
+    if(!strcmp(cmd,"gold") && argc==5 && !strcmp(argv[3],"add")){
+        uint32_t amount=0;int have=get_stat(player,14);
+        if(!number(argv[4],1000000,&amount) || !amount || have<0 || have>(int)(GOLD_LIMIT-amount)){
+            result("rejected","gold add: 1..1000000 and carried gold must stay below 10,000,000");return;
+        }
+        result("executing","adding carried gold");
+        if(!receipt()){result("io_error","receipt failed before adding gold");return;}
+        set_stat(player,14,have+(int)amount);
+        result(get_stat(player,14)==have+(int)amount?"ok":"failed","carried gold read back on server");return;
+    }
     if(!strcmp(cmd,"gold")){
         uint32_t amount=0;int level=get_stat(player,12);
         if(argc!=4 || level<1 || level>99 || !number(argv[3],(uint32_t)level*10000,&amount)){
-            result("rejected","gold must be decimal 0..character-level*10000");return;
+            result("rejected","gold must be decimal 0..character-level*10000, or: gold add N");return;
         }
         result("executing","setting carried gold");
         if(!receipt()){result("io_error","receipt failed before setting gold");return;}
@@ -264,6 +334,26 @@ static void poll(uint64_t game,uint64_t player) {
     }else if((unsigned char)line[i]>126){result("rejected","ASCII commands only");return;}
     line[n]=0;execute(game,player,line);
 }
+#ifndef DM_DEBUG_TEST
+#include "d2r_debug_items.inc"
+#include "d2r_debug_shop.inc"
+#else
+static int catalog_item(uint64_t,uint64_t,int,uint32_t,uint32_t);
+static void shop_patch(uint64_t player){(void)player;}
+#endif
+static int poll_ui(uint64_t game,uint64_t player) {
+    char command[160]="";uint64_t token=0;unsigned serial=0;
+    pthread_mutex_lock(&ui_lock);
+    if(ui.command[0] && (ui.request_token!=dbg.token || now_ns()>=ui.expires)) {
+        ui.command[0]=0;result("cancelled","UI request expired or character/world changed");
+    }else if(ui.command[0] && dbg.ready){
+        strcpy(command,ui.command);ui.command[0]=0;token=ui.request_token;serial=++ui.serial;
+    }
+    pthread_mutex_unlock(&ui_lock);
+    if(!command[0])return 0;
+    char line[DEBUG_LINE];snprintf(line,sizeof line,"ui-%u %llx %s",serial,(unsigned long long)token,command);
+    execute(game,player,line);return 1;
+}
 void dm_android_d2r_debug_tick(uint64_t game,uint64_t player,uint8_t *base,uint64_t runs) {
     if(!dbg.attached || !dbg.enabled || base!=dbg.image->base)return;
     uint64_t now=now_ns();if(now<dbg.next_poll)return;dbg.next_poll=now+200000000ull;
@@ -272,6 +362,7 @@ void dm_android_d2r_debug_tick(uint64_t game,uint64_t player,uint8_t *base,uint6
     uint32_t id=0,mode=0;uint8_t paused=1,rift_pause=1;
     if(!game || !runs || !scene.game){game=runs=player=0;}
     field(player,8,&id,4);
+    if(player)shop_patch(player);
     if(game!=dbg.game || runs!=dbg.runs || scene.world_epoch!=dbg.world || (player && id!=dbg.player_id)){
         dbg.game=game;dbg.runs=runs;dbg.player_id=id;dbg.world=scene.world_epoch;dbg.token++;
         if(dbg.target){dbg.target=0;result("cancelled","run changed during transition");}
@@ -285,7 +376,7 @@ void dm_android_d2r_debug_tick(uint64_t game,uint64_t player,uint8_t *base,uint6
         if(dbg.ready && dbg.area==dbg.target){dbg.target=0;result("ok","target area observed on server; loading screen closed");}
         else if(now>=dbg.deadline){dbg.target=0;result("timeout","target not observed within 30 seconds; no automatic retry");}
         else dbg.ready=0;
-        receipt();return;
+        receipt();publish_ui();return;
     }
-    poll(game,player);receipt();
+    if(!poll_ui(game,player))poll(game,player);receipt();publish_ui();
 }

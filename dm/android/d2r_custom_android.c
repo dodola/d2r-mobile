@@ -1,5 +1,6 @@
 /* Checked transport for the unchanged shared Custom-page settings policy. */
 #include "d2r_custom_android.h"
+#include "d2r_debug_mode.h"
 #include "../host/dm_custom_ui.h"
 #include "../host/hle.h"
 #include "../host/dm_cursor.h"
@@ -35,6 +36,7 @@ void dm_android_custom_message(const char *category,const char *action,const cha
     if(!title_ok()||!category||!action||!argument||strcmp(category,"PanelManager")||strcmp(action,"ClosePanel"))return;
     if(!strcmp(argument,"TouchCustom_mod"))atomic_fetch_or(&action_clicks,1);
     if(!strcmp(argument,"TouchCustom_map_reveal"))atomic_fetch_or(&action_clicks,2);
+    if(!strcmp(argument,"TouchCustom_debug"))atomic_fetch_or(&action_clicks,4);
 }
 /* The shared graphics OBJECT is compiled without title-target macros. Its
  * weak callback resolves only in this D2R app, never in the generic shell. */
@@ -192,17 +194,20 @@ static void platform_action(void *opaque,uint64_t w) {
     if(i<0||c->nodes[i].vt!=(uintptr_t)title->base+DM_VT_BUTTON||!live(c,(unsigned)i))return;
     if(!strcmp(c->nodes[i].text,"TouchCustom_mod")){void dm_custom_cycle_mod(void);dm_custom_cycle_mod();}
     if(!strcmp(c->nodes[i].text,"TouchCustom_map_reveal"))dm_android_map_request_when_ready(NULL);
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+    if(!strcmp(c->nodes[i].text,"TouchCustom_debug"))dm_android_debug_next_boot(!dm_android_debug_requested());
+#endif
 }
 static int clicked(void *opaque,uint64_t w) {
     context *c=opaque;int i=locate(c,w);if(i<0||!live(c,(unsigned)i))return 0;
-    unsigned bit=!strcmp(c->nodes[i].text,"TouchCustom_mod")?1:!strcmp(c->nodes[i].text,"TouchCustom_map_reveal")?2:0;
+    unsigned bit=!strcmp(c->nodes[i].text,"TouchCustom_mod")?1:!strcmp(c->nodes[i].text,"TouchCustom_map_reveal")?2:!strcmp(c->nodes[i].text,"TouchCustom_debug")?4:0;
     return bit&&(atomic_fetch_and(&action_clicks,~bit)&bit)!=0;
 }
 /* 文本只写入当前树中类型匹配的控件；地址来自 94012 的原版字符串赋值和刷新函数。
  * Text writes target matching live widgets only; addresses are 94012's string assignment and refresh functions. */
 static int set_text(void *opaque,uint64_t w,const char *text) {
     context *c=opaque;int i=locate(c,w);uint64_t base=(uintptr_t)title->base,pair[2];
-    if(i<0||(strcmp(c->nodes[i].text,"TouchCustom_mod_Text")&&strcmp(c->nodes[i].text,"TouchCustom_map_reveal_Text"))||c->nodes[i].vt!=base+DM_VT_TEXT||!live(c,(unsigned)i)||!read_vm(w+0x88,pair,16))return 0;
+    if(i<0||(strcmp(c->nodes[i].text,"TouchCustom_mod_Text")&&strcmp(c->nodes[i].text,"TouchCustom_map_reveal_Text")&&strcmp(c->nodes[i].text,"TouchCustom_debug_Text"))||c->nodes[i].vt!=base+DM_VT_TEXT||!live(c,(unsigned)i)||!read_vm(w+0x88,pair,16))return 0;
     size_t n=strlen(text);char previous[256];if(n>=sizeof previous)return 0;
     if(pair[1]==n&&read_vm(pair[0],previous,n)&&!memcmp(previous,text,n))return 1;
     if(!live(c,(unsigned)i))return 0;
