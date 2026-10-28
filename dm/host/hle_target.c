@@ -11,8 +11,12 @@
 // within a tier the original scores still decide, across tiers the higher tier wins; the eligibility checks are not touched at all (a rejected high-tier monster is still rejected).
 // Tiers: Boss = classes with boss=1 in monstats.txt (3.3 data, see BOSS_CLASS); elite = monster data TypeFlag includes super unique/champion/unique.
 #include "dm.h"
+#if defined(__ANDROID__)
+extern int dm_tg_vm_read(uint64_t,void *,size_t);
+#else
 #include <TargetConditionals.h>
 #include <mach/mach.h>
+#endif
 #include <math.h>
 
 enum { UNIT_MONSTER = 1, TF_SUPERUNIQUE = 0x02, TF_CHAMPION = 0x04, TF_UNIQUE = 0x08 };
@@ -25,9 +29,13 @@ static const uint16_t BOSS_CLASS[] = {156, 211, 229, 242, 243, 250, 256, 267, 33
                                       559, 570, 704, 705, 706, 707, 708, 709, 745, 746, 747};
 
 static int read_live(uint64_t a, void *out, size_t n) {
+#if defined(__ANDROID__)
+    return dm_tg_vm_read(a,out,n);
+#else
     vm_size_t got = 0;
     return a >= 0x1000 && a <= UINT64_MAX - n &&
            vm_read_overwrite(mach_task_self(), a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n;
+#endif
 }
 
 // 返回 0 普通 / 1 精英 / 2 Boss；读不到或不是怪物 = -1（不动分数）
@@ -42,6 +50,17 @@ static int unit_rank(uint64_t unit, uint32_t *cls, uint8_t *flags) {
     if (!read_live(unit + 0x10, &data, 8) || !read_live(data + 0x1a, flags, 1)) return -1;
     return (*flags & (TF_SUPERUNIQUE | TF_CHAMPION | TF_UNIQUE)) ? 1 : 0;
 }
+// 越肩镜头的怪物指示（diag.c cam_threats_tick）用同一套档位：0 普通 / 1 精英 / 2 Boss，不是怪 -1
+// The over-the-shoulder camera's monster indicators (diag.c cam_threats_tick) use the same tiers: 0 normal / 1 elite / 2 Boss, -1 when not a monster
+int dm_target_rank(uint64_t unit) { uint32_t cls = 0; uint8_t flags = 0; return unit_rank(unit, &cls, &flags); }
+// 怪物指示的配色档（diag.c cam_threats_tick → dm_cam_threats）：按原版名字颜色分开 0 普通 / 1 冠军（蓝）/ 2 独特与超级独特（暗金）/ 3 幕首领；
+// 不是怪 -1。自动选目标仍用上面三档（精英并成一档），这里只多分一层，不改选怪
+// Colour tier for the monster indicators (diag.c cam_threats_tick -> dm_cam_threats), split by the original name colours: 0 normal / 1 champion (blue) /
+// 2 unique and super unique (gold) / 3 act boss; -1 when not a monster. Auto-targeting keeps the three tiers above (elites merged); this only splits one more
+// level and does not change targeting
+int dm_threat_tier(uint64_t unit) {
+    uint32_t cls = 0; uint8_t flags = 0; int r = unit_rank(unit, &cls, &flags);
+    return r < 0 ? -1 : r == 2 ? 3 : (flags & (TF_SUPERUNIQUE | TF_UNIQUE)) ? 2 : (flags & TF_CHAMPION) ? 1 : 0; }
 
 static FILE *g_log; static unsigned g_nlog;
 static void target_rank_obs(const uint64_t *regs) {

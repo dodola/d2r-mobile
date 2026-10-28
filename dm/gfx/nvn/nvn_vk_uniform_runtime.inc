@@ -1,8 +1,9 @@
 /* 常量缓冲快照直接读取受脏页跟踪的客体内容，并覆盖同提交的 GPU 写入。
  * Uniform snapshots read dirty-tracked guest contents directly and overlay writes from the same submission.
  */
-static int uniform_snapshot(Range r,VkDescriptorBufferInfo *info,uint64_t *serial) {
-    if(!G.uniform_versions||!r.addr||!r.size||r.size>65536)return 0;
+static int uniform_snapshot(Range r,VkDescriptorBufferInfo *info,uint64_t *serial,int cam_allowed) {
+    int camera=camera_candidate(r,cam_allowed);
+    if((!G.uniform_versions&&!camera)||!r.addr||!r.size||r.size>65536)return 0;
     if(G.buffer_versions&&read_snapshot_aliases_writer(r))return 0;
     uint64_t off=0;if(ghost_pool_override(r.addr,r.size,&off))return 0;
     VPool *p=pool_find(r.addr,r.size,&off);if(!p)die("uniform snapshot pool range",r.addr);
@@ -12,7 +13,7 @@ static int uniform_snapshot(Range r,VkDescriptorBufferInfo *info,uint64_t *seria
      */
     unsigned bucket=(unsigned)(((r.addr^(r.size*31)^p->serial)*UINT64_C(11400714819323198485))>>52);
     UniformSource *memo=&S.uniform_sources[bucket];int changed=1;
-    if(memo->range.addr==r.addr&&memo->range.size==r.size&&memo->serial==p->serial&&memo->epoch==S.epoch){
+    if(!camera&&memo->range.addr==r.addr&&memo->range.size==r.size&&memo->serial==p->serial&&memo->epoch==S.epoch){
         changed=nvn_dirty_since((void *)(uintptr_t)r.addr,r.size,memo->stamp);
         for(int i=memo->writes;i<S.nwrites&&!changed;i++)if(overlap(r.addr,r.size,S.writes[i].addr,S.writes[i].size))changed=1;
         if(!changed){memo->writes=S.nwrites;*info=memo->info;G.profile_uniform_reuses++;return 1;}
@@ -23,6 +24,7 @@ static int uniform_snapshot(Range r,VkDescriptorBufferInfo *info,uint64_t *seria
         Range w=S.writes[i];uint64_t lo=r.addr>w.addr?r.addr:w.addr,hi=r.addr+r.size<w.addr+w.size?r.addr+r.size:w.addr+w.size;
         if(S.write_cpu[i])memcpy(bytes+lo-r.addr,S.write_cpu[i]+lo-w.addr,hi-lo);else gpu=1;
     }
+    if(camera&&!gpu)camera_patch(bytes,r.size);
     G.profile_uniform_hash_bytes+=r.size;
     uint32_t hash=gpu?0:(uint32_t)crc32(0,bytes,(uInt)r.size),align=(uint32_t)G.properties.limits.minUniformBufferOffsetAlignment;
     if(align<4)align=4;NvnUniformRef ref;
@@ -56,5 +58,5 @@ static int uniform_snapshot(Range r,VkDescriptorBufferInfo *info,uint64_t *seria
         }
         all_barrier();
     }
-    *memo=(UniformSource){.range=r,.serial=p->serial,.epoch=S.epoch,.stamp=stamp,.writes=S.nwrites,.info=*info};return 1;
+    if(!camera)*memo=(UniformSource){.range=r,.serial=p->serial,.epoch=S.epoch,.stamp=stamp,.writes=S.nwrites,.info=*info};return 1;
 }

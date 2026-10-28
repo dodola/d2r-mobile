@@ -117,6 +117,9 @@ int dm_ui_hit_selected_skill(uint32_t hit_id);
 int dm_ui_bind_active(void); uint64_t dm_ui_auto_release(void);   /* 取手柄处用：此刻要从玩家输入里松开的键 | Used where the controller is read: the keys to release from the player's input right now */ int dm_ui_bind_skill_hit(float *nx, float *ny);   /* 最近一次命中（吸附后）落在加点类按钮上：1 = 技能树的技能图标，2 = 属性页的「+」；带归一化坐标 | The most recent hit (after snapping) landed on a point-spending button: 1 = a skill icon in the skill tree, 2 = a '+' on the attributes page; comes with normalized coordinates */
 void dm_ui_bind_cancel(void);
 void dm_ui_map_full(int on);
+// 面板打开时暂用小地图，关闭后恢复选择（任意线程）。
+// Use the minimap while panels are open; restore the choice on close (any thread).
+void dm_ui_map_hold(int on);
 int dm_ui_map_is_full(void);
 void dm_ui_text_entered(const char *text);   // 系统键盘返回时调：text = 写回给游戏的最终文本（UTF-8）；取消 / 空串传 NULL | Called when the system keyboard returns: text = final text written back to the game (UTF-8); pass NULL for cancel / empty string
 // 延迟读数（诊断，DM_LAT_LOG=1）：关键时刻打一行「LAT <毫秒时刻> <事件>」，量手指落下 / 松手到游戏生效的延迟

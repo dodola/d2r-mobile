@@ -1,11 +1,5 @@
-/* Vulkan counterpart of upstream warm_start / pso_user_record / warm_claim.
- * Record only complete pipelines actually requested; never a shader cross-product.
- * Stable shader names replace process-local shader indices in the disk manifest.
- * One compiler owns pending work. Replay may wait for a required pipeline, but
- * never uses a substitute pipeline. No worker takes G.lock.
- * 异步模式 | Async mode (default, DM_DISABLE_PSO_ASYNC turns it off): a graphics draw whose pipeline is still
- * queued/building is waited for only within a small per-frame budget, after that the draw is skipped
- * (the pipeline keeps compiling and the next frames pick it up) instead of stalling the replay thread. */
+/* 需求与预热共用工厂，持久清单只记录实际管线，正常绘制始终等待需求编译。
+ * Demand and warm-up share one factory. Persistent manifests record actual pipelines; normal draws always wait for demanded compilation. */
 typedef struct {PsoKey key;char shader[2][17];} StablePso;
 #define PSO_WORKERS_MAX 4
 enum { PJ_QUEUED=1,PJ_BUILDING,PJ_READY,PJ_FAILED,PJ_CLAIMED,PJ_DORMANT };
@@ -15,7 +9,7 @@ static struct {
     PipelineJob jobs[LIMIT_PSOS];unsigned count;int mode,started,trace;
     char manifest_path[1200],legacy_path[1200];DmPipelineIdentity identity;
     uint64_t generation,saved_generation,last_save,loaded_bytes;
-    uint64_t sync_creates,claims,waits,wait_ns,skips,frame_wait_ns,async_budget_ns;int async,workers;
+    uint64_t sync_creates,claims,waits,wait_ns;int workers;
     _Atomic uint64_t background_creates,background_ns;
     _Atomic unsigned warm_pending;
 } PW={.lock=PTHREAD_MUTEX_INITIALIZER,.store_lock=PTHREAD_MUTEX_INITIALIZER,.build_lock=PTHREAD_MUTEX_INITIALIZER,.changed=PTHREAD_COND_INITIALIZER};
@@ -30,8 +24,14 @@ static VkSpecializationInfo pipeline_specialization(const VShader *s,const uint3
 }
 /* This is the single factory for demand compilation and manifest warm-up.
  * Its only inputs are immutable key bytes, shader objects and device handles. */
+static int pipeline_stable_valid(const StablePso *s);
+#include "nvn_vk_pipe_guard.h"
 static VkResult pipeline_build(const PsoKey *k,VShader *v,VShader *f,Pso *out) {
-    memset(out,0,sizeof *out);VkDescriptorSetLayout layouts[]={v->layout,f?f->layout:VK_NULL_HANDLE};
+    StablePso guard={0};guard.key=*k;guard.key.shader[0]=guard.key.shader[1]=0;
+    memcpy(guard.shader[0],v->key,17);if(f)memcpy(guard.shader[1],f->key,17);
+    memset(out,0,sizeof *out);
+    if(pipe_guard_quarantined(&guard))return VK_ERROR_INVALID_SHADER_NV;
+    VkDescriptorSetLayout layouts[]={v->layout,f?f->layout:VK_NULL_HANDLE};
     VkPipelineLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,.setLayoutCount=f?2u:1u,.pSetLayouts=layouts};
     VkResult result=vkCreatePipelineLayout(G.device,&li,NULL,&out->layout);if(result!=VK_SUCCESS)return result;
     VkSpecializationMapEntry maps[2][LIMIT_BINDINGS+3];PipelineSpecialization values[2];
@@ -61,7 +61,7 @@ static VkResult pipeline_build(const PsoKey *k,VShader *v,VShader *f,Pso *out) {
     VkRenderPass pass=VK_NULL_HANDLE;
     if(k->compute){
         VkComputePipelineCreateInfo ci={.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,.stage=stages[0],.layout=out->layout};
-        pthread_rwlock_rdlock(&PC.cache_lock);result=vkCreateComputePipelines(G.device,G.pipeline_cache,1,&ci,NULL,&out->pipeline);if(result==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);pthread_rwlock_unlock(&PC.cache_lock);
+        pthread_rwlock_rdlock(&PC.cache_lock);pipe_guard_begin(&guard);result=vkCreateComputePipelines(G.device,G.pipeline_cache,1,&ci,NULL,&out->pipeline);pipe_guard_end(&guard,result);if(result==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);pthread_rwlock_unlock(&PC.cache_lock);
     }else{
         const PassKey *p=&k->pass;
         VkSubpassDescription sub={.flags=p->subpass_flags,.inputAttachmentCount=p->input_count,.pInputAttachments=p->input_count?&p->input:NULL,.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS,.colorAttachmentCount=p->color_count,.pColorAttachments=p->color,.pDepthStencilAttachment=p->has_depth?&p->depth:NULL};
@@ -81,7 +81,7 @@ static VkResult pipeline_build(const PsoKey *k,VShader *v,VShader *f,Pso *out) {
         VkDynamicState dynamic[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS};
         VkPipelineDynamicStateCreateInfo dy={.sType=VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,.dynamicStateCount=3,.pDynamicStates=dynamic};
         VkGraphicsPipelineCreateInfo gp={.sType=VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,.flags=k->flags,.stageCount=f?2u:1u,.pStages=stages,.pVertexInputState=&vi,.pInputAssemblyState=&ai,.pViewportState=&vp,.pRasterizationState=&rs,.pMultisampleState=&ms,.pDepthStencilState=&ds,.pColorBlendState=&cb,.pDynamicState=&dy,.layout=out->layout,.renderPass=pass};
-        pthread_rwlock_rdlock(&PC.cache_lock);result=vkCreateGraphicsPipelines(G.device,G.pipeline_cache,1,&gp,NULL,&out->pipeline);if(result==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);pthread_rwlock_unlock(&PC.cache_lock);
+        pthread_rwlock_rdlock(&PC.cache_lock);pipe_guard_begin(&guard);result=vkCreateGraphicsPipelines(G.device,G.pipeline_cache,1,&gp,NULL,&out->pipeline);pipe_guard_end(&guard,result);if(result==VK_SUCCESS)atomic_fetch_add(&PC.revision,1);pthread_rwlock_unlock(&PC.cache_lock);
     }
 done:
     if(pass)vkDestroyRenderPass(G.device,pass,NULL);
@@ -129,8 +129,10 @@ static void pipeline_cache_init(void) {
     const uint8_t storage_bias=getenv("DM_DISABLE_STORAGE_BIAS")==NULL;
     PW.identity.options=crc32(PW.identity.options,&storage_bias,1);
     memcpy(PW.identity.uuid,G.properties.pipelineCacheUUID,16);
+    /* 禁用磁盘预热时，守卫仍须按着色器包隔离。
+     * The guard still isolates shader packs when disk warm-up is disabled. */
+    if(dir&&*dir){size_t index_size=0;uint8_t *index=read_file("shader_index.bin",&index_size);PW.identity.shader_crc=crc32(0,index,(uInt)index_size);free(index);}
     if(PW.mode){
-        size_t index_size=0;uint8_t *index=read_file("shader_index.bin",&index_size);PW.identity.shader_crc=crc32(0,index,(uInt)index_size);free(index);
         /* One user manifest per driver identity: switching between the system driver and Turnip no longer overwrites the
          * other driver's warm-start list. The unsuffixed pso_user.vkbin (shipped seeds) is still read, and rejected by the
          * identity check when it belongs to another driver. */
@@ -142,6 +144,7 @@ static void pipeline_cache_init(void) {
         if(snprintf(PW.manifest_path,sizeof PW.manifest_path,"%s/pso_user-%08x.vkbin",dir,manifest_id)>=(int)sizeof PW.manifest_path||
            snprintf(PW.legacy_path,sizeof PW.legacy_path,"%s/pso_user.vkbin",dir)>=(int)sizeof PW.legacy_path)die("pipeline manifest path",0);
     }
+    pipe_guard_init(dir,&PW.identity);
     /* Main's validated driver cache is the sole opaque-cache reader/writer. */
     pipeline_cache_start();PW.loaded_bytes=PC.loaded_bytes;
     fprintf(stderr,"[nvn-vulkan] PIPELINE_CACHE mode=%d loaded_bytes=%llu shader_crc=%08x key_size=%zu\n",PW.mode,(unsigned long long)PW.loaded_bytes,PW.identity.shader_crc,sizeof(StablePso));
@@ -202,8 +205,6 @@ static void pipeline_worker_start(void) {
     else{char seed[1200];snprintf(seed,sizeof seed,"%s/pso_manifest.vkbin",G.shader_root);pipeline_manifest_load(seed,warm);}
     pipeline_manifest_load(PW.legacy_path,warm);
     pipeline_manifest_load(PW.manifest_path,warm);
-    {const char *off=getenv("DM_DISABLE_PSO_ASYNC"),*budget=getenv("DM_PSO_ASYNC_BUDGET_US");
-     PW.async=PW.mode==2&&!(off&&*off);PW.async_budget_ns=(uint64_t)(budget&&atoi(budget)>0?atoi(budget):3000)*1000ull;}
     {   /* 编译线程数：缺省 3（至少留 2 个核给游戏线程和回放线程），DM_PSO_WORKERS 覆盖，1 = 原单线程行为 | Compile threads: default 3 (leave at least 2 cores for the game and replay threads), DM_PSO_WORKERS overrides, 1 = the old single-thread behaviour */
         long cpus=sysconf(_SC_NPROCESSORS_ONLN);const char *w=getenv("DM_PSO_WORKERS");
         int want=w&&atoi(w)>0?atoi(w):(cpus>=6?3:cpus>=4?2:1);if(want>PSO_WORKERS_MAX)want=PSO_WORKERS_MAX;
@@ -215,40 +216,7 @@ static void pipeline_worker_start(void) {
     PW.started=1;
     fprintf(stderr,"[nvn-vulkan] PIPELINE_WARM_START entries=%u queued=%u mode=%d workers=%d\n",PW.count,atomic_load(&PW.warm_pending),PW.mode,PW.workers);
 }
-static Pso pipeline_obtain(const PsoKey *key,uint64_t hash,VShader *v,VShader *f,int *skipped) {
-    uint64_t t=dm_android_nvn_clock_ns();Pso pso={0};int obtained=0;
-    if(skipped)*skipped=0;
-    if(PW.started&&PW.mode==2&&!G.disable_pso_reuse&&G.npso<LIMIT_PSOS){
-        StablePso stable=pipeline_stable(key);pthread_mutex_lock(&PW.lock);int at=pipeline_find(&stable);
-        if(at<0&&PW.count<LIMIT_PSOS){at=(int)PW.count++;PW.jobs[at]=(PipelineJob){.stable=stable,.state=PJ_QUEUED};PW.generation++;}
-        if(at>=0){PipelineJob *j=&PW.jobs[at];j->demand=1;pthread_cond_signal(&PW.changed);
-            int waited=j->state==PJ_QUEUED||j->state==PJ_BUILDING;if(waited)PW.waits++;
-            if(skipped&&PW.async&&!key->compute){
-                /* 本帧等待预算内才等，预算用完就跳过这次绘制，管线继续在后台编译 | Wait only inside this frame's budget; once spent, skip the draw while the pipeline keeps compiling in the background */
-                while((j->state==PJ_QUEUED||j->state==PJ_BUILDING)&&PW.frame_wait_ns<PW.async_budget_ns){
-                    uint64_t left=PW.async_budget_ns-PW.frame_wait_ns,started=dm_android_nvn_clock_ns();
-                    struct timespec deadline;clock_gettime(CLOCK_REALTIME,&deadline);
-                    uint64_t ns=(uint64_t)deadline.tv_nsec+left;deadline.tv_sec+=(time_t)(ns/1000000000ull);deadline.tv_nsec=(long)(ns%1000000000ull);
-                    pthread_cond_timedwait(&PW.changed,&PW.lock,&deadline);
-                    PW.frame_wait_ns+=dm_android_nvn_clock_ns()-started;
-                }
-                if(j->state==PJ_QUEUED||j->state==PJ_BUILDING){*skipped=1;PW.skips++;pthread_mutex_unlock(&PW.lock);
-                    PW.wait_ns+=dm_android_nvn_clock_ns()-t;G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-t;return pso;}
-            }
-            while(j->state==PJ_QUEUED||j->state==PJ_BUILDING)pthread_cond_wait(&PW.changed,&PW.lock);
-            if(j->state==PJ_READY){pso=j->pso;j->state=PJ_CLAIMED;obtained=1;PW.claims++;
-                fprintf(stderr,"[nvn-vulkan] PIPELINE_USE seed=%d waited=%d wait_ns=%llu compute=%u\n",j->seed,waited,(unsigned long long)(dm_android_nvn_clock_ns()-t),key->compute);}
-        }
-        pthread_mutex_unlock(&PW.lock);PW.wait_ns+=dm_android_nvn_clock_ns()-t;
-    }
-    if(!obtained){uint64_t begin=dm_android_nvn_clock_ns();CHECK(pipeline_build(key,v,f,&pso));PW.sync_creates++;
-        fprintf(stderr,"[nvn-vulkan] PIPELINE_CREATE source=synchronous compute=%u result=0 build_ns=%llu\n",key->compute,(unsigned long long)(dm_android_nvn_clock_ns()-begin));
-        if(PW.started){StablePso stable=pipeline_stable(key);pthread_mutex_lock(&PW.lock);int at=pipeline_find(&stable);
-            if(at<0&&PW.count<LIMIT_PSOS){at=(int)PW.count++;PW.jobs[at]=(PipelineJob){.stable=stable,.state=PJ_CLAIMED};}
-            PW.generation++;pthread_cond_signal(&PW.changed);pthread_mutex_unlock(&PW.lock);}
-    }
-    G.profile_pipeline_ns+=dm_android_nvn_clock_ns()-t;return pso_remember(key,hash,pso);
-}
+#include "nvn_vk_pipeline_obtain.inc"
 int mtl_warm_wait(int timeout) {
     if(timeout<=0||!PW.started||!atomic_load(&PW.warm_pending))return 0;
     uint64_t begin=dm_android_nvn_clock_ns(),until=begin+(uint64_t)timeout*1000000;
@@ -256,6 +224,5 @@ int mtl_warm_wait(int timeout) {
     return (int)((dm_android_nvn_clock_ns()-begin)/1000000);
 }
 static void pipeline_frame(uint64_t frame) {
-    PW.frame_wait_ns=0;
     if(PW.trace)fprintf(stderr,"[nvn-vulkan] PIPELINE_FRAME pid=%d frame=%llu mono_ns=%llu mode=%d cached=%u sync_creates=%llu claims=%llu waits=%llu wait_ns=%llu bg_created=%llu bg_ns=%llu pending=%u\n",getpid(),(unsigned long long)frame,(unsigned long long)dm_android_nvn_clock_ns(),PW.mode,G.npso,(unsigned long long)PW.sync_creates,(unsigned long long)PW.claims,(unsigned long long)PW.waits,(unsigned long long)PW.wait_ns,(unsigned long long)atomic_load(&PW.background_creates),(unsigned long long)atomic_load(&PW.background_ns),atomic_load(&PW.warm_pending));
 }

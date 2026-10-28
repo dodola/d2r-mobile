@@ -11,6 +11,7 @@
 #include <sys/system_properties.h>
 #include "nvn_vk_slot_policy.h"
 #include "nvn_vk_nan_minmax.h"
+#include "nvn_vk_inline.h"
 #include "nvn_obj.h"
 #include "nvn_vk_attachment_plan.h"
 #include "nvn_vk_coverage.h"
@@ -39,7 +40,7 @@
 #include "../../android/nvn_platform_backend.h"
 
 void dm_guest_write_prepare(void *address,size_t length);
-static int g_bc_passthrough,g_texture_upload_batch,g_nan_minmax;
+static int g_bc_passthrough,g_texture_upload_batch,g_nan_minmax,g_inline_helpers;
 
 #define LIMIT_POOLS 512
 #define LIMIT_OBJECTS 4096
@@ -681,6 +682,13 @@ static void backend_init(void) {
     G.profile=nvn_vk_gpu_profile_make(&G.properties,&driver_properties,&G.subgroup);
     G.quirks=nvn_vk_quirk_registry_resolve(&G.profile);
     G.pipeline_cache_key=nvn_vk_pipeline_cache_key_make(&G.properties,&G.profile,&G.quirks);
+    g_inline_helpers=dm_vk_inline_default(G.properties.vendorID,G.properties.deviceName);
+    { const char *e=getenv("DM_VK_INLINE_HELPERS"),*dir=getenv("DM_VK_PIPELINE_DIR");
+      if(e)g_inline_helpers=atoi(e)!=0;
+      char path[1200];if(dir&&snprintf(path,sizeof path,"%s/gfx-inline",dir)<(int)sizeof path){FILE *f=fopen(path,"rb");if(f){g_inline_helpers=fgetc(f)!='0';fclose(f);}}
+    }
+    if(g_inline_helpers)G.pipeline_cache_key.shader_abi|=NVN_VK_PIPELINE_SHADER_INLINE;
+    fprintf(stderr,"[nvn-vulkan] INLINE_POLICY enabled=%d revision=%u model=%d\n",g_inline_helpers,DM_VK_INLINE_REVISION,dm_vk_adreno_model(G.properties.deviceName));
     g_nan_minmax=getenv("DM_DISABLE_NAN_MINMAX")==NULL;
     nvn_vk_pipeline_cache_key_nan_minmax(&G.pipeline_cache_key,g_nan_minmax);
     fprintf(stderr,"[nvn-vulkan] NAN_MINMAX enabled=%d shader_abi=%u\n",g_nan_minmax,G.pipeline_cache_key.shader_abi);
@@ -2397,7 +2405,7 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         if(s->storage_bias.mask)fprintf(stderr,"[nvn-vulkan] STORAGE_BIAS_MODULE shader=%s mask=%#llx bytes=%zu\n",s->key,(unsigned long long)s->storage_bias.mask,size);
     }
     {const char *ov=getenv("DM_SHADER_OVERRIDE_DIR");
-        if(ov&&!warm){char opath[1200];FILE *of;
+        if(ov){char opath[1200];FILE *of;
             if(snprintf(opath,sizeof opath,"%s/%s.spv",ov,s->key)<(int)sizeof opath&&(of=fopen(opath,"rb"))){
                 long on=(fseek(of,0,SEEK_END)==0)?ftell(of):-1;uint8_t *ob=(on>20&&on%4==0&&fseek(of,0,SEEK_SET)==0)?malloc((size_t)on):NULL;
                 if(ob&&fread(ob,1,(size_t)on,of)==(size_t)on){free(bytes);bytes=ob;size=(size_t)on;fprintf(stderr,"[nvn-vulkan] SHADER_OVERRIDE shader=%s bytes=%ld\n",s->key,on);}else free(ob);
@@ -2408,6 +2416,12 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         NvnVkNanMinmaxStats fix;
         if(size%4||!nvn_vk_nan_minmax((uint32_t *)bytes,size/4,&fix))die("NaN minmax SPIR-V structure",size);
         fprintf(stderr,"[nvn-vulkan] NAN_MINMAX_SHADER key=%s stage=%u warm=%d min=%zu max=%zu clamp=%zu\n",key,stage,warm,fix.min,fix.max,fix.clamp);
+    }
+    if(g_inline_helpers){uint32_t *inlined=NULL;size_t count=0;
+        uint64_t start=dm_android_nvn_clock_ns();int result=dm_vk_inline_helpers((uint32_t*)bytes,size/4,&inlined,&count);
+        if(result<0)die("subgroup helper inlining failed",size);
+        if(result){free(bytes);bytes=(uint8_t*)inlined;size=count*4;}
+        fprintf(stderr,"[nvn-vulkan] INLINE_SHADER key=%s stage=%u warm=%d changed=%d ns=%llu\n",key,stage,warm,result,(unsigned long long)(dm_android_nvn_clock_ns()-start));
     }
     const char *dump=getenv("DM_ADAPTED_SHADER_DIR");
     if(dump&&!warm){char path[1200];if(snprintf(path,sizeof(path),"%s/%s.spv",dump,s->key)>=(int)sizeof path)die("adapted shader dump path",0);
@@ -2864,6 +2878,7 @@ static VkImageView submission_image_view(const VkImageViewCreateInfo *info) {
     if(cacheable){S.view_keys[index]=key;S.view_table[slot]=index+1;}
     return S.temporary_views[index];
 }
+#include "nvn_vk_cam_runtime.inc"
 #include "nvn_vk_uniform_runtime.inc"
 static void binding_plan_remember(VShader *s,VkDescriptorSet set,const BindingResource *resources,int safe) {
     BindingPlan *plan=s->plan;
@@ -2901,7 +2916,7 @@ static VkDescriptorSet binding_plan_try(VShader *s) {
         if(!r.addr||!r.size){binding_plan_miss(PLAN_MISS_BUFFER_RANGE);return VK_NULL_HANDLE;}
         const BindingBuffer *cached=&plan->resources[i].buffer;int dynamic=(s->dyn_bindings>>i)&1;
         VkDescriptorBufferInfo version;uint64_t serial=0;
-        if(uniform_snapshot(r,&version,&serial)){
+        if(uniform_snapshot(r,&version,&serial,strcmp(s->key,"1188eaedc8db3285")!=0)){
             if(cached->arena_epoch!=S.epoch||cached->buffer!=version.buffer||cached->range.size!=r.size||cached->pool_serial!=serial){binding_plan_miss(PLAN_MISS_BUFFER_POOL);return VK_NULL_HANDLE;}
             if(!dynamic&&cached->offset!=version.offset){binding_plan_miss(PLAN_MISS_BUFFER_OFFSET);return VK_NULL_HANDLE;}
             if(dynamic)live_dyn[i]=(uint32_t)version.offset;G.profile_plan_buffers++;continue;
@@ -3146,7 +3161,7 @@ static VkDescriptorSet bind_shader(VShader *s) {
            }
            if(!r.addr || !r.size){fprintf(stderr,"[nvn-vulkan] BUFFER_MISSING shader=%s stage=%u binding=%u kind=%u slot=%d addr=%#llx size=%llu\n",s->key,s->h.stage,b->binding,b->kind,b->slot,(unsigned long long)r.addr,(unsigned long long)r.size);die("unbound original shader buffer",b->slot);}
            VkDescriptorBufferInfo version;uint64_t version_pool=0;
-           if(b->kind==2&&uniform_snapshot(r,&version,&version_pool)){
+           if(b->kind==2&&uniform_snapshot(r,&version,&version_pool,strcmp(s->key,"1188eaedc8db3285")!=0)){
                bi[i]=version;
                if(plan_safe)plan_resources[i].buffer=(BindingBuffer){.range=r,.pool_serial=version_pool,.offset=version.offset,.arena_epoch=S.epoch,.buffer=version.buffer};
                if(G.capture_feedback){
@@ -3770,6 +3785,7 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
     ps=depth_input_select(vs,ps);
     if(G.skip_ps[0]&&ps&&!strcmp(ps->key,G.skip_ps))return;
     S.read_snapshots_allowed=1;
+    camera_preflight(vs,ps);
     if(G.buffer_versions)read_snapshot_writers(vs,ps);
     for(unsigned stage=0;stage<2;stage++){VShader *s=stage?ps:vs;if(!s)continue;
         for(unsigned i=0;i<s->h.nb;i++){RBinding *b=&s->b[i];if(((b->kind==3||b->kind==9)&&b->flags)||b->kind==6||b->type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)S.read_snapshots_allowed=0;}
@@ -3969,7 +3985,8 @@ static void draw(const p_draw *a,const p_draw_idx *idx,int instances,int base_in
     if(cached)pso=*cached;
     else pso=pipeline_obtain(&key,hash,vs,ps,&pso_pending);
     int cache_commands=G.enable_command_cache&&!G.trace_frame;
-    /* 管线还在后台编译且本帧等待预算用完：只跳过实际绘制，其余状态照常 | Pipeline still compiling and this frame's wait budget is spent: only the actual draw is skipped, all other state proceeds as usual */
+    /* 只有用户显式允许故障降级时才省略隔离的管线。
+     * Omit quarantined pipelines only when the user explicitly enables failure degradation. */
     if(!pso_pending){
     command_bind_profile(NVN_VK_CMD_PIPELINE,nvn_vk_cmd_pipeline(&S.command_state,cache_commands,S.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pso.pipeline));
     command_bind_profile(NVN_VK_CMD_DESCRIPTORS,nvn_vk_cmd_descriptors(&S.command_state,cache_commands,S.command,
@@ -4032,6 +4049,7 @@ static void dispatch(const p_dispatch *p) {
     for(unsigned axis=0;axis<3;axis++)if(groups[axis]>G.properties.limits.maxComputeWorkGroupCount[axis])die("dispatch device group limit",axis);
     if(memcmp(G.state.dispatch,groups,sizeof groups)){memcpy(G.state.dispatch,groups,sizeof groups);G.ssbo_revision[5]++;G.binding_revision[5]++;}
     VShader *s=program_stage(5);
+    camera_preflight(s,NULL);
     if(G.buffer_versions)read_snapshot_writers(s,NULL);
     S.nimage_uses=0;collect_image_uses(s);prepare_comparison_images(s);
     VkDescriptorSet set=bind_shader(s);
@@ -4041,6 +4059,7 @@ static void dispatch(const p_dispatch *p) {
     uint64_t hash=0;Pso pso,*cached=pso_lookup(&key,&hash);
     if(cached)pso=*cached;
     else pso=pipeline_obtain(&key,hash,s,NULL,NULL);
+    if(!pso.pipeline)return;
     int cache_commands=G.enable_command_cache&&!G.trace_frame;
     command_bind_profile(NVN_VK_CMD_PIPELINE,nvn_vk_cmd_pipeline(&S.command_state,cache_commands,S.command,VK_PIPELINE_BIND_POINT_COMPUTE,pso.pipeline));
     command_bind_profile(NVN_VK_CMD_DESCRIPTORS,nvn_vk_cmd_descriptors(&S.command_state,cache_commands,S.command,
@@ -4871,7 +4890,6 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         double elapsed_ms=(now-G.profile_start_ns)/1e6;
         double fps=elapsed_ms>0?1000.0*G.profile_frames/elapsed_ms:0;
         fprintf(stderr,"[nvn-vulkan] RENDER_PROFILE frame=%llu frames=%llu fps=%.3f elapsed_ms=%.3f pipeline_ms=%.3f gpu_wait_ms=%.3f upload_decode_ms=%.3f submits=%llu draws=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,fps,elapsed_ms,G.profile_pipeline_ns/1e6,G.profile_wait_ns/1e6,G.profile_decode_ns/1e6,(unsigned long long)G.profile_submits,(unsigned long long)(G.draws-G.profile_draws));
-        if(PW.async)fprintf(stderr,"[nvn-vulkan] PSO_ASYNC frame=%llu skipped_draws_total=%llu budget_us=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)PW.skips,(unsigned long long)(PW.async_budget_ns/1000));
         fprintf(stderr,"[nvn-vulkan] RENDER_TEXTURE_COPY_PROFILE frame=%llu frames=%llu calls=%llu scaled=%llu destination_texels=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,(unsigned long long)G.profile_t2t_copies,(unsigned long long)G.profile_t2t_scaled,(unsigned long long)G.profile_t2t_texels);
         G.profile_t2t_copies=G.profile_t2t_scaled=G.profile_t2t_texels=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_SUBMIT_CLASS_PROFILE frame=%llu total_submits=%llu observed_eligible_candidates=%llu candidate_fence_wait_ms=%.3f pool_writeback_bytes=%llu events=%llu counter_reports=%llu write_submits=%llu event_submits=%llu report_submits=%llu trace_submits=%llu cpu_readback_submits=%llu event_wait_submits=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_submits,(unsigned long long)G.profile_submit_candidates,G.profile_candidate_wait_ns/1e6,(unsigned long long)G.profile_writeback_bytes,(unsigned long long)G.profile_events,(unsigned long long)G.profile_reports,(unsigned long long)G.profile_write_submits,(unsigned long long)G.profile_event_submits,(unsigned long long)G.profile_report_submits,(unsigned long long)G.profile_trace_submits,(unsigned long long)G.profile_cpu_readback_submits,(unsigned long long)G.profile_event_wait_submits);

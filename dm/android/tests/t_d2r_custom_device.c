@@ -222,7 +222,13 @@ int main(int argc,char **argv) {
     message("OptionsPanelMessage","ResetToDefaults","");run();CHECK(!checked(fps)&&checked(clear)&&checked(store)&&checked(mode[0])&&get("render_mode")==2);
     message("OptionsPanelMessage","CancelChanges","");run();CHECK(checked(fps)&&!checked(clear)&&checked(mode[2])&&!panel[0x1a0]);
     message("OptionsPanelMessage","ResetToDefaults","");run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(get("render_mode")==0&&quality_mode()==0&&!get("show_fps")&&get("clear_merge"));
-    char mods_path[1200];snprintf(mods_path,sizeof mods_path,"%s/mods/example",dir);CHECK(!mkdir(mods_path,0700));snprintf(path,sizeof path,"%s/package.txt",mods_path);f=fopen(path,"w");CHECK(f);fclose(f);
+    /* 当前 MOD 列表验证基础包哈希；使用合成的 abc 配置而非空描述文件。
+     * The current MOD list verifies the base hash; use a synthetic abc config instead of an empty descriptor. */
+    snprintf(path,sizeof path,"%s/romfs-overlay",dir);CHECK(!mkdir(path,0700));
+    snprintf(path,sizeof path,"%s/romfs-overlay/data",dir);CHECK(!mkdir(path,0700));
+    snprintf(path,sizeof path,"%s/romfs-overlay/data/.build.config",dir);f=fopen(path,"w");CHECK(f);fputs("abc",f);fclose(f);
+    char mods_path[1200];snprintf(mods_path,sizeof mods_path,"%s/mods/example",dir);CHECK(!mkdir(mods_path,0700));snprintf(path,sizeof path,"%s/package.txt",mods_path);f=fopen(path,"w");CHECK(f);
+    fputs("d2r-mod-v1\nbuild db0507f36b84200ac05f75d76ed5026f\nbase a9993e364706816aba3e25717850c26c9cd0d89d\nend\n",f);fclose(f);
     void (*settings_init)(const char *)=dlsym(lib,"dm_android_custom_settings_init");CHECK(settings_init);settings_init(dir);
     platform_message("PanelManager","OpenPanel","TouchCustom_mod");run();CHECK(!panel[0x1a0]);
     platform_message("PanelManager","ClosePanel","TouchCustom_mod");run();CHECK(panel[0x1a0]&&!get("mod"));
@@ -244,6 +250,19 @@ int main(int argc,char **argv) {
     int loaded_mode=0,loaded_clear=0,loaded_store=0,loaded_mod=0;
     void (*settings_load)(int *,int *,int *,int *)=dlsym(lib,"dm_android_custom_settings_load");CHECK(settings_load);
     settings_load(&loaded_mode,&loaded_clear,&loaded_store,&loaded_mod);CHECK(loaded_mode==1&&loaded_clear&&loaded_store&&loaded_mod==1);
+    /* 镜头三选一同样在应用后生效；丢弃、恢复默认和重读设置均覆盖。
+     * The camera radio applies only on commit; discard, defaults and settings reload are covered. */
+    int (*camera_mode)(void)=dlsym(lib,"dm_cam_mode");CHECK(camera_mode);
+    const char *camera_names[]={"TouchCustom_cam","TouchCustom_cam_ots","TouchCustom_cam_fp"};uint8_t *camera[3];
+    for(int k=0;k<3;k++){camera[k]=widget(camera_names[k],DM_VT_TOGGLE,rows,1315,4800+k*180,70,70);row_children[count++]=(uintptr_t)camera[k];}
+    put64(rows,0x60,count);run();CHECK(camera_mode()==0&&checked(camera[0]));
+    camera[1][0xa88]=1;run();CHECK(panel[0x1a0]&&camera_mode()==0&&!get("cam"));
+    message("OptionsPanelMessage","CancelChanges","");run();CHECK(checked(camera[0])&&!checked(camera[1])&&!panel[0x1a0]);
+    camera[1][0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(camera_mode()==1&&get("cam")==1);
+    camera[2][0xa88]=1;run();message("OptionsPanelMessage","AcceptChanges","");run();CHECK(camera_mode()==2&&get("cam")==2&&!checked(camera[1]));
+    init(dir);run();CHECK(camera_mode()==2&&get("cam")==2);
+    message("OptionsPanelMessage","ResetToDefaults","");run();CHECK(checked(camera[0])&&camera_mode()==2);
+    message("OptionsPanelMessage","AcceptChanges","");run();CHECK(camera_mode()==0&&!get("cam"));
     printf("ANDROID_D2R_CUSTOM_OK checks=%d inline_settings=1 four_quality_choices=1 fps=1 graphics_flags=1 mod_cycle=1 apply_discard_defaults=1 persistence_failure_retry=1 checked_transport=1 synthetic_memory=1\n",checks);
     return 0;
 }

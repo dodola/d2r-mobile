@@ -1,10 +1,17 @@
 cmake_minimum_required(VERSION 3.22)
-project(d2r_mobile_android LANGUAGES C ASM)
+project(d2r_mobile_android LANGUAGES C CXX ASM)
 add_link_options(-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384)
 if(NOT ANDROID OR NOT ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_PLATFORM_LEVEL LESS 29)
   message(FATAL_ERROR "The native guest host requires Android 29+ arm64-v8a")
 endif()
 
+add_subdirectory(../third_party/spirv-tools ${CMAKE_CURRENT_BINARY_DIR}/spirv-tools)
+add_library(dm_vk_inline STATIC ../gfx/nvn/nvn_vk_inline.cpp)
+target_link_libraries(dm_vk_inline PUBLIC dm_spirv_opt)
+set_target_properties(dm_vk_inline PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_executable(dm_android_inline_probe EXCLUDE_FROM_ALL tests/t_inline_device.cpp)
+target_link_libraries(dm_android_inline_probe PRIVATE dm_vk_inline vulkan)
+target_compile_options(dm_android_inline_probe PRIVATE -UNDEBUG)
 add_library(dm_android_gfx OBJECT
   ../gfx/nvn/hle_nvn.c ../gfx/nvn/nvn_entry.S ../gfx/nvn/nvn_thunks.S
   ../gfx/nvn/nvn_tex.c ../gfx/nvn/nvn_dirty.c ../gfx/nvn/nvn_vk.c
@@ -14,7 +21,7 @@ target_include_directories(dm_android_gfx PRIVATE ../host . ../gfx/nvn ../gfx/nv
 target_compile_options(dm_android_gfx PRIVATE -Wall -Wextra -Werror -Wno-format -Wno-unused-function -ffixed-x18)
 target_compile_definitions(dm_android_gfx PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0 DM_EXPECT_VULKAN_BACKEND=1)
 set_target_properties(dm_android_gfx PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(dm_android_gfx PUBLIC vulkan android log dl z m)
+target_link_libraries(dm_android_gfx PUBLIC dm_vk_inline vulkan android log dl z m)
 set(DM_HOST ../host)
 
 add_library(dm_android_core OBJECT
@@ -33,7 +40,7 @@ add_library(dm_android_core OBJECT
   # object layouts (vault/pouch/actions/cursor/world, etc.) remain opt-in
   # title adapters below and must not be inferred from another title.
   ${DM_HOST}/dm_hud.c ${DM_HOST}/dm_textbox_core.c ${DM_HOST}/dm_rwlv_core.c
-  ${DM_HOST}/dm_custom.c ${DM_HOST}/dm_i18n.c
+  ${DM_HOST}/dm_custom.c ${DM_HOST}/dm_i18n.c ${DM_HOST}/dm_cam.c
   ${DM_HOST}/dm_namegen.c
   lifecycle_android.c
   save_notice_android.c
@@ -63,7 +70,7 @@ add_executable(dm_android_zcull_probe EXCLUDE_FROM_ALL tests/t_nvn_zcull_device.
 target_include_directories(dm_android_zcull_probe PRIVATE ../host . ../gfx/nvn ../gfx/nvn/include)
 target_compile_options(dm_android_zcull_probe PRIVATE -Wall -Wextra -Werror -Wno-format -Wno-unused-function -ffixed-x18)
 target_compile_definitions(dm_android_zcull_probe PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0 DM_VK_COPY_TEST)
-target_link_libraries(dm_android_zcull_probe PRIVATE dm_android_core vulkan android log dl z m)
+target_link_libraries(dm_android_zcull_probe PRIVATE dm_android_core dm_vk_inline vulkan android log dl z m)
 
 # Calls only the real NVN texture-view API; no Vulkan initialization or assets.
 add_executable(dm_android_view_probe EXCLUDE_FROM_ALL tests/t_nvn_view_device.c)
@@ -82,7 +89,7 @@ add_executable(dm_android_memory_trim_probe EXCLUDE_FROM_ALL tests/t_memory_trim
 target_include_directories(dm_android_memory_trim_probe PRIVATE ../host . ../gfx/nvn ../gfx/nvn/include)
 target_compile_options(dm_android_memory_trim_probe PRIVATE -Wall -Wextra -Werror -Wno-format -Wno-unused-function -ffixed-x18)
 target_compile_definitions(dm_android_memory_trim_probe PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0)
-target_link_libraries(dm_android_memory_trim_probe PRIVATE dm_android_core vulkan android log dl z m)
+target_link_libraries(dm_android_memory_trim_probe PRIVATE dm_android_core dm_vk_inline vulkan android log dl z m)
 
 add_executable(dm_android_draw_probe EXCLUDE_FROM_ALL tests/t_draw_parameters_device.c)
 target_compile_options(dm_android_draw_probe PRIVATE -Wall -Wextra -Werror)
@@ -235,7 +242,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
   if(DM_ANDROID_DEBUG_CONSOLE AND NOT DM_ANDROID_D2R_HOST_MODULES)
     message(FATAL_ERROR "The QA console requires DM_ANDROID_D2R_HOST_MODULES")
   endif()
-  add_library(d2r_mobile_android SHARED app_jni.c d2r_mod_loader.c ${DM_RESOURCE_PROBE_SOURCE})
+  add_library(d2r_mobile_android SHARED app_jni.c camera_android.c d2r_mod_loader.c ${DM_RESOURCE_PROBE_SOURCE})
   if(DM_ANDROID_DEBUG_CONSOLE)
     target_sources(d2r_mobile_android PRIVATE d2r_debug_mode.c d2r_debug_ui.c)
     target_compile_definitions(d2r_mobile_android PRIVATE DM_ANDROID_DEBUG_CONSOLE=1)
@@ -246,7 +253,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
     message(FATAL_ERROR "D2R 94012 adapters require a matching DM_ANDROID_VAULT_TABLE")
   endif()
   target_sources(d2r_mobile_android PRIVATE d2r_haptics_android.c
-    d2r_host_modules.c d2r_save_adapter.c granny_android.c ${DM_HOST}/hle_granny.c ${DM_HOST}/dm_textbox.c ${DM_HOST}/dm_textinput.c ${DM_HOST}/dm_turnsmooth.c
+    d2r_host_modules.c d2r_save_adapter.c granny_android.c ${DM_HOST}/hle_target.c ${DM_HOST}/hle_granny.c ${DM_HOST}/dm_textbox.c ${DM_HOST}/dm_textinput.c ${DM_HOST}/dm_turnsmooth.c
     ${DM_HOST}/dm_dropfilter.c ${DM_HOST}/dm_drophaptic.c ${DM_HOST}/dm_townwp.c ${DM_HOST}/hle_private_aim.c
     ${DM_HOST}/dm_rift.c ${DM_HOST}/dm_bossrush.c ${DM_HOST}/dm_rift_ui.c ${DM_HOST}/dm_padmode.c
     ../ios/Sources/dm_touch_game_state.c ../ios/Sources/dm_touch_game_identity.c

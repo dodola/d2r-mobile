@@ -38,6 +38,7 @@ SRC=\
 	dm_cursor.c \
 	dm_cursor_item.c \
 	dm_custom.c \
+	dm_cam.c \
 	dm_dropfilter.c \
 	dm_drophaptic.c \
 	dm_elysium.c \

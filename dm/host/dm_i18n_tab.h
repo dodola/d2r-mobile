@@ -476,4 +476,13 @@ static const struct { const char *k, *zh, *en, *es, *mx, *ru; } k_dm_i18n[] = {
     { "dmLaunchSaveScopeHint", "导入仅影响上方当前模式，不同 MOD 的备份不能混用。", "Imports affect only the mode above. Backups from different MODs cannot be mixed.", "La importación solo afecta al modo indicado. No mezcles copias de distintos MOD.", "La importación solo afecta al modo indicado. No mezcles copias de distintos MOD.", "Импорт затрагивает только выбранный режим. Нельзя смешивать копии разных MOD." },
     { "dmLaunchMore", "说明", "Details", "Detalles", "Detalles", "Подробнее" },
     { "dmLaunchExportBackup", "导出上次自动备份", "Export previous automatic backup", "Exportar copia automática anterior", "Exportar copia automática anterior", "Экспорт предыдущей автоматической копии" },
+    { "dmCustomDebug", "调试模式（独立存档）", "Debug mode (separate saves)", "Modo debug", "Modo debug", "Режим отладки" },
+    { "dmCustomDebugAction", "开启 / 关闭", "Enable / disable", "Activar / desactivar", "Activar / desactivar", "Вкл. / выкл." },
+    { "dmCustomCam", "镜头视角", "Camera view", "Vista de cámara", "Vista de cámara", "Вид камеры" },
+    { "dmCustomCamOff", "原版视角", "Original view", "Vista original", "Vista original", "Исходный вид" },
+    { "dmCustomCamOffHint", "斜俯视，与原版相同", "Angled top-down, as in the original", "Vista cenital inclinada, como el original", "Vista cenital inclinada, como el original", "Наклонный вид сверху, как в оригинале" },
+    { "dmCustomCamOts", "越肩视角（实验）", "Over-the-shoulder (experimental)", "Sobre el hombro (experimental)", "Sobre el hombro (experimental)", "Из-за плеча (эксперимент)" },
+    { "dmCustomCamOtsHint", "右半屏上下拖动调整视角", "Drag up or down on the right half to tilt", "Arrastra arriba o abajo a la derecha para inclinar", "Arrastra arriba o abajo a la derecha para inclinar", "Тяните вверх-вниз справа для наклона" },
+    { "dmCustomCamFp", "第一人称（实验）", "First person (experimental)", "Primera persona (experimental)", "Primera persona (experimental)", "От первого лица (эксперимент)" },
+    { "dmCustomCamFpHint", "右半屏拖动转身和抬头", "Drag on the right half to turn and look", "Arrastra a la derecha para girar y mirar", "Arrastra a la derecha para girar y mirar", "Тяните справа для поворота и обзора" },
 };

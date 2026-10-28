@@ -18,10 +18,13 @@
 
 #define NVN_VK_PIPELINE_CACHE_KEY_VERSION 2u
 /* Bump when shader rewriting or pipeline interpretation changes incompatibly. */
-#define NVN_VK_PIPELINE_SHADER_ABI 4u
+#define NVN_VK_PIPELINE_SHADER_ABI 5u
 /* NaN 语义开关也属于着色器身份，隔离驱动缓存和预热清单。
  * The NaN semantic switch is part of shader identity, separating driver caches and warm-up manifests. */
 #define NVN_VK_PIPELINE_SHADER_NAN_MINMAX (1u << 16)
+/* 内联版本及开关进入 ABI，驱动缓存与预热清单一同失效。
+ * Inline revision and policy belong to the ABI, invalidating driver caches and manifests together. */
+#define NVN_VK_PIPELINE_SHADER_INLINE (1u << 17)
 
 typedef struct {
     uint32_t version;

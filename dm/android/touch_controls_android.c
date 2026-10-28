@@ -6,6 +6,10 @@
 #include "../host/dm.h"
 #include "../host/dm_hud.h"
 #include "../host/dm_custom.h"
+extern void dm_ui_map_hold(int on) __attribute__((weak));
+extern int dm_cam_mode(void) __attribute__((weak));
+extern void dm_cam_turn(float) __attribute__((weak));
+extern void dm_cam_tilt(float) __attribute__((weak));
 #include <jni.h>
 #include <errno.h>
 #include <math.h>
@@ -135,6 +139,8 @@ void dm_android_touch_set_game_state(const dm_android_touch_game_state *state) {
     if (ready) {
         if(controls.navigation_mode!=(game_state.navigation!=0))cancel_for_reason(DM_ATF_RESET_SCENE);
         dm_tc_set_navigation_mode(&controls,game_state.navigation);
+        if(dm_ui_map_hold)dm_ui_map_hold(game_state.navigation || (game_state.panel_bits & 4));
+        controls.cam_on=dm_cam_mode?dm_cam_mode():0;
     }
     controls.belt_rows=game_state.belt_rows>0?game_state.belt_rows:1;
     controls.belt_open=game_state.belt_open!=0;
@@ -166,6 +172,9 @@ int dm_android_touch_pointer(float *x,float *y,int *query_item) {
 void dm_android_touch_get_events(dm_android_touch_events *events) {
     if (!events) return; memset(events,0,sizeof *events);
     pthread_mutex_lock(&lock);
+    if(dm_cam_turn)dm_cam_turn(controls.cam_yaw);
+    if(dm_cam_tilt)dm_cam_tilt(controls.cam_pitch);
+    controls.cam_yaw=controls.cam_pitch=0;
     if (controls.world_tap_seq!=event_cursor.world_tap_seq && controls.layout.width>0 && controls.layout.height>0) { events->world_tap_seq=controls.world_tap_seq; events->world_x=controls.world_tap_x/controls.layout.width; events->world_y=controls.world_tap_y/controls.layout.height; }
     if (controls.mouse_click_seq!=event_cursor.mouse_click_seq && controls.layout.width>0 && controls.layout.height>0) { events->mouse_click_seq=controls.mouse_click_seq; events->mouse_x=controls.mouse_click_x/controls.layout.width; events->mouse_y=controls.mouse_click_y/controls.layout.height; }
     if (controls.tab_tap_seq!=event_cursor.tab_tap_seq) events->tab_tap_seq=controls.tab_tap_seq;

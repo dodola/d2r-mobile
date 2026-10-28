@@ -28,6 +28,21 @@ import org.json.JSONObject;
 
 public final class GameActivity extends Activity implements SurfaceHolder.Callback {
     static { System.loadLibrary("d2r_mobile_android"); }
+    static native int nativeCamActive();
+    static native void nativeCamTurn(float radians);
+    static native int nativeCamThreats(float[] output);
+    static native int nativeCamHeading(float[] output);
+    static native int nativeCamSensorMode();
+    private CamButtons camButtons;
+    private CamThreats camThreats;
+    private CamSensor camSensor;
+    private boolean cameraRunning;
+    private void syncCamera(){
+        boolean run=gameInputReady()&&inGame&&touchMode&&keyboardDialog==null&&saveFailureDialog==null&&!nativeDebugUiOpen()&&nativeCamActive()!=0;
+        if(run==cameraRunning)return;cameraRunning=run;
+        if(run){camButtons.start();camThreats.start();camSensor.start(nativeCamSensorMode());}
+        else{camButtons.stop();camThreats.stop();camSensor.stop();}
+    }
     private static native int nativeConfigure(String files, String locale,boolean touchRoute);
     private static native int nativeContentProfile(long romfsBytes,int[] addOnIndices);
     private static native int nativeTouch(int[] ids,float[] xs,float[] ys,boolean cancelled);
@@ -172,6 +187,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         // so the native Debug entry must get first refusal here.
         touchControls.setOnTouchListener((view,event) -> configured&&surfaceReady&&inputReady&&width>0&&height>0&&frontendTouch(event));
         viewport.addView(touchControls,new FrameLayout.LayoutParams(-1,-1));
+        camThreats=new CamThreats(this);viewport.addView(camThreats,new FrameLayout.LayoutParams(-1,-1));
+        camButtons=new CamButtons(this);viewport.addView(camButtons,new FrameLayout.LayoutParams(-1,-1));
+        camSensor=new CamSensor(this);
         fps=new TextView(this);fps.setText("FPS —");fps.setTextColor(TouchControlsView.TEXT);
         fps.setTextSize(12);fps.setTypeface(Typeface.MONOSPACE);fps.setGravity(Gravity.CENTER);
         fps.setMinWidth(dp(84));fps.setPadding(dp(8),dp(4),dp(8),dp(4));fps.setBackgroundColor(TouchControlsView.INK);
@@ -222,6 +240,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     // 对齐 iOS：局外自动隐藏，局内根据触摸/实体手柄来源切换。
     // Match iOS: hide outside a run and switch in-game with touch/physical-controller input.
     private void syncTouchOverlay(){
+        if(camButtons!=null)syncCamera();
         if(touchControls!=null)touchControls.setActive(inGame&&touchMode&&gameInputReady()&&keyboardDialog==null&&saveFailureDialog==null);
     }
     private boolean showFps(){return configured&&nativeShowFps();}
@@ -595,5 +614,5 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     @Override public void surfaceCreated(SurfaceHolder holder){if(!destroyed)surfaceReady=true;}
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){if(destroyed)return;width=w;height=h;surfaceReady=true;configureAndStart();}
     @Override public void surfaceDestroyed(SurfaceHolder holder){if(destroyed)return;surfaceReady=false;if(configured)publishSurface();}
-    @Override public void onDestroy(){if(!ownsGuest){super.onDestroy();return;}GameSessionGate.guestDestroyed();GraphicsDriverSettings.confirmStarted(this);if(debugOrientation!=null){try{unregisterReceiver(debugOrientation);}catch(RuntimeException ignored){}debugOrientation=null;}if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
+    @Override public void onDestroy(){if(!ownsGuest){super.onDestroy();return;}GameSessionGate.guestDestroyed();GraphicsDriverSettings.confirmStarted(this);if(debugOrientation!=null){try{unregisterReceiver(debugOrientation);}catch(RuntimeException ignored){}debugOrientation=null;}if(updateChecker!=null)updateChecker.close();nativeUpdateShutdown();if(inputManager!=null)inputManager.unregisterInputDeviceListener(deviceListener);clearControllers();if(configured){nativeLifecycle(1);nativeControllerCancel(0);}nativeKeyboardReady(false);if(keyboardDialog!=null){keyboardDialog.dismiss();keyboardDialog=null;}if(saveFailureDialog!=null){saveFailureDialog.dismiss();saveFailureDialog=null;}destroyed=true;inputReady=false;if(camButtons!=null){camButtons.stop();camThreats.stop();camSensor.stop();}surfaceReady=false;if(configured)publishSurface();ui.removeCallbacks(poll);nativeShutdown();surfaceThread.quitSafely();super.onDestroy();}
 }

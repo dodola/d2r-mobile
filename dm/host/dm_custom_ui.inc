@@ -23,7 +23,7 @@ static int custom_key_visible(int i) {
 #if defined(DM_ANDROID_HOST) && DM_ANDROID_HOST
     /* Keep the shared key table and its indices intact; Android has no cloud
      * implementation, so the iOS-only row must not participate in the UI. */
-    return (i<K_SHOW_FPS||dm_android_custom_settings_apply)&&(!dm_android_custom_settings_apply||i!=K_Q3D)&&strcmp(k_keys[i],"icloud")!=0;
+    return (i==K_CAM||i<K_SHOW_FPS||dm_android_custom_settings_apply)&&(!dm_android_custom_settings_apply||i!=K_Q3D)&&strcmp(k_keys[i],"icloud")!=0;
 #else
     return i<K_SHOW_FPS;
 #endif
@@ -66,12 +66,16 @@ void dm_custom_ui_pump(unsigned long long root) {
         uint64_t ev=o->keys(o->opaque,DM_BTN_UP|DM_BTN_DOWN|DM_BTN_A);
         if(ev&DM_BTN_DOWN)selected=custom_next_visible(selected,1);
         else if(ev&DM_BTN_UP)selected=custom_next_visible(selected,-1);
-        snprintf(name,sizeof name,"TouchCustom_%s",k_keys[selected]);cw=custom_find(o,sp,selected==0?k_lang_box[LANG_N-1]:selected==K_RENDER_MODE?"TouchCustom_render_mode_3":name);
+        snprintf(name,sizeof name,"TouchCustom_%s",k_keys[selected]);cw=custom_find(o,sp,selected==0?k_lang_box[LANG_N-1]:selected==K_CAM?k_cam_box[2]:selected==K_RENDER_MODE?"TouchCustom_render_mode_3":name);
         snprintf(name,sizeof name,"TouchCustom_%s_Text",k_keys[selected]);tw=custom_find(o,sp,name);
         if((ev&DM_BTN_A) && cw && (selected==K_MOD||selected==K_MAP_REVEAL||selected==K_DEBUG)) {
             if(o->action)o->action(o->opaque,cw);
         } else if((ev&DM_BTN_A) && cw && seen[selected].w==cw && seen[selected].gen==o->generation) {
-            if(selected==K_RENDER_MODE) {
+            if(selected==K_CAM){
+                int pd=atomic_load(&g_pend[selected]),shown=pd>=0?pd:atomic_load(&g_val[selected]),to=(shown+1)%3;
+                atomic_store(&g_pend[selected],to);
+                for(int k=0;k<3;k++)o->toggle(o->opaque,custom_find(o,sp,k_cam_box[k]),k==to);
+            }else if(selected==K_RENDER_MODE) {
                 int pd=atomic_load(&g_pend[selected]),shown=pd>=0?pd:atomic_load(&g_val[selected]);
                 atomic_store(&g_pend[selected],(shown+1)%4);
                 for(int k=0;k<4;k++){snprintf(name,sizeof name,"TouchCustom_render_mode_%d",k);o->toggle(o->opaque,custom_find(o,sp,name),k==(shown+1)%4);}
@@ -125,6 +129,16 @@ void dm_custom_ui_pump(unsigned long long root) {
             if(o->text)o->text(o->opaque,custom_find(o,sp,name),text);
 #endif
             continue;
+        }
+        if(i==K_CAM){
+            uint64_t boxes[3];int values[3],valid=1;
+            for(int k=0;k<3;k++){boxes[k]=custom_find(o,sp,k_cam_box[k]);values[k]=custom_toggle_value(o,boxes[k]);valid&=custom_visible(o,boxes[k])&&values[k]>=0;}
+            if(!valid){seen[i].w=0;continue;}
+            int pd=atomic_load(&g_pend[i]),shown=pd>=0?pd:atomic_load(&g_val[i]),to=shown;
+            if(seen[i].w==boxes[2]&&seen[i].gen==o->generation)for(int k=0;k<3;k++)if(k!=shown&&values[k]){to=k;break;}
+            for(int k=0;k<3;k++)o->toggle(o->opaque,boxes[k],k==to);
+            if(to!=shown)atomic_store(&g_pend[i],to);
+            seen[i].w=boxes[2];seen[i].gen=o->generation;continue;
         }
         if(i==K_RENDER_MODE) {
             uint64_t boxes[4];int values[4],valid=1;

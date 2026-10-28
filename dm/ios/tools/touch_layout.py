@@ -1186,7 +1186,7 @@ def _custom_key(key): return 'dmCustom' + ''.join(w.capitalize() for w in key.sp
 # Android deliberately has no platform cloud-sync implementation. Keep the
 # shared key table and its indices unchanged, but omit the iCloud row from the
 # Android layout. The default (iOS/macOS) keeps the complete row list.
-_ANDROID_KEYS = ('show_fps', 'render_mode', 'clear_merge', 'store_elide', 'mod', 'map_reveal', 'debug')
+_ANDROID_KEYS = ('show_fps', 'render_mode', 'clear_merge', 'store_elide', 'mod', 'map_reveal', 'debug', 'cam')
 
 def _custom_keys(platform=None):
     platform = (platform or os.environ.get('DM_PLATFORM', 'ios')).strip().lower()
@@ -1210,6 +1210,7 @@ _CUSTOM_TEST_ROWS = int(os.environ.get('DM_CUSTOM_TEST_ROWS', '0'))   # 测试�
 _CUSTOM_Q3D_H = 2 * _CUSTOM_LINE_H
 def _custom_geometry(keys):
     row_h = [(_CUSTOM_Q3D_H if k in ('q3d', 'touch_swap_above') else _CUSTOM_LINE_H) for k, _ in keys] + [_CUSTOM_LINE_H] * _CUSTOM_TEST_ROWS
+    row_h = [(3 * _CUSTOM_LINE_H if k == 'cam' else h) for (k, _), h in zip(keys, row_h)]
     row_h = [(4 * _CUSTOM_LINE_H if k == 'render_mode' else h) for (k, _), h in zip(keys, row_h)] + [_CUSTOM_LINE_H] * _CUSTOM_TEST_ROWS
     y = [_CUSTOM_TITLE_H + sum(row_h[:i]) for i in range(len(row_h))]
     return row_h, y, _CUSTOM_TITLE_H + sum(row_h)
@@ -1261,6 +1262,7 @@ def _custom_lang_row(y, compact=False):
 # "3D Quality" (Smoothness first (default, automatically lowers the 3D scale on frame drops) / Quality first (no automatic lowering)): a stacked two-option radio, each option with a line of small description text below its title.
 # It stores a single key q3d (1 = quality first): the "Quality first" checkbox is TouchCustom_q3d and the "Smoothness first" one is TouchCustom_q3d_smooth (its inverse); the host's dm_custom.c makes the two boxes mutually exclusive (like the language row).
 # TouchCustom_q3d_Text is an empty-text box tall enough to cover both options: the controller selection frame wraps the whole row by "the union of the top/bottom edges of the text box and the checkbox" (dm_custom.c), so it is used to frame both options together
+_CAM_OPTS=(('dmCustomCamOff','TouchCustom_cam'),('dmCustomCamOts','TouchCustom_cam_ots'),('dmCustomCamFp','TouchCustom_cam_fp'))
 def _custom_q3d_row(y, setting="q3d"):
     prefix = "TouchCustom_" + setting
     h = _CUSTOM_LINE_H
@@ -1273,8 +1275,10 @@ def _custom_q3d_row(y, setting="q3d"):
             '            "untoggledFrame": 0, "untoggledPressedFrame": 1, "untoggledHoveredFrame": 3, "untoggledDisabledFrame": 2,\n'
             '            "toggledFrame": 4, "toggledPressedFrame": 5, "toggledHoveredFrame": 6,\n'
             '            "onClickMessage": "PanelManager:ClosePanel:%s" } },\n') % (name, yy, name)
-    out = '        { "type": "TextBoxWidget", "name": "%s_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "" } },\n' % (prefix, y, _CUSTOM_Q3D_H)
-    choices = (('dmCustomQ3dSmooth', prefix + '_smooth'), ('dmCustomQ3dQuality', prefix)) if setting == 'q3d' else (('dmCustomTouchSwapNear', prefix + '_near'), ('dmCustomTouchSwapFar', prefix))
+    out = '        { "type": "TextBoxWidget", "name": "%s_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "" } },\n' % (prefix, y, (3 * h if setting == 'cam' else _CUSTOM_Q3D_H))
+    choices = (_CAM_OPTS if setting == 'cam' else
+               (('dmCustomQ3dSmooth', prefix + '_smooth'), ('dmCustomQ3dQuality', prefix)) if setting == 'q3d' else
+               (('dmCustomTouchSwapNear', prefix + '_near'), ('dmCustomTouchSwapFar', prefix)))
     for k, (key, nm) in enumerate(choices):
         yy = y + k * h
         out += text(nm + '_Label', yy + 10, 100, key, False) + text(nm + '_Hint', yy + 100, 70, key + 'Hint', True) + box(nm, yy + 15)
@@ -1307,7 +1311,7 @@ def _custom_page(text, keys=None):
            '            { "type": "TableWidget", "name": "OptionsTable", "fields": { "columns": [ "$OptionsTableColumn1", "$OptionsTableColumn2" ], "rowHeight": %d }, "children": [\n' % _CUSTOM_TITLE_H
            + title + '            ] },\n'
            + '            { "type": "Widget", "name": "TouchCustomRows", "fields": { "rect": { "x": 0, "y": 0, "width": 1500, "height": %d } }, "children": [\n' % height
-           + _custom_lang_row(y[0], compact='icloud' not in {k for k, _ in keys}) + ''.join((_custom_q3d_row(y[i], k) if k in ('q3d', 'touch_swap_above') else _custom_android_row(y[i], k, l) if k in _ANDROID_KEYS else _custom_toggle_row(y[i], k, l)) for i, (k, l) in enumerate(keys) if i) + _custom_lang_hint(y[0])
+           + _custom_lang_row(y[0], compact='icloud' not in {k for k, _ in keys}) + ''.join((_custom_q3d_row(y[i], k) if k in ('q3d', 'touch_swap_above', 'cam') else _custom_android_row(y[i], k, l) if k in _ANDROID_KEYS else _custom_toggle_row(y[i], k, l)) for i, (k, l) in enumerate(keys) if i) + _custom_lang_hint(y[0])
            + ''.join('        { "type": "TextBoxWidget", "name": "TouchCustomTest%d_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "@KeyBindingTypeCustom", "style": "$StyleSettingsText" } },\n'
                      % (n, y[len(keys) + n], _CUSTOM_LINE_H) for n in range(_CUSTOM_TEST_ROWS)) +
            # 手柄模式的选中框（同符文之语清单 TouchRwSel）：框住十字键选中的那一行，宿主摆（dm_custom.c）；触屏模式一直在屏外（只把 x 挪出去、y 留在内容范围内：滚动区按子控件的范围算内容高度，y 放到 99999 会把可滚范围撑到十万）。和各行在同一个容器里，跟着滚

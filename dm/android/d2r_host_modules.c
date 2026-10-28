@@ -44,11 +44,72 @@ static void d2r_event_message(const uint64_t *regs) {
     if (!regs || !atomic_load(&g_quiet_diff) || !dm_tg_vm_read(regs[0],event,sizeof event) || event[1]!=0x17) return;
     ((uint8_t *)(uintptr_t)regs[0])[1]=0xff;
 }
+static void cam_c2s(uint64_t G, uint64_t pl, const uint8_t *b, uint32_t n) {
+    int dm_cam_mode(void); void dm_cam_attack(float dx, float dz);
+    if (!n || !pl || dm_cam_mode() != 1) return;
+    uint8_t op = b[0]; float tx, ty;
+    if ((op == 0x05 || op == 0x08 || op == 0x0c || op == 0x0f) && n >= 5) {
+        // 对地点：触屏点按的自动选怪在这一版发的是「对目标所在格放」（Redmi 实测：贴着僵尸时 0x05 落在僵尸那格，离人 0.7 格；没有怪时落在脚下，同样 0.7 格），
+        // 光看距离分不出来。所以在那一格 2 格内找一只活着的怪，朝它的真实位置转；找不到 = 空放 / 对自己放，不转
+        // A location: touch auto-targeting in this build casts "at the target's cell" (measured on the Redmi: next to a zombie, 0x05 landed on the zombie's
+        // cell, 0.7 cells from the player; with no monster it landed at the feet, also 0.7 cells away), so distance alone cannot tell them apart. Look for a
+        // living monster within 2 cells of that cell and turn towards its real position; none = an empty cast or a cast on oneself, no turn
+        float lx = (float)(b[1] | b[2] << 8), ly = (float)(b[3] | b[4] << 8), best = 4; uint64_t u = 0; int found = 0;
+        for (int bk = 0; bk < 128; bk++) if (dm_tg_vm_read(G + 0x2230 + 1 * 0x400 + 8 * bk, &u, 8)) for (int k = 0; u && k < 4096; k++) {
+            uint32_t mode = 0; uint64_t tp = 0; uint32_t xy[2];
+            if (dm_tg_vm_read(u + 0xC, &mode, 4) && mode != 0 && mode != 12 && dm_tg_vm_read(u + 0x38, &tp, 8) && tp && dm_tg_vm_read(tp, xy, 8)) {
+                float mx = xy[0] / 65536.0f, my = xy[1] / 65536.0f, d2 = (mx - lx) * (mx - lx) + (my - ly) * (my - ly);
+                if (d2 < best) { best = d2; tx = mx; ty = my; found = 1; } }
+            if (!dm_tg_vm_read(u + 0x158, &u, 8)) break; }
+        if (!found) return;
+    }
+    else if ((op == 0x06 || op == 0x07 || op == 0x09 || op == 0x0a || op == 0x0d || op == 0x0e || op == 0x10 || op == 0x11) && n >= 9) {
+        uint32_t type = b[1] | b[2] << 8 | b[3] << 16 | (uint32_t)b[4] << 24, id = b[5] | b[6] << 8 | b[7] << 16 | (uint32_t)b[8] << 24; if (type > 1) return;
+        uint64_t u = 0, hit = 0;
+        for (int bk = 0; bk < 128 && !hit; bk++) if (dm_tg_vm_read(G + 0x2230 + type * 0x400 + 8 * bk, &u, 8)) for (int k = 0; u && k < 4096; k++) { uint32_t i2 = 0; if (dm_tg_vm_read(u + 8, &i2, 4) && i2 == id) { hit = u; break; } if (!dm_tg_vm_read(u + 0x158, &u, 8)) break; }
+        uint64_t tp = 0; uint32_t xy[2]; if (!hit || !dm_tg_vm_read(hit + 0x38, &tp, 8) || !tp || !dm_tg_vm_read(tp, xy, 8)) return;
+        tx = xy[0] / 65536.0f; ty = xy[1] / 65536.0f;
+    } else return;
+    uint64_t pp = 0; uint32_t pxy[2]; if (!dm_tg_vm_read(pl + 0x38, &pp, 8) || !pp || !dm_tg_vm_read(pp, pxy, 8)) return;
+    dm_cam_attack(tx - pxy[0] / 65536.0f, ty - pxy[1] / 65536.0f);
+}
+// 越肩镜头的怪物指示（dm_cam.c dm_cam_threats）：透视画面只看得见前方，怪从画面外很快贴上脸（维护者试玩）。每拍从服务端怪物表取玩家
+// DM_CAM_THREAT_RANGE（缺省 30）格内活着的怪（模式不是 0 死亡中 / 12 已死），去掉佣兵（类号 271 / 338 / 359 / 560 / 561），带上配色档（hle_target.c dm_threat_tier：普通 / 冠军 / 独特 / 首领）交给镜头；城里不取。
+// 玩家自己的召唤物（骷髅、魔像、狼、复活的怪等）不算：客户端宠物链表 main+0x2d33528（每项 +8 单位号、+0xc 属主号、+0x30 下一项，同 dm_actions.c
+// 喂佣兵处）里属主 = 玩家的单位号，扫怪时跳过；别人的召唤物照算
+// Monster indicators of the over-the-shoulder camera (dm_cam.c dm_cam_threats): the perspective picture only shows what is ahead, and monsters reach the
+// character's face from outside the picture fast (the maintainer's play test). Every tick, take the living monsters (mode neither 0 dying nor 12 dead)
+// within DM_CAM_THREAT_RANGE (default 30) cells of the player from the server monster table, drop mercenaries (classes 271 / 338 / 359 / 560 / 561), and
+// hand them with their tier to the camera; nothing in town. The player's own summons (skeletons, golems, wolves, revived
+// monsters and so on) do not count: the unit ids owned by the player in the client pet list main+0x2d33528 (each entry +8 unit id, +0xc owner id, +0x30
+// next, as at the mercenary feeding in dm_actions.c) are skipped while scanning; other players' summons still count
+static void cam_threats_tick(uint64_t G, uint64_t pl) {
+    int dm_cam_mode(void); void dm_cam_set_threats(const float *xy, const int *tier, int n); int dm_threat_tier(uint64_t unit);
+    if (dm_cam_mode() <= 0 || !pl) return;   // 越肩与第一人称都收（原先只认越肩，第一人称下一个也没有） | both over-the-shoulder and first person (it used to take mode 1 only, so first person had none)
+    static float range = -1; if (range < 0) { const char *e = getenv("DM_CAM_THREAT_RANGE"); range = e ? (float)atof(e) : 30; }
+    dm_hud_info h; dm_hud_get(&h); if (h.valid && dm_hud_area_is_town(h.area)) { dm_cam_set_threats(NULL, NULL, 0); return; }
+    uint64_t pp = 0; uint32_t pxy[2]; if (!dm_tg_vm_read(pl + 0x38, &pp, 8) || !pp || !dm_tg_vm_read(pp, pxy, 8)) return;
+    float px = pxy[0] / 65536.0f, py = pxy[1] / 65536.0f, xy[64]; int tier[32], n = 0; uint64_t u = 0;
+    uint32_t me = 0, pet[64]; int np = 0; module_t *m = g_d2r_main; uint64_t e = 0;   // 玩家自己的召唤物 | the player's own summons
+    if (m && dm_tg_vm_read(pl + 8, &me, 4) && dm_tg_vm_read((uint64_t)m->base + 0x2d33528, &e, 8))
+        for (int k = 0; e && k < 256 && np < 64; k++) { uint32_t id = 0, owner = 0; if (dm_tg_vm_read(e + 8, &id, 4) && dm_tg_vm_read(e + 0xc, &owner, 4) && owner == me) pet[np++] = id; if (!dm_tg_vm_read(e + 0x30, &e, 8)) break; }
+    for (int bk = 0; bk < 128 && n < 32; bk++) if (dm_tg_vm_read(G + 0x2230 + 1 * 0x400 + 8 * bk, &u, 8)) for (int k = 0; u && k < 4096 && n < 32; k++) {
+        uint32_t cls = 0, mode = 0, mxy[2]; uint64_t tp = 0;
+        uint32_t uid = 0; int mine = 0; if (np && dm_tg_vm_read(u + 8, &uid, 4)) for (int k = 0; k < np && !mine; k++) mine = pet[k] == uid;
+        if (!mine && dm_tg_vm_read(u + 4, &cls, 4) && dm_tg_vm_read(u + 0xC, &mode, 4) && mode != 0 && mode != 12 && cls != 271 && cls != 338 && cls != 359 && cls != 560 && cls != 561
+            && dm_tg_vm_read(u + 0x38, &tp, 8) && tp && dm_tg_vm_read(tp, mxy, 8)) {
+            float mx = mxy[0] / 65536.0f, my = mxy[1] / 65536.0f, dx = mx - px, dy = my - py;
+            if (dx * dx + dy * dy <= range * range) { int r = dm_threat_tier(u); xy[2 * n] = mx; xy[2 * n + 1] = my; tier[n++] = r < 0 ? 0 : r; } }
+        if (!dm_tg_vm_read(u + 0x158, &u, 8)) break; }
+    dm_cam_set_threats(xy, tier, n);
+}
+
 static void d2r_c2s(const uint64_t *regs) {
     uint8_t packet[512];
     if (!regs) return;
     uint32_t length=(uint32_t)regs[3];if(length>sizeof packet)length=sizeof packet;
     if (!length || !dm_tg_vm_read(regs[2],packet,length)) return;
+    cam_c2s(regs[0],regs[1],packet,length);
     dm_bossrush_c2s(regs[0],regs[1],packet,length);
     dm_rift_c2s(regs[0],packet,length);
 #ifdef DM_ANDROID_D2R_UI
@@ -162,6 +223,7 @@ int dm_android_d2r_players_get(uint8_t *main_base) {
  * modules can request a save without recursively acquiring that mutex. */
 void dm_android_d2r_rift_tick(uint64_t game,uint64_t player,uint8_t *main_base) {
     if(!g_attached || !g_private_gameplay || !game || !player || main_base!=g_d2r_main->base)return;
+    cam_threats_tick(game,player);
     d2r_players_apply();
     dm_bossrush_tick(game,player,main_base);
     dm_rift_tick(game,player,main_base);
